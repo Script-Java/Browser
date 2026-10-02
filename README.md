@@ -28,16 +28,27 @@ npx @railway/cli logs       # app logs
 npx @railway/cli open       # open the project in the Railway dashboard
 ```
 
-## Set a password
+## Set a password (required)
 
-Without a password, anyone who finds your address can use your proxy. Set one (pick your own) and redeploy:
+The deployed app won't start without a password and a signing secret, because without them anyone who finds your address could use your proxy. After the first `./railway.sh` (whose deploy will stop with a message asking for these), set both and deploy again:
 
 ```sh
 npx @railway/cli variable set "APP_PASSWORD=pick-a-long-password"
+npx @railway/cli variable set "AUTH_SECRET=$(openssl rand -hex 32)"
 ./railway.sh
 ```
 
-The app then opens on a password screen. A sign-in lasts 180 days on that device. The home screen app keeps its own sign-in, separate from Safari's, so sign in from the home screen app. **Lock** in the shield menu signs out. Changing the password signs every device out. After 8 wrong tries from one address, sign-in is blocked for 15 minutes.
+The app opens on a password screen. A sign-in lasts 180 days on that device. The home screen app keeps its own sign-in, separate from Safari's, so sign in from the home screen app. **Lock** in the shield menu signs out. Changing the password signs every device out. After 8 wrong tries from one address, sign-in is blocked for 15 minutes.
+
+## Limits
+
+So one user can't hog the server or its bandwidth bill:
+
+- The proxy only connects to ports 80 and 443 over TCP. Mail ports, other ports and UDP are refused, so the server can't be used for spam or port scans. Sites on unusual ports (like `:8080`) won't load.
+- Each address may hold 16 proxy connections open, with up to 128 site connections in each.
+- Each address may move 10 GB a day through the server (`DAILY_GB_PER_CLIENT`). After that, new connections and videos are refused until the day resets.
+
+Limits are per IP address (IPv6: per /64), so people behind one home router share them.
 
 ## Turn on site isolation (needs your own domain)
 
@@ -71,9 +82,10 @@ To try site isolation locally, run `ISOLATION_DOMAIN=app.localhost pnpm start` a
 
 | Variable | What it does |
 | --- | --- |
-| `APP_PASSWORD` | Turns on the password screen. |
+| `APP_PASSWORD` | Turns on the password screen. Required when `NODE_ENV=production` (the Docker image sets it). |
 | `ISOLATION_DOMAIN` | Turns on site isolation (see above). |
-| `AUTH_SECRET` | Optional extra secret mixed into the sign-in and settings cookies. |
+| `AUTH_SECRET` | Secret (32+ random characters) that signs the sign-in and settings cookies. Required in production. |
+| `DAILY_GB_PER_CLIENT` | Daily traffic allowance per address (default 10, `0` for no limit). |
 | `FILTER_REFRESH_HOURS` | How often block lists are re-downloaded (default 24). |
 | `FILTER_CACHE_DIR` | Where downloaded lists are kept between restarts (default: the system temp folder). |
 

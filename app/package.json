@@ -9,6 +9,7 @@
 	"scripts": {
 		"start": "node src/index.js",
 		"format": "prettier --write .",
+		"test": "node --test \"src/**/*.test.js\"",
 		"lint": "eslint ./src/",
 		"lint:fix": "eslint ./src/ --fix"
 	},

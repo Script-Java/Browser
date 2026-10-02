@@ -3,6 +3,7 @@
 // which /login hands out.
 
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
+import { clientKey } from "./limits.js";
 
 const COOKIE = "bios_auth";
 const SESSION_DAYS = 180;
@@ -89,7 +90,11 @@ export function createAuth({ password, secret, cookieDomain }) {
 		if (!entry || now - entry.since > ATTEMPT_WINDOW_MS)
 			attempts.set(ip, { count: 1, since: now });
 		else entry.count++;
-		if (attempts.size > 10_000) attempts.clear();
+		// Drop expired entries only: clearing everything would let a flood of
+		// addresses reset an attacker's own counter.
+		if (attempts.size > 10_000)
+			for (const [key, e] of attempts)
+				if (now - e.since > ATTEMPT_WINDOW_MS) attempts.delete(key);
 	}
 
 	/** Express middleware: blocks everything except PUBLIC_PATHS until signed in. */
@@ -115,7 +120,7 @@ export function createAuth({ password, secret, cookieDomain }) {
 
 	/** POST /login */
 	function login(req, res) {
-		const ip = req.ip || "unknown";
+		const ip = clientKey(req);
 		if (!enabled) return res.redirect("/");
 		if (tooManyAttempts(ip))
 			return res.redirect(

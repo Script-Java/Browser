@@ -208,8 +208,9 @@ function readAll(stream, limit) {
  * engine. Returns false (and sends nothing) when the request isn't one.
  * @param {import("express").Request} req
  * @param {import("express").Response} res
+ * @param {(bytes: number) => void} [countBytes] told about every chunk streamed
  */
-export async function serveMedia(req, res) {
+export async function serveMedia(req, res, countBytes = () => {}) {
 	if (req.method !== "GET" && req.method !== "HEAD") return false;
 	const target = sourceUrl(req.originalUrl);
 	if (!target) return false;
@@ -275,6 +276,7 @@ export async function serveMedia(req, res) {
 
 	if (up.headers["content-length"] !== undefined)
 		res.setHeader("Content-Length", up.headers["content-length"]);
+	up.on("data", (chunk) => countBytes(chunk.length));
 	pipeline(up, res, (err) => {
 		if (err && !res.headersSent) res.status(502).end();
 	});

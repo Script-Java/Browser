@@ -13,6 +13,7 @@ import { baremuxPath } from "@mercuryworkshop/bare-mux/node";
 import { createAuth, parseCookies } from "./auth.js";
 import { Filters } from "./filters.js";
 import { serveMedia } from "./media.js";
+import { clientKey, createLimits } from "./limits.js";
 import { DEFAULT_SETTINGS } from "./settings.js";
 
 // Ultraviolet is built from ../Ultraviolet (patched to support config.construct).
@@ -23,6 +24,18 @@ const publicPath = resolve(import.meta.dirname, "..", "public");
 
 const PASSWORD = process.env.APP_PASSWORD || "";
 const SECRET = process.env.AUTH_SECRET || "";
+
+// A public deploy without these is an open proxy (or one whose password can
+// be brute-forced offline from a single cookie), so refuse to start.
+if (process.env.NODE_ENV === "production" && (!PASSWORD || SECRET.length < 32)) {
+	console.error(
+		"APP_PASSWORD and AUTH_SECRET (32+ random characters) must be set in production.\n" +
+			'  npx @railway/cli variable set "APP_PASSWORD=pick-a-long-password"\n' +
+			'  npx @railway/cli variable set "AUTH_SECRET=$(openssl rand -hex 32)"'
+	);
+	process.exit(1);
+}
+
 // e.g. "browse.example.com": the shell runs there and every site gets its own
 // <key>.browse.example.com origin. Needs a wildcard DNS record and certificate.
 const ISOLATION = (process.env.ISOLATION_DOMAIN || "")
@@ -30,6 +43,12 @@ const ISOLATION = (process.env.ISOLATION_DOMAIN || "")
 	.toLowerCase()
 	.replace(/^\*\./, "")
 	.replace(/\.$/, "");
+
+const limits = createLimits({
+	// ponytail: per address, so a household behind one IP shares these.
+	maxSockets: 16,
+	dailyBytes: Number(process.env.DAILY_GB_PER_CLIENT || 10) * 1024 ** 3,
+});
 
 const filters = new Filters({
 	cacheDir: process.env.FILTER_CACHE_DIR || resolve(tmpdir(), "browser-ios-filters"),
@@ -275,8 +294,11 @@ app.all("/uv/service/{*rest}", async (req, res) => {
 			!req.headers.range &&
 			(req.headers.accept || "").includes("text/html"));
 	if (!isPage) {
+		const key = clientKey(req);
+		if (limits.overQuota(key))
+			return res.status(429).type("text/plain").send("Daily traffic limit reached.");
 		try {
-			if (await serveMedia(req, res)) return;
+			if (await serveMedia(req, res, (n) => limits.addBytes(key, n))) return;
 		} catch (err) {
 			console.warn("media:", err.message);
 			if (!res.headersSent) return res.status(502).end();
@@ -299,6 +321,10 @@ const server = createServer(app);
 server.on("upgrade", (req, socket, head) => {
 	if (!req.url.endsWith("/wisp/") || !auth.isAuthed(req)) {
 		socket.end("HTTP/1.1 401 Unauthorized\r\n\r\n");
+		return;
+	}
+	if (!limits.trackSocket(clientKey(req), socket)) {
+		socket.end("HTTP/1.1 429 Too Many Requests\r\n\r\n");
 		return;
 	}
 	wisp.routeRequest(req, socket, head);

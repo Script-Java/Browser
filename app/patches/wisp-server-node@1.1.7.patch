@@ -1,5 +1,5 @@
 diff --git a/dist/ConnectionHandler.js b/dist/ConnectionHandler.js
-index 02fb38b6d2991401887bad6659396d32a9ab27d3..360353459701e638c46f54d004ad0b1128eba925 100644
+index 02fb38b6d2991401887bad6659396d32a9ab27d3..e66f6c614937d2ccf95e2bd660d111d592a366b6 100644
 --- a/dist/ConnectionHandler.js
 +++ b/dist/ConnectionHandler.js
 @@ -39,6 +39,42 @@ exports.routeRequest = routeRequest;
@@ -45,8 +45,21 @@ index 02fb38b6d2991401887bad6659396d32a9ab27d3..360353459701e638c46f54d004ad0b11
  const node_dgram_1 = __importDefault(require("node:dgram"));
  const Packets_js_1 = __importDefault(require("./Packets.js"));
  const Types_js_1 = require("./Types.js");
-@@ -81,7 +117,11 @@ function routeRequest(wsOrIncomingMessage_1, socket_1, head_1) {
+@@ -79,9 +115,24 @@ function routeRequest(wsOrIncomingMessage_1, socket_1, head_1) {
+                 const wispFrame = Packets_js_1.default.wispFrameParser(Buffer.from(data));
+                 if (wispFrame.type === Types_js_1.PACKET_TYPE.CONNECT) {
                      const connectFrame = Packets_js_1.default.connectPacketParser(wispFrame.payload);
++                    // browser-ios patch: web traffic only, so the server can't be used for
++                    // mail spam, port scans or UDP floods.
++                    // ponytail: sites on other ports (e.g. :8080) won't load; extend the list if that matters.
++                    if (connectFrame.streamType !== Types_js_1.STREAM_TYPE.TCP || (connectFrame.port !== 80 && connectFrame.port !== 443)) {
++                        ws.send(Packets_js_1.default.closePacketMaker(wispFrame, 0x48));
++                        return;
++                    }
++                    if (connections.size >= 128) {
++                        ws.send(Packets_js_1.default.closePacketMaker(wispFrame, 0x49));
++                        return;
++                    }
                      if (connectFrame.streamType === Types_js_1.STREAM_TYPE.TCP) {
                          const client = new node_net_1.default.Socket();
 -                        client.connect(connectFrame.port, connectFrame.hostname);
@@ -58,7 +71,7 @@ index 02fb38b6d2991401887bad6659396d32a9ab27d3..360353459701e638c46f54d004ad0b11
                          connections.set(wispFrame.streamID, {
                              client: client,
                              buffer: 127,
-@@ -121,6 +161,10 @@ function routeRequest(wsOrIncomingMessage_1, socket_1, head_1) {
+@@ -121,6 +172,10 @@ function routeRequest(wsOrIncomingMessage_1, socket_1, head_1) {
                          if (iplevel !== 4 && iplevel !== 6) {
                              return;
                          }
