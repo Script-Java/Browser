@@ -1,6 +1,6 @@
-// Per-client limits: how many proxy connections one client may hold open,
-// and how much traffic it may move per day, so one user can't saturate the
-// server or run up its bandwidth bill.
+// Traffic limits: how many proxy connections one client may hold open, how
+// much it may move per day, and how much the whole server may move per day,
+// so neither one user nor everyone together can run up the bandwidth bill.
 
 const DAY_MS = 86_400_000;
 const CHECK_MS = 10_000;
@@ -30,9 +30,31 @@ export function clientKey(req) {
 	return ip.includes(":") ? prefix64(ip) : ip;
 }
 
-/** @param {{ maxSockets: number, dailyBytes: number }} options  dailyBytes 0 = unlimited */
-export function createLimits({ maxSockets, dailyBytes }) {
+/**
+ * @param {{ maxSockets: number, dailyBytes: number, totalDailyBytes?: number }} options
+ *   byte limits of 0 mean unlimited
+ */
+export function createLimits({ maxSockets, dailyBytes, totalDailyBytes = 0 }) {
 	const clients = new Map(); // key -> { bytes, since, sockets: Map<socket, bytes counted> }
+	const total = { bytes: 0, since: Date.now(), warned: 0 };
+
+	function addTotal(n) {
+		if (Date.now() - total.since > DAY_MS) Object.assign(total, { bytes: 0, since: Date.now(), warned: 0 });
+		total.bytes += n;
+		if (!totalDailyBytes) return;
+		// Warnings in the logs, which the host can alert on (see README).
+		for (const share of [0.8, 1]) {
+			if (total.warned < share && total.bytes >= share * totalDailyBytes) {
+				total.warned = share;
+				console.warn(
+					share < 1
+						? "bandwidth: 80% of DAILY_GB_TOTAL used today"
+						: "bandwidth: DAILY_GB_TOTAL reached; refusing proxy traffic until the day resets"
+				);
+			}
+		}
+	}
+	const totalOver = () => totalDailyBytes > 0 && total.bytes >= totalDailyBytes;
 
 	function get(key) {
 		const now = Date.now();
@@ -45,16 +67,19 @@ export function createLimits({ maxSockets, dailyBytes }) {
 		return c;
 	}
 
-	const overQuota = (key) => dailyBytes > 0 && get(key).bytes >= dailyBytes;
+	const overQuota = (key) => totalOver() || (dailyBytes > 0 && get(key).bytes >= dailyBytes);
 
 	function addBytes(key, n) {
 		get(key).bytes += n;
+		addTotal(n);
 	}
 
 	function count(c, socket) {
-		const total = socket.bytesRead + socket.bytesWritten;
-		c.bytes += total - c.sockets.get(socket);
-		c.sockets.set(socket, total);
+		const seen = socket.bytesRead + socket.bytesWritten;
+		const n = seen - c.sockets.get(socket);
+		c.bytes += n;
+		addTotal(n);
+		c.sockets.set(socket, seen);
 	}
 
 	/** Starts counting a WebSocket's traffic. False when the client is at its limit. */
@@ -73,7 +98,7 @@ export function createLimits({ maxSockets, dailyBytes }) {
 		const now = Date.now();
 		for (const [key, c] of clients) {
 			for (const socket of c.sockets.keys()) count(c, socket);
-			if (dailyBytes > 0 && c.bytes >= dailyBytes)
+			if (totalOver() || (dailyBytes > 0 && c.bytes >= dailyBytes))
 				for (const socket of c.sockets.keys()) socket.destroy();
 			if (!c.sockets.size && now - c.since > DAY_MS) clients.delete(key);
 		}

@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+		<title>Terms and privacy</title>
+		<meta name="robots" content="noindex, nofollow" />
+		<meta name="theme-color" content="#0e0e14" />
+		<style>
+			:root {
+				--bg: #0e0e14;
+				--text: #ececf1;
+				--muted: #8b8b9a;
+				--accent: #a78bfa;
+				color-scheme: dark;
+			}
+			body {
+				margin: 0;
+				background: var(--bg);
+				color: var(--text);
+				font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+			}
+			main {
+				max-width: 680px;
+				margin: 0 auto;
+				padding: calc(env(safe-area-inset-top, 0px) + 24px) 16px
+					calc(env(safe-area-inset-bottom, 0px) + 48px);
+			}
+			h1 {
+				font-size: 26px;
+				margin: 0 0 4px;
+			}
+			h2 {
+				font-size: 18px;
+				margin: 32px 0 8px;
+			}
+			p,
+			li {
+				color: #d4d4dc;
+			}
+			.muted {
+				color: var(--muted);
+			}
+			a {
+				color: var(--accent);
+			}
+			.back {
+				display: inline-block;
+				margin-bottom: 24px;
+			}
+		</style>
+	</head>
+	<body>
+		<main>
+			<a class="back" href="/">← Back to the browser</a>
+			<h1>Terms and privacy</h1>
+			<p class="muted">Short version: use it like any browser, don't use it to hurt anyone, and we don't keep your data.</p>
+
+			<h2>What this is</h2>
+			<p>
+				A free web browser that runs through this server. Pages you open are fetched through it, with ads,
+				trackers and pop-ups blocked. It's offered as is, with no guarantee that it works, stays available,
+				or that every site loads.
+			</p>
+
+			<h2>Privacy</h2>
+			<ul>
+				<li>There are no accounts and no database. We don't record or sell the sites you visit.</li>
+				<li>
+					Your logins, cookies and site data stay on your device. Clear them anytime in the shield menu with
+					<strong>Clear all site data now</strong>.
+				</li>
+				<li>
+					For secure (<code>https://</code>) sites, encryption happens on your device. The server only passes
+					along encrypted data and can't read your passwords or the pages you see.
+				</li>
+				<li>
+					The server does see the name of each site you open (like <code>example.com</code>), to check it
+					against lists of malware and phishing sites. It isn't logged or kept.
+				</li>
+				<li>
+					Some videos are fetched by the server directly for your device's video player. The hosting
+					provider's request logs may record those video addresses.
+				</li>
+				<li>
+					Your settings are kept in a cookie on your device. A second cookie shows your device passed the
+					automatic bot check; it expires after 30 days.
+				</li>
+			</ul>
+
+			<h2>Acceptable use</h2>
+			<p>Don't use this service to:</p>
+			<ul>
+				<li>break the law, or infringe anyone's copyright;</li>
+				<li>send spam, attack, scan or overload other systems, or get around their security;</li>
+				<li>harass, defraud or impersonate anyone;</li>
+				<li>get around this service's own limits, or let automated tools use it.</li>
+			</ul>
+			<p>
+				Traffic is limited per connection and per day so the service stays fair and affordable. Access may be
+				refused to anyone who misuses it.
+			</p>
+
+			<h2>Sites you visit</h2>
+			<p>
+				Websites you open belong to their owners, and their own terms and privacy policies apply. This
+				service isn't affiliated with them.
+			</p>
+
+			<h2>Contact, abuse and takedown requests</h2>
+			<p>Report abuse, copyright problems or questions to {{CONTACT}}.</p>
+
+			<h2>Changes</h2>
+			<p>These terms may change. Continuing to use the service means you accept the current version.</p>
+
+			<p class="muted">
+				This service is free software under the AGPL-3.0. Source code: github.com/Script-Java/Browser
+			</p>
+		</main>
+	</body>
+</html>

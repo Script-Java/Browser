@@ -378,3 +378,34 @@ body.loading #progress {
 #filter-status {
 	margin-top: 16px !important;
 }
+
+/* browser-check page */
+.fine {
+	margin: 0;
+	max-width: 560px;
+	color: var(--muted);
+	font-size: 14px;
+	line-height: 1.5;
+	text-align: center;
+}
+
+.fine a {
+	color: var(--accent);
+}
+
+#retry {
+	padding: 12px 22px;
+	border: 0;
+	border-radius: 12px;
+	background: var(--field);
+	color: var(--text);
+	font: inherit;
+}
+
+#retry[hidden] {
+	display: none;
+}
+
+#sheet .note a {
+	color: var(--accent);
+}

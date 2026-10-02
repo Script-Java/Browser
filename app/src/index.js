@@ -10,7 +10,7 @@ import { build } from "esbuild";
 import { epoxyPath } from "@mercuryworkshop/epoxy-transport";
 import { baremuxPath } from "@mercuryworkshop/bare-mux/node";
 
-import { createAuth, parseCookies } from "./auth.js";
+import { CHALLENGE_BITS, createAuth, parseCookies } from "./auth.js";
 import { Filters } from "./filters.js";
 import { serveMedia } from "./media.js";
 import { clientKey, createLimits } from "./limits.js";
@@ -22,19 +22,12 @@ const publicPath = resolve(import.meta.dirname, "..", "public");
 
 // ---------------------------------------------------------------- settings
 
+// Optional: makes the instance private. Without it, anyone can use the app
+// after their browser passes a small proof-of-work check (see auth.js).
 const PASSWORD = process.env.APP_PASSWORD || "";
 const SECRET = process.env.AUTH_SECRET || "";
-
-// A public deploy without these is an open proxy (or one whose password can
-// be brute-forced offline from a single cookie), so refuse to start.
-if (process.env.NODE_ENV === "production" && (!PASSWORD || SECRET.length < 32)) {
-	console.error(
-		"APP_PASSWORD and AUTH_SECRET (32+ random characters) must be set in production.\n" +
-			'  npx @railway/cli variable set "APP_PASSWORD=pick-a-long-password"\n' +
-			'  npx @railway/cli variable set "AUTH_SECRET=$(openssl rand -hex 32)"'
-	);
-	process.exit(1);
-}
+// Shown on /terms for abuse and takedown reports.
+const CONTACT = (process.env.CONTACT_EMAIL || "").trim();
 
 // e.g. "browse.example.com": the shell runs there and every site gets its own
 // <key>.browse.example.com origin. Needs a wildcard DNS record and certificate.
@@ -44,10 +37,31 @@ const ISOLATION = (process.env.ISOLATION_DOMAIN || "")
 	.replace(/^\*\./, "")
 	.replace(/\.$/, "");
 
+// Refuse to start rather than run an unsafe public deploy.
+if (process.env.NODE_ENV === "production") {
+	const missing = [];
+	if (SECRET.length < 32)
+		missing.push(
+			'AUTH_SECRET (32+ random characters; it signs every cookie):\n    npx @railway/cli variable set "AUTH_SECRET=$(openssl rand -hex 32)"'
+		);
+	// Public mode: strangers sign in to sites through it, and without
+	// isolation one malicious site could read every other site's logins.
+	if (!PASSWORD && !ISOLATION)
+		missing.push("ISOLATION_DOMAIN (a domain you own; see README), or APP_PASSWORD to keep the app private");
+	if (!PASSWORD && !CONTACT)
+		missing.push('CONTACT_EMAIL (where abuse and takedown reports go; shown on /terms):\n    npx @railway/cli variable set "CONTACT_EMAIL=abuse@example.com"');
+	if (missing.length) {
+		console.error("Can't start in production. Set:\n  - " + missing.join("\n  - "));
+		process.exit(1);
+	}
+}
+
 const limits = createLimits({
 	// ponytail: per address, so a household behind one IP shares these.
 	maxSockets: 16,
-	dailyBytes: Number(process.env.DAILY_GB_PER_CLIENT || 10) * 1024 ** 3,
+	dailyBytes: Number(process.env.DAILY_GB_PER_CLIENT || 2) * 1024 ** 3,
+	// Hard cap for the whole server, so the bandwidth bill can't run away.
+	totalDailyBytes: Number(process.env.DAILY_GB_TOTAL || 50) * 1024 ** 3,
 });
 
 const filters = new Filters({
@@ -159,7 +173,8 @@ const bundles = Promise.all([
 	bundle("client/sitekey.js", "BiosSiteKey"),
 ]).then(([shield, sitekey]) => ({ shield, sitekey }));
 
-const clientConfig = JSON.stringify({ isolation: ISOLATION || null, auth: auth.enabled });
+// `auth`: whether the shield menu offers Lock (only useful with a password).
+const clientConfig = JSON.stringify({ isolation: ISOLATION || null, auth: auth.mode === "password" });
 
 // -------------------------------------------------------------------- app
 
@@ -203,7 +218,26 @@ app.use((req, res, next) => {
 app.get("/login", (req, res) => {
 	if (!auth.enabled || auth.isAuthed(req)) return res.redirect("/");
 	res.setHeader("Cache-Control", "no-store");
-	res.sendFile(resolve(publicPath, "login.html"));
+	res.sendFile(resolve(publicPath, auth.mode === "password" ? "login.html" : "challenge.html"));
+});
+app.get("/api/challenge", (req, res) => {
+	res.setHeader("Cache-Control", "no-store");
+	res.json({ challenge: auth.newChallenge(), bits: CHALLENGE_BITS });
+});
+
+const escapeHtml = (text) =>
+	text.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+const terms = readFile(resolve(import.meta.dirname, "terms.html"), "utf8").then((html) =>
+	html.replaceAll(
+		"{{CONTACT}}",
+		CONTACT
+			? `<a href="mailto:${escapeHtml(CONTACT)}">${escapeHtml(CONTACT)}</a>`
+			: "the person running this server"
+	)
+);
+app.get("/terms", async (req, res) => {
+	res.setHeader("Cache-Control", "no-cache");
+	res.type("html").send(await terms);
 });
 app.post("/login", express.urlencoded({ extended: false, limit: "4kb" }), auth.login);
 app.post("/logout", auth.logout);
@@ -356,7 +390,9 @@ server.on("listening", () => {
 			address.family === "IPv6" ? `[${address.address}]` : address.address
 		}:${address.port}`
 	);
-	console.log(`Password: ${auth.enabled ? "on" : "off (set APP_PASSWORD)"}`);
+	console.log(
+		`Access: ${{ password: "private (APP_PASSWORD)", challenge: "public, with a browser check", off: "open (local development)" }[auth.mode]}`
+	);
 	console.log(`Site isolation: ${ISOLATION ? `on (${ISOLATION})` : "off (set ISOLATION_DOMAIN)"}`);
 });
 

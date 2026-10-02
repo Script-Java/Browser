@@ -41,3 +41,12 @@ test("socket cap and daily quota", () => {
 	assert.ok(limits.overQuota("x"));
 	assert.ok(!limits.trackSocket("x", fakeSocket()), "over quota refuses new sockets");
 });
+
+test("server-wide daily cap", () => {
+	const limits = createLimits({ maxSockets: 10, dailyBytes: 0, totalDailyBytes: 1000 });
+	limits.addBytes("a", 600);
+	assert.ok(!limits.overQuota("b"));
+	limits.addBytes("b", 400);
+	assert.ok(limits.overQuota("c"), "everyone is refused once the server total is reached");
+	assert.ok(!limits.trackSocket("c", fakeSocket()));
+});

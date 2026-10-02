@@ -1,12 +1,21 @@
-// Password gate. When APP_PASSWORD is set, every request (pages, the proxy
-// service worker's files, the wisp WebSocket) needs a signed session cookie,
-// which /login hands out.
+// Access gate. Every request (pages, the proxy service worker's files, the
+// wisp WebSocket) needs a signed session cookie, which /login hands out:
+// - "password" (APP_PASSWORD set): for a private instance.
+// - "challenge" (only AUTH_SECRET set): open to anyone whose browser solves a
+//   small proof-of-work puzzle, which keeps casual bots and scanners out
+//   without accounts, a database or a third-party captcha.
+// - "off" (neither set): local development only; production refuses to start.
 
-import { createHash, createHmac, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { clientKey } from "./limits.js";
 
 const COOKIE = "bios_auth";
-const SESSION_DAYS = 180;
+const SESSION_DAYS = { password: 180, challenge: 30 };
+// ~65k hashes on average: about a second on a phone, once a month.
+// ponytail: a determined attacker solves this cheaply on a server; the
+// per-client and daily traffic limits are what actually cap abuse.
+export const CHALLENGE_BITS = 16;
+const CHALLENGE_MS = 10 * 60_000;
 const MAX_ATTEMPTS = 8;
 const ATTEMPT_WINDOW_MS = 15 * 60_000;
 
@@ -20,6 +29,8 @@ const PUBLIC_PATHS = new Set([
 	"/manifest.webmanifest",
 	"/favicon.ico",
 	"/uv.png",
+	"/terms",
+	"/api/challenge",
 ]);
 
 const sha256 = (text) => createHash("sha256").update(text).digest();
@@ -36,11 +47,21 @@ export function parseCookies(header = "") {
 	return cookies;
 }
 
+function leadingZeroBits(bytes) {
+	let bits = 0;
+	for (const byte of bytes) {
+		if (byte) return bits + Math.clz32(byte) - 24;
+		bits += 8;
+	}
+	return bits;
+}
+
 /**
  * @param {{ password?: string, secret?: string, cookieDomain: (req: import("node:http").IncomingMessage) => string | null }} options
  */
 export function createAuth({ password, secret, cookieDomain }) {
-	const enabled = !!password;
+	const mode = password ? "password" : secret ? "challenge" : "off";
+	const enabled = mode !== "off";
 	// Changing the password signs every device out.
 	const key = sha256(`bios-auth:${secret || ""}:${password || ""}`);
 	const passwordHash = sha256(password || "");
@@ -61,6 +82,27 @@ export function createAuth({ password, secret, cookieDomain }) {
 		const expected = Buffer.from(sign(expires));
 		const given = Buffer.from(mac);
 		return expected.length === given.length && timingSafeEqual(expected, given);
+	}
+
+	/** A fresh puzzle: a signed timestamp and nonce, so the server keeps nothing. */
+	function newChallenge() {
+		const body = `${Date.now()}.${randomBytes(12).toString("base64url")}`;
+		const mac = createHmac("sha256", key).update("challenge:" + body).digest("base64url");
+		return `${body}.${mac}`;
+	}
+
+	/** True when `solution` solves a challenge this server issued in the last 10 minutes. */
+	function solves(challenge, solution) {
+		const [issued, nonce, mac] = String(challenge).split(".");
+		if (!mac || !/^\d{1,12}$/.test(String(solution))) return false;
+		const age = Date.now() - Number(issued);
+		if (!(age >= 0 && age < CHALLENGE_MS)) return false;
+		const expected = Buffer.from(
+			createHmac("sha256", key).update(`challenge:${issued}.${nonce}`).digest("base64url")
+		);
+		const given = Buffer.from(mac);
+		if (expected.length !== given.length || !timingSafeEqual(expected, given)) return false;
+		return leadingZeroBits(sha256(`${challenge}:${solution}`)) >= CHALLENGE_BITS;
 	}
 
 	function cookie(req, value, maxAge) {
@@ -128,19 +170,21 @@ export function createAuth({ password, secret, cookieDomain }) {
 					encodeURIComponent("Too many attempts. Try again in 15 minutes.")
 			);
 
-		const given = sha256(String(req.body?.password || ""));
-		if (!timingSafeEqual(given, passwordHash)) {
+		const ok =
+			mode === "password"
+				? timingSafeEqual(sha256(String(req.body?.password || "")), passwordHash)
+				: solves(req.body?.challenge, req.body?.solution);
+		if (!ok) {
 			recordFailure(ip);
 			return res.redirect(
-				"/login?error=" + encodeURIComponent("Wrong password.")
+				"/login?error=" +
+					encodeURIComponent(mode === "password" ? "Wrong password." : "Check failed. Try again.")
 			);
 		}
 		attempts.delete(ip);
-		const expires = Date.now() + SESSION_DAYS * 86_400_000;
-		res.setHeader(
-			"Set-Cookie",
-			cookie(req, `${expires}.${sign(expires)}`, SESSION_DAYS * 86_400)
-		);
+		const days = SESSION_DAYS[mode];
+		const expires = Date.now() + days * 86_400_000;
+		res.setHeader("Set-Cookie", cookie(req, `${expires}.${sign(expires)}`, days * 86_400));
 		res.redirect("/");
 	}
 
@@ -150,5 +194,5 @@ export function createAuth({ password, secret, cookieDomain }) {
 		res.redirect(enabled ? "/login" : "/");
 	}
 
-	return { enabled, isAuthed, gate, login, logout };
+	return { mode, enabled, isAuthed, gate, login, logout, newChallenge, solves };
 }
