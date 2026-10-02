@@ -1,0 +1,40 @@
+<!doctype html>
+<html>
+	<head>
+		<meta charset="utf-8" />
+		<title>Clearing</title>
+	</head>
+	<body>
+		<script>
+			// Loaded by the shell in a hidden frame on each isolated site origin:
+			// deletes that site's cookies and storage, then reports back.
+			(async () => {
+				const keep = new Set(["bare-mux-path"]);
+				try {
+					for (const key of Object.keys(localStorage))
+						if (!keep.has(key)) localStorage.removeItem(key);
+					sessionStorage.clear();
+				} catch {}
+				try {
+					const dbs = indexedDB.databases
+						? (await indexedDB.databases()).map((db) => db.name)
+						: ["__op"];
+					await Promise.all(
+						dbs.map(
+							(name) =>
+								new Promise((resolve) => {
+									const req = indexedDB.deleteDatabase(name);
+									req.onsuccess = req.onerror = req.onblocked = resolve;
+								})
+						)
+					);
+				} catch {}
+				try {
+					for (const name of await caches.keys())
+						if (name !== "bios-filters") await caches.delete(name);
+				} catch {}
+				parent.postMessage({ bios: "wiped" }, "*");
+			})();
+		</script>
+	</body>
+</html>

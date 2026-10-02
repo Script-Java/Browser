@@ -1,0 +1,68 @@
+<!doctype html>
+<html>
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<title>Loading</title>
+		<style>
+			body {
+				margin: 0;
+				background: #0e0e14;
+				color: #8b8b9a;
+				font: 15px -apple-system, sans-serif;
+				display: grid;
+				place-items: center;
+				height: 100vh;
+			}
+		</style>
+		<script src="/baremux/index.js"></script>
+		<script src="/register-sw.js"></script>
+	</head>
+	<body>
+		<p id="msg">Loading…</p>
+		<script>
+			const key = "uv-recover:" + location.pathname;
+			// Isolation mode, inside the app's frame (the parent is the shell on
+			// another origin): ask the shell to open this site's anchor frame,
+			// which registers the service worker and keeps the proxy connection.
+			function inIsolatedTab() {
+				if (parent === self) return false;
+				try {
+					parent.location.href;
+					return false;
+				} catch {
+					return true;
+				}
+			}
+			function needAnchor() {
+				return new Promise((resolve) => {
+					const timer = setTimeout(
+						() => registerSW().then(setupTransport).then(resolve, resolve),
+						10000
+					);
+					addEventListener("message", (event) => {
+						if (event.source !== parent || event.data?.bios !== "anchor-ready")
+							return;
+						clearTimeout(timer);
+						resolve();
+					});
+					parent.postMessage({ bios: "need-anchor" }, "*");
+				});
+			}
+			(inIsolatedTab() ? needAnchor() : registerSW().then(setupTransport))
+				.then(() => {
+					if (sessionStorage.getItem(key)) {
+						sessionStorage.removeItem(key);
+						document.getElementById("msg").textContent =
+							"Couldn't load this page. Try reloading.";
+						return;
+					}
+					sessionStorage.setItem(key, "1");
+					location.reload();
+				})
+				.catch((err) => {
+					document.getElementById("msg").textContent = err.message;
+				});
+		</script>
+	</body>
+</html>

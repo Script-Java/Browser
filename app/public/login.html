@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta
+			name="viewport"
+			content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover"
+		/>
+		<title>Browser</title>
+		<meta name="robots" content="noindex, nofollow" />
+		<link rel="manifest" href="/manifest.webmanifest" />
+		<meta name="apple-mobile-web-app-capable" content="yes" />
+		<meta name="mobile-web-app-capable" content="yes" />
+		<meta name="apple-mobile-web-app-title" content="Browser" />
+		<meta
+			name="apple-mobile-web-app-status-bar-style"
+			content="black-translucent"
+		/>
+		<meta name="theme-color" content="#0e0e14" />
+		<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+		<link rel="stylesheet" href="/index.css" />
+	</head>
+	<body>
+		<main id="home">
+			<img class="logo" src="/uv.png" alt="" draggable="false" />
+			<form id="login-form" method="post" action="/login">
+				<input
+					id="home-input"
+					name="password"
+					type="password"
+					autocomplete="current-password"
+					enterkeyhint="go"
+					placeholder="Password"
+					autofocus
+					required
+				/>
+			</form>
+			<p id="error" role="alert"></p>
+		</main>
+		<script>
+			const error = new URLSearchParams(location.search).get("error");
+			if (error) document.getElementById("error").textContent = error;
+		</script>
+	</body>
+</html>

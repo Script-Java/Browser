@@ -1,0 +1,369 @@
+:root {
+	--bg: #0e0e14;
+	--surface: #1b1b24;
+	--field: #262632;
+	--text: #ececf1;
+	--muted: #8b8b9a;
+	--accent: #a78bfa;
+	--bar-h: 52px;
+	--safe-top: env(safe-area-inset-top, 0px);
+	--safe-bottom: env(safe-area-inset-bottom, 0px);
+	color-scheme: dark;
+}
+
+* {
+	box-sizing: border-box;
+	-webkit-tap-highlight-color: transparent;
+	-webkit-touch-callout: none;
+}
+
+html,
+body {
+	margin: 0;
+	height: 100%;
+	overflow: hidden;
+	overscroll-behavior: none;
+	background: var(--bg);
+	color: var(--text);
+	font-family:
+		-apple-system,
+		BlinkMacSystemFont,
+		"Segoe UI",
+		Roboto,
+		sans-serif;
+}
+
+button,
+nav,
+.logo {
+	-webkit-user-select: none;
+	user-select: none;
+}
+
+/* iOS zooms into inputs below 16px */
+input {
+	font-size: 16px;
+}
+
+#home {
+	position: fixed;
+	inset: var(--safe-top) 0 calc(var(--bar-h) + var(--safe-bottom)) 0;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	gap: 28px;
+	padding: 0 16px 10vh;
+}
+
+.logo {
+	width: 112px;
+	height: 112px;
+	pointer-events: none;
+}
+
+#home-form,
+#login-form {
+	width: 100%;
+	max-width: 560px;
+}
+
+#home-input {
+	width: 100%;
+	padding: 14px 18px;
+	border: 1px solid #33333f;
+	border-radius: 14px;
+	background: var(--surface);
+	color: var(--text);
+	outline: none;
+}
+
+#home-input:focus {
+	border-color: var(--accent);
+}
+
+#error {
+	min-height: 1.2em;
+	margin: 0;
+	max-width: 560px;
+	color: #ff7a7a;
+	font-size: 14px;
+	text-align: center;
+	white-space: pre-wrap;
+}
+
+#uv-frame {
+	position: fixed;
+	top: var(--safe-top);
+	left: 0;
+	width: 100%;
+	height: calc(100% - var(--safe-top) - var(--bar-h) - var(--safe-bottom));
+	border: 0;
+	background: #fff;
+	display: none;
+}
+
+body.browsing #uv-frame {
+	display: block;
+}
+
+body.browsing #home {
+	display: none;
+}
+
+#progress {
+	position: fixed;
+	left: 0;
+	bottom: calc(var(--bar-h) + var(--safe-bottom));
+	height: 2px;
+	width: 0;
+	background: var(--accent);
+	opacity: 0;
+	transition:
+		width 0.4s ease,
+		opacity 0.3s ease;
+	z-index: 3;
+}
+
+body.loading #progress {
+	width: 80%;
+	opacity: 1;
+	transition: width 8s cubic-bezier(0.1, 0.7, 0.2, 1);
+}
+
+#bar {
+	position: fixed;
+	left: 0;
+	right: 0;
+	bottom: 0;
+	height: calc(var(--bar-h) + var(--safe-bottom));
+	padding: 0 4px var(--safe-bottom);
+	display: flex;
+	align-items: center;
+	gap: 2px;
+	background: var(--surface);
+	border-top: 1px solid #2a2a35;
+	z-index: 2;
+}
+
+#bar button {
+	flex: none;
+	width: 42px;
+	height: 42px;
+	display: grid;
+	place-items: center;
+	border: 0;
+	border-radius: 10px;
+	background: none;
+	color: var(--text);
+	padding: 0;
+}
+
+#bar button:active {
+	background: var(--field);
+}
+
+#bar button:disabled {
+	opacity: 0.3;
+}
+
+#bar svg {
+	width: 22px;
+	height: 22px;
+	fill: none;
+	stroke: currentColor;
+	stroke-width: 2;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+}
+
+#bar-form {
+	flex: 1;
+	min-width: 0;
+	display: flex;
+	align-items: center;
+	height: 36px;
+	border-radius: 10px;
+	background: var(--field);
+}
+
+#bar #site-btn {
+	width: 34px;
+	height: 36px;
+	color: var(--muted);
+}
+
+#bar #site-btn svg {
+	width: 17px;
+	height: 17px;
+	display: none;
+}
+
+#bar #site-btn[data-state="shield"] .icon-shield,
+#bar #site-btn[data-state="lock"] .icon-lock,
+#bar #site-btn[data-state="warn"] .icon-warn {
+	display: block;
+}
+
+#bar #site-btn[data-state="warn"] {
+	color: #fbbf24;
+}
+
+#bar-input {
+	flex: 1;
+	min-width: 0;
+	height: 36px;
+	padding: 0 12px 0 0;
+	border: 0;
+	background: none;
+	color: var(--text);
+	outline: none;
+	text-overflow: ellipsis;
+}
+
+#bar-input:not(:focus) {
+	text-align: center;
+	/* balance the site button so the host sits in the middle */
+	padding-right: 34px;
+}
+
+/* Protection sheet */
+
+#sheet {
+	position: fixed;
+	inset: 0;
+	z-index: 10;
+	display: flex;
+	align-items: flex-end;
+	justify-content: center;
+	background: rgba(0, 0, 0, 0.5);
+}
+
+#sheet[hidden] {
+	display: none;
+}
+
+#sheet-card {
+	width: 100%;
+	max-width: 560px;
+	max-height: calc(100% - var(--safe-top) - 24px);
+	overflow-y: auto;
+	-webkit-overflow-scrolling: touch;
+	padding: 16px 16px calc(16px + var(--safe-bottom));
+	background: var(--surface);
+	border-radius: 16px 16px 0 0;
+}
+
+#sheet-head {
+	display: flex;
+	align-items: flex-start;
+	justify-content: space-between;
+	gap: 12px;
+	margin-bottom: 8px;
+}
+
+#sheet-site {
+	display: block;
+	font-size: 17px;
+	word-break: break-all;
+}
+
+#sheet-close {
+	flex: none;
+	border: 0;
+	background: none;
+	color: var(--accent);
+	font: inherit;
+	font-weight: 600;
+	padding: 2px 0;
+}
+
+#sheet h3 {
+	margin: 20px 0 4px;
+	font-size: 13px;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	color: var(--muted);
+}
+
+#sheet .row {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	min-height: 48px;
+	padding: 8px 0;
+	border-bottom: 1px solid #2a2a35;
+	font-size: 15px;
+}
+
+#sheet .row[hidden] {
+	display: none;
+}
+
+#sheet .row small {
+	display: block;
+	color: var(--muted);
+	font-size: 13px;
+}
+
+#sheet input[type="checkbox"] {
+	flex: none;
+	appearance: none;
+	-webkit-appearance: none;
+	width: 50px;
+	height: 30px;
+	margin: 0;
+	border-radius: 15px;
+	background: #3a3a48;
+	position: relative;
+	transition: background 0.2s;
+}
+
+#sheet input[type="checkbox"]::after {
+	content: "";
+	position: absolute;
+	top: 2px;
+	left: 2px;
+	width: 26px;
+	height: 26px;
+	border-radius: 50%;
+	background: #fff;
+	transition: transform 0.2s;
+}
+
+#sheet input[type="checkbox"]:checked {
+	background: #34c759;
+}
+
+#sheet input[type="checkbox"]:checked::after {
+	transform: translateX(20px);
+}
+
+#sheet .wide {
+	display: block;
+	width: 100%;
+	margin-top: 12px;
+	padding: 12px;
+	border: 0;
+	border-radius: 12px;
+	background: var(--field);
+	color: var(--text);
+	font: inherit;
+}
+
+#sheet .wide:disabled {
+	opacity: 0.6;
+}
+
+#sheet .note {
+	margin: 4px 0 0;
+	color: var(--muted);
+	font-size: 13px;
+	line-height: 1.4;
+}
+
+#filter-status {
+	margin-top: 16px !important;
+}

@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta
+			name="viewport"
+			content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover"
+		/>
+		<title>Browser</title>
+		<meta name="robots" content="noindex, nofollow" />
+
+		<!-- PWA / iOS standalone -->
+		<link rel="manifest" href="/manifest.webmanifest" />
+		<meta name="apple-mobile-web-app-capable" content="yes" />
+		<meta name="mobile-web-app-capable" content="yes" />
+		<meta name="apple-mobile-web-app-title" content="Browser" />
+		<meta
+			name="apple-mobile-web-app-status-bar-style"
+			content="black-translucent"
+		/>
+		<meta name="theme-color" content="#0e0e14" />
+		<meta name="format-detection" content="telephone=no, email=no, address=no, date=no" />
+		<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+		<link rel="icon" href="/favicon.ico" />
+
+		<link rel="stylesheet" href="/index.css" />
+
+		<script src="/baremux/index.js"></script>
+		<script src="/uv/uv.bundle.js"></script>
+		<script src="/uv/uv.config.js"></script>
+		<script src="/sitekey.js"></script>
+	</head>
+
+	<body>
+		<main id="home">
+			<img class="logo" src="/uv.png" alt="" draggable="false" />
+			<form id="home-form" autocomplete="off">
+				<input
+					id="home-input"
+					type="text"
+					inputmode="url"
+					enterkeyhint="go"
+					autocapitalize="off"
+					autocorrect="off"
+					spellcheck="false"
+					placeholder="Search or enter address"
+				/>
+			</form>
+			<p id="error" role="alert"></p>
+		</main>
+
+		<iframe
+			id="uv-frame"
+			name="uvframe"
+			title="Page"
+			allow="autoplay; fullscreen; encrypted-media; picture-in-picture; clipboard-write"
+		></iframe>
+
+		<div id="progress"></div>
+
+		<nav id="bar">
+			<button id="back" type="button" aria-label="Back">
+				<svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7" /></svg>
+			</button>
+			<button id="forward" type="button" aria-label="Forward">
+				<svg viewBox="0 0 24 24"><path d="M9 5l7 7-7 7" /></svg>
+			</button>
+			<form id="bar-form" autocomplete="off">
+				<button id="site-btn" type="button" aria-label="Site protection">
+					<svg viewBox="0 0 24 24" class="icon-shield">
+						<path d="M12 3l7 3v5c0 4.5-3 8.3-7 10-4-1.7-7-5.5-7-10V6l7-3z" />
+					</svg>
+					<svg viewBox="0 0 24 24" class="icon-lock">
+						<rect x="5" y="11" width="14" height="10" rx="2" />
+						<path d="M8 11V8a4 4 0 0 1 8 0v3" />
+					</svg>
+					<svg viewBox="0 0 24 24" class="icon-warn">
+						<path d="M12 4l9 16H3l9-16z" />
+						<path d="M12 10v4M12 17.5v.01" />
+					</svg>
+				</button>
+				<input
+					id="bar-input"
+					type="text"
+					inputmode="url"
+					enterkeyhint="go"
+					autocapitalize="off"
+					autocorrect="off"
+					spellcheck="false"
+					placeholder="Search or enter address"
+				/>
+			</form>
+			<button id="reload" type="button" aria-label="Reload">
+				<svg viewBox="0 0 24 24">
+					<path d="M20 12a8 8 0 1 1-2.34-5.66" />
+					<path d="M20 4v5h-5" />
+				</svg>
+			</button>
+			<button id="home-btn" type="button" aria-label="Home">
+				<svg viewBox="0 0 24 24">
+					<path d="M4 11l8-7 8 7" />
+					<path d="M6 10v10h12V10" />
+				</svg>
+			</button>
+		</nav>
+
+		<div id="sheet" hidden>
+			<div id="sheet-card" role="dialog" aria-modal="true" aria-labelledby="sheet-site">
+				<div id="sheet-head">
+					<div>
+						<strong id="sheet-site">Protection</strong>
+						<p id="sheet-trust" class="note"></p>
+					</div>
+					<button id="sheet-close" type="button">Done</button>
+				</div>
+
+				<label class="row" id="site-row">
+					<span>
+						Blocking on this site
+						<small>Turn off if the site doesn't work right</small>
+					</span>
+					<input type="checkbox" id="site-toggle" role="switch" />
+				</label>
+
+				<h3>Protection</h3>
+				<label class="row">
+					<span>Block ads and trackers</span>
+					<input type="checkbox" data-setting="ads" role="switch" />
+				</label>
+				<label class="row">
+					<span>Hide ad boxes and overlays</span>
+					<input type="checkbox" data-setting="cosmetic" role="switch" />
+				</label>
+				<label class="row">
+					<span>Skip video ads</span>
+					<input type="checkbox" data-setting="videoAds" role="switch" />
+				</label>
+				<label class="row">
+					<span>Warn about malware and phishing sites</span>
+					<input type="checkbox" data-setting="threats" role="switch" />
+				</label>
+
+				<h3>Privacy</h3>
+				<label class="row">
+					<span>
+						Clear cookies and site data when the app opens
+						<small>Signs you out of sites each time</small>
+					</span>
+					<input type="checkbox" data-setting="wipe" role="switch" />
+				</label>
+				<button id="wipe-now" class="wide" type="button">Clear all site data now</button>
+				<form id="lock-form" method="post" action="/logout" hidden>
+					<button class="wide" type="submit">Lock</button>
+				</form>
+
+				<p id="filter-status" class="note"></p>
+				<p id="isolation-status" class="note"></p>
+			</div>
+		</div>
+
+		<script src="/register-sw.js"></script>
+		<script src="/index.js"></script>
+	</body>
+</html>

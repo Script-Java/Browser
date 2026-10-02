@@ -1,0 +1,28 @@
+<!doctype html>
+<html>
+	<head>
+		<meta charset="utf-8" />
+		<title>Proxy</title>
+		<script src="/baremux/index.js"></script>
+		<script src="/register-sw.js"></script>
+	</head>
+	<body>
+		<script>
+			// Isolation mode: the shell keeps this hidden frame open on a site's
+			// origin. It registers the proxy service worker there and holds the
+			// site's proxy connection (bare-mux worker + transport), so the
+			// connection survives the site's own pages navigating and the
+			// service worker always has a page to ask for it.
+			registerSW()
+				.then(setupTransport)
+				.then(
+					() => parent.postMessage({ bios: "anchor-ready" }, "*"),
+					(err) =>
+						parent.postMessage(
+							{ bios: "anchor-ready", error: String(err && err.message) },
+							"*"
+						)
+				);
+		</script>
+	</body>
+</html>

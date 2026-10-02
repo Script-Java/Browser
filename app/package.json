@@ -1,0 +1,43 @@
+{
+	"name": "browser-ios",
+	"version": "1.0.0",
+	"description": "Ultraviolet instance",
+	"type": "module",
+	"engines": {
+		"node": ">=22.0.0"
+	},
+	"scripts": {
+		"start": "node src/index.js",
+		"format": "prettier --write .",
+		"lint": "eslint ./src/",
+		"lint:fix": "eslint ./src/ --fix"
+	},
+	"keywords": [
+		"proxy"
+	],
+	"packageManager": "pnpm@10.28.0",
+	"author": "",
+	"license": "GPL-3.0-or-later",
+	"devDependencies": {
+		"eslint": "^9.39.2",
+		"prettier": "^3.8.1"
+	},
+	"dependencies": {
+		"@ghostery/adblocker": "^2.18.2",
+		"@mercuryworkshop/bare-mux": "^2.1.8",
+		"@mercuryworkshop/epoxy-transport": "2.1.28",
+		"esbuild": "^0.25.12",
+		"express": "^5.2.1",
+		"tldts": "^7.4.16",
+		"wisp-server-node": "1.1.7",
+		"ws": "^8.19.0"
+	},
+	"pnpm": {
+		"onlyBuiltDependencies": [
+			"esbuild"
+		],
+		"patchedDependencies": {
+			"wisp-server-node@1.1.7": "patches/wisp-server-node@1.1.7.patch"
+		}
+	}
+}

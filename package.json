@@ -1,0 +1,10 @@
+{
+	"name": "browser-ios",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"setup": "pnpm -C Ultraviolet install --no-frozen-lockfile && pnpm -C Ultraviolet build && pnpm -C app install",
+		"build": "pnpm -C Ultraviolet build",
+		"start": "node app/src/index.js"
+	}
+}
