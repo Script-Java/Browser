@@ -4,11 +4,6 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
-patchedDependencies:
-  wisp-server-node@1.1.7:
-    hash: b3e181c57ca8a72758e1ec1975746f0ce7cd3f9906a2228eb071d302345a0851
-    path: patches/wisp-server-node@1.1.7.patch
-
 importers:
 
   .:
@@ -22,6 +17,9 @@ importers:
       '@mercuryworkshop/epoxy-transport':
         specifier: 2.1.28
         version: 2.1.28
+      '@mercuryworkshop/wisp-js':
+        specifier: 0.5.0
+        version: 0.5.0(utf-8-validate@6.0.6)
       esbuild:
         specifier: ^0.25.12
         version: 0.25.12
@@ -31,9 +29,6 @@ importers:
       tldts:
         specifier: ^7.4.16
         version: 7.4.16
-      wisp-server-node:
-        specifier: 1.1.7
-        version: 1.1.7(patch_hash=b3e181c57ca8a72758e1ec1975746f0ce7cd3f9906a2228eb071d302345a0851)
       ws:
         specifier: ^8.22.0
         version: 8.22.0(bufferutil@4.1.0)(utf-8-validate@6.0.6)
@@ -278,6 +273,10 @@ packages:
   '@mercuryworkshop/epoxy-transport@2.1.28':
     resolution: {integrity: sha512-lv/Kfdn37y8ZCXQaIT3Ebj4OSztBqeXdbR9rchbHQBKIw/fNSQJLGNBHV5ScXSzqt7NCwv8ZiZx7urRyk7Ua/Q==}
 
+  '@mercuryworkshop/wisp-js@0.5.0':
+    resolution: {integrity: sha512-YIPnONZdMYRXLdttL/zQM2PwjHQw3LfNPWTP54Lqhehs79lcORY8rwv5j7bGnuz9S31rZIh1OEzldubE9dtnoA==}
+    hasBin: true
+
   '@remusao/guess-url-type@2.1.0':
     resolution: {integrity: sha512-zI3dlTUxpjvx2GCxp9nLOSK5yEIqDCpxlAVGwb2Y49RKkS72oeNaxxo+VWS5+XQ5+Mf8Zfp9ZXIlk+G5eoEN8A==}
 
@@ -366,6 +365,10 @@ packages:
 
   color-name@1.1.4:
     resolution: {integrity: sha512-dOy+3AuW3a2wNbZHIuMZpTcgjGuLU/uBL/ubcZF9OXbDo8ff4O8yVp5Bf0efS8uEoYo5q4Fx7dY9OgQGXgAsQA==}
+
+  commander@15.0.0:
+    resolution: {integrity: sha512-z67u4ZhzCL/Tydu1lJARtEZYWbWaN7oYLHbsuzocr6y4N6WZAagG3RQ4FW61V1/0+jImpj293XfrcYnd1qxtPg==}
+    engines: {node: '>=22.12.0'}
 
   concat-map@0.0.1:
     resolution: {integrity: sha512-/Srv4dswyQNBfohGpz9o6Yb3Gz3SrUDqBH5rTuhGR7ahtlbYKnVxw2bCFMRljaA7EXHaXZ8wsHdodFvbkhKmqg==}
@@ -592,6 +595,10 @@ packages:
   ipaddr.js@1.9.1:
     resolution: {integrity: sha512-0KI/607xoxSToH7GjN1FfSbLoU0+btTicjsQSWQlh/hZykN8KpmMf7uYwPW3R+akZ6R/w18ZlXSHBYXiYUPO3g==}
     engines: {node: '>= 0.10'}
+
+  ipaddr.js@2.5.0:
+    resolution: {integrity: sha512-aq+t5NAc+cS6rZQQVWC2x98CPqGtKKTMDd4Gaodv0wShnItdKg/51djkGJ1hqH+Oy0ivDftCbSLCQob8zso01w==}
+    engines: {node: '>= 10'}
 
   is-extglob@2.1.1:
     resolution: {integrity: sha512-SbKbANkN603Vi4jEZv49LeVJMn4yGwsbzZworEoyEiutsN3nJYdbO36zfhGJ6QEDpOZIFkDtnq5JRxmvl3jsoQ==}
@@ -850,10 +857,6 @@ packages:
     engines: {node: '>= 8'}
     hasBin: true
 
-  wisp-server-node@1.1.7:
-    resolution: {integrity: sha512-1kL4dbGAZLHks3qYQDOzhxFKvmKwPwfMFTskvsdOc2YA6TmUKZvq5TNPkGs9JJXPnWiOtqMzAVQVC/FwixxXvQ==}
-    deprecated: wisp-server-node is deprecated due to security and stability issues, please use @mercuryworkshop/wisp-js instead.
-
   word-wrap@1.2.5:
     resolution: {integrity: sha512-BN22B5eaMMI9UMtjrGd5g5eCYPpCPDUy0FJXbYsaT5zYxjFOckS53SQDE3pWkVoWpHXVb3BrYcEN4Twa55B5cA==}
     engines: {node: '>=0.10.0'}
@@ -1042,6 +1045,15 @@ snapshots:
     dependencies:
       '@mercuryworkshop/epoxy-tls': 2.1.18-1
 
+  '@mercuryworkshop/wisp-js@0.5.0(utf-8-validate@6.0.6)':
+    dependencies:
+      bufferutil: 4.1.0
+      commander: 15.0.0
+      ipaddr.js: 2.5.0
+      ws: 8.22.0(bufferutil@4.1.0)(utf-8-validate@6.0.6)
+    transitivePeerDependencies:
+      - utf-8-validate
+
   '@remusao/guess-url-type@2.1.0': {}
 
   '@remusao/small@2.1.0': {}
@@ -1136,6 +1148,8 @@ snapshots:
       color-name: 1.1.4
 
   color-name@1.1.4: {}
+
+  commander@15.0.0: {}
 
   concat-map@0.0.1: {}
 
@@ -1413,6 +1427,8 @@ snapshots:
 
   ipaddr.js@1.9.1: {}
 
+  ipaddr.js@2.5.0: {}
+
   is-extglob@2.1.1: {}
 
   is-glob@4.0.3:
@@ -1658,18 +1674,13 @@ snapshots:
   utf-8-validate@6.0.6:
     dependencies:
       node-gyp-build: 4.8.4
+    optional: true
 
   vary@1.1.2: {}
 
   which@2.0.2:
     dependencies:
       isexe: 2.0.0
-
-  wisp-server-node@1.1.7(patch_hash=b3e181c57ca8a72758e1ec1975746f0ce7cd3f9906a2228eb071d302345a0851):
-    dependencies:
-      bufferutil: 4.1.0
-      utf-8-validate: 6.0.6
-      ws: 8.22.0(bufferutil@4.1.0)(utf-8-validate@6.0.6)
 
   word-wrap@1.2.5: {}
 

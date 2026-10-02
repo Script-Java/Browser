@@ -4,7 +4,7 @@ import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { createHmac } from "node:crypto";
 import express from "express";
-import wisp from "wisp-server-node";
+import { routeRequest } from "./wisp.js";
 import { build } from "esbuild";
 
 import { epoxyPath } from "@mercuryworkshop/epoxy-transport";
@@ -369,8 +369,7 @@ server.on("upgrade", (req, socket, head) => {
 		socket.end("HTTP/1.1 429 Too Many Requests\r\n\r\n");
 		return;
 	}
-	// logLevel 4 = none: wisp would otherwise log the sites people connect to.
-	wisp.routeRequest(req, socket, head, { logLevel: 4 });
+	routeRequest(req, socket, head);
 });
 
 let port = parseInt(process.env.PORT || "");

@@ -27,18 +27,15 @@
 		"@ghostery/adblocker": "^2.18.2",
 		"@mercuryworkshop/bare-mux": "^2.1.8",
 		"@mercuryworkshop/epoxy-transport": "2.1.28",
+		"@mercuryworkshop/wisp-js": "0.5.0",
 		"esbuild": "^0.25.12",
 		"express": "^5.2.1",
 		"tldts": "^7.4.16",
-		"wisp-server-node": "1.1.7",
 		"ws": "^8.22.0"
 	},
 	"pnpm": {
 		"onlyBuiltDependencies": [
 			"esbuild"
-		],
-		"patchedDependencies": {
-			"wisp-server-node@1.1.7": "patches/wisp-server-node@1.1.7.patch"
-		}
+		]
 	}
 }
