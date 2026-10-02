@@ -14,7 +14,7 @@ import { createAuth, parseCookies } from "./auth.js";
 import { Filters } from "./filters.js";
 import { serveMedia } from "./media.js";
 import { clientKey, createLimits } from "./limits.js";
-import { DEFAULT_SETTINGS } from "./settings.js";
+import { DEFAULT_SETTINGS, SEARCH_ENGINES } from "./settings.js";
 
 // Ultraviolet is built from ../Ultraviolet (patched to support config.construct).
 const uvPath = resolve(import.meta.dirname, "..", "..", "Ultraviolet", "dist");
@@ -107,6 +107,7 @@ function cleanSettings(input) {
 	const out = {};
 	for (const key of ["ads", "cosmetic", "videoAds", "threats", "wipe"])
 		out[key] = typeof input?.[key] === "boolean" ? input[key] : DEFAULT_SETTINGS[key];
+	out.search = SEARCH_ENGINES.includes(input?.search) ? input.search : DEFAULT_SETTINGS.search;
 	out.allow = Array.isArray(input?.allow)
 		? [...new Set(input.allow.filter((s) => typeof s === "string" && /^[a-z0-9.-]{1,253}$/.test(s)))].slice(0, 200)
 		: [];
@@ -269,10 +270,11 @@ app.post("/api/settings", express.json({ limit: "16kb" }), (req, res) => {
 	res.json(settings);
 });
 
-// The service worker calls this once per page load.
+// The service worker calls this once per page load. The site's hostname comes
+// in a header, not the URL, so it never shows up in the host's request logs.
 app.get("/api/nav", (req, res) => {
 	res.setHeader("Cache-Control", "no-store");
-	const host = String(req.query.host || "");
+	const host = String(req.headers["x-bios-host"] || "");
 	res.json({ settings: readSettings(req), threat: host ? filters.threat(host) : null });
 });
 
@@ -333,7 +335,8 @@ server.on("upgrade", (req, socket, head) => {
 		socket.end("HTTP/1.1 429 Too Many Requests\r\n\r\n");
 		return;
 	}
-	wisp.routeRequest(req, socket, head);
+	// logLevel 4 = none: wisp would otherwise log the sites people connect to.
+	wisp.routeRequest(req, socket, head, { logLevel: 4 });
 });
 
 let port = parseInt(process.env.PORT || "");

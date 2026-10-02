@@ -50,6 +50,22 @@ So one user can't hog the server or its bandwidth bill:
 
 Limits are per IP address (IPv6: per /64), so people behind one home router share them.
 
+## Privacy: what the server sees and keeps
+
+The server has no database and keeps no accounts, history or site data. The only thing it saves to disk is the downloaded block lists.
+
+- **Logins and cookies stay on the phone.** Sites' cookies, logins and storage live in the app's own browser storage on each device, not on the server. They stay until the person clears them (shield menu → **Clear all site data now**, or the "clear when the app opens" switch).
+- **HTTPS is encrypted on the phone.** The encryption (TLS) runs inside the app on the phone, and the server only relays encrypted bytes. It can't read passwords, cookies or pages of `https://` sites.
+- **What the server does learn:** the name of each site opened (for example `example.com`), so it can check it against the malware and phishing lists. It's used for that check and not logged. Videos that iOS plays with its own player are fetched by the server itself, so for those the server sees the video's address, and the host's request logs (Railway's HTTP logs) record it.
+- **Logs** contain errors and startup messages, never the sites people visit.
+- **Trust:** the server delivers the app's code, so the people using it are trusting whoever runs the server, like any website.
+
+Turn on site isolation below before letting people sign in to sites with it. Without it, every site shares one space in the browser, and a malicious site could read the logins other sites stored there.
+
+## Search
+
+The address bar searches with Brave Search by default. Each person can switch to DuckDuckGo, Bing or Google in the shield menu. Google shows a "prove you're not a robot" page for searches made through the proxy, even from a home connection, so it isn't the default.
+
 ## Turn on site isolation (needs your own domain)
 
 By default every site runs in one shared space, the app's own address. A malicious site could reach into what other sites stored there, including their logins. Site isolation gives every site its own address (`<code>.browse.example.com`), and the browser walls those addresses off from each other and from the app.

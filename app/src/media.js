@@ -232,7 +232,8 @@ export async function serveMedia(req, res, countBytes = () => {}) {
 	try {
 		upstream = await upstreamRequest(target, headers, req.method);
 	} catch (err) {
-		console.warn(`media: ${target.hostname}: ${err.message}`);
+		// no hostname: the server doesn't keep a record of where people browse
+		console.warn(`media: ${err.message.replace(target.hostname, "<site>")}`);
 		res.status(502).type("text/plain").send("Couldn't reach the media server.");
 		return true;
 	}

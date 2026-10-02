@@ -213,8 +213,9 @@ export function createShield(uv, config) {
 			return cached.verdict;
 		}
 		try {
-			const res = await fetch("/api/nav?host=" + encodeURIComponent(hostname), {
+			const res = await fetch("/api/nav", {
 				cache: "no-store",
+				headers: { "x-bios-host": hostname },
 			});
 			if (!res.ok) throw new Error(`HTTP ${res.status}`);
 			const data = await res.json();

@@ -4,7 +4,13 @@
 // find the tab frame and never navigate the shell itself.
 window.__uvShell = true;
 
-const SEARCH = "https://duckduckgo.com/?q=%s";
+// Keys match SEARCH_ENGINES in src/settings.js.
+const SEARCH = {
+	google: "https://www.google.com/search?q=%s",
+	duckduckgo: "https://duckduckgo.com/?q=%s",
+	bing: "https://www.bing.com/search?q=%s",
+	brave: "https://search.brave.com/search?q=%s",
+};
 
 const config = __uv$config.bios || {};
 // Isolation mode: the shell runs on ISOLATION_DOMAIN and every site on its
@@ -59,7 +65,8 @@ function toUrl(input) {
 		// not a hostname
 	}
 
-	return SEARCH.replace("%s", encodeURIComponent(input));
+	const engine = SEARCH[settings?.search] || SEARCH.brave;
+	return engine.replace("%s", encodeURIComponent(input));
 }
 
 let ready;
@@ -406,6 +413,7 @@ function renderSheet() {
 
 	for (const input of sheet.querySelectorAll("[data-setting]"))
 		input.checked = !!settings[input.dataset.setting];
+	document.getElementById("search-engine").value = settings.search;
 
 	document.getElementById("lock-form").hidden = !config.auth;
 
@@ -465,6 +473,16 @@ for (const input of sheet.querySelectorAll("[data-setting]")) {
 		}
 	});
 }
+
+const searchSelect = document.getElementById("search-engine");
+searchSelect.addEventListener("change", async () => {
+	try {
+		await saveSettings({ ...settings, search: searchSelect.value });
+	} catch (err) {
+		searchSelect.value = settings.search;
+		document.getElementById("filter-status").textContent = err.message;
+	}
+});
 
 document
 	.getElementById("site-toggle")

@@ -302,6 +302,17 @@ body.loading #progress {
 	display: none;
 }
 
+#sheet select {
+	flex: none;
+	min-height: 36px;
+	padding: 0 10px;
+	border: 0;
+	border-radius: 8px;
+	background: #3a3a48;
+	color: inherit;
+	font: inherit;
+}
+
 #sheet .row small {
 	display: block;
 	color: var(--muted);
