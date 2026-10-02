@@ -171,6 +171,12 @@ const app = express();
 app.set("trust proxy", true);
 app.disable("x-powered-by");
 
+// For the host's health check (railway.json); before the site and password rules.
+app.get("/healthz", (req, res) => {
+	res.setHeader("Cache-Control", "no-store");
+	res.type("text/plain").send("ok");
+});
+
 app.use((req, res, next) => {
 	res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
 	res.setHeader("Cross-Origin-Embedder-Policy", "require-corp");
@@ -355,10 +361,15 @@ server.on("listening", () => {
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
 
-function shutdown() {
-	console.log("SIGTERM signal received: closing HTTP server");
-	server.close();
-	process.exit(0);
+// Stop taking connections and let open requests finish, so a deploy doesn't
+// cut page loads off halfway. railway.json gives us 15s before the kill.
+function shutdown(signal) {
+	console.log(`${signal} received: finishing open requests`);
+	server.close(() => process.exit(0));
+	server.closeIdleConnections();
+	// ponytail: proxy WebSockets and video streams never end on their own;
+	// they're cut after 10s and the app reconnects to the new deploy.
+	setTimeout(() => process.exit(0), 10_000).unref();
 }
 
 filters.start();

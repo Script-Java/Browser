@@ -18,7 +18,7 @@
 	],
 	"packageManager": "pnpm@10.28.0",
 	"author": "",
-	"license": "GPL-3.0-or-later",
+	"license": "AGPL-3.0-or-later",
 	"devDependencies": {
 		"eslint": "^9.39.2",
 		"prettier": "^3.8.1"
@@ -31,7 +31,7 @@
 		"express": "^5.2.1",
 		"tldts": "^7.4.16",
 		"wisp-server-node": "1.1.7",
-		"ws": "^8.19.0"
+		"ws": "^8.22.0"
 	},
 	"pnpm": {
 		"onlyBuiltDependencies": [

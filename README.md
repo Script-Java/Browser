@@ -74,6 +74,7 @@ The shield menu says whether isolation is on.
 ```sh
 pnpm run setup   # build Ultraviolet, install the app
 pnpm start       # http://localhost:8787  (PORT=... to change)
+pnpm -C app test # unit tests (CI also runs lint, audit and a Docker build)
 ```
 
 The iPhone needs HTTPS for the proxy's service worker, so a local `http://` address only works on this computer.
