@@ -38,16 +38,22 @@ const homeInput = $("home-input");
 const barForm = $("bar-form");
 const barInput = $("bar-input");
 const siteBtn = $("site-btn");
+const splitBtn = $("split-btn");
 const star = $("star");
 const error = $("error");
 const sheet = $("sheet");
 const library = $("library");
+const suggestEl = $("suggest");
 
 // The page area starts below the chrome, whose height changes with the
 // bookmarks bar.
 new ResizeObserver(() =>
 	document.documentElement.style.setProperty("--chrome-h", chrome.offsetHeight + "px")
 ).observe(chrome);
+
+const isMac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+for (const kbd of document.querySelectorAll(".kbd"))
+	kbd.textContent = isMac ? "⌘K" : "Ctrl K";
 
 /**
  * @param {string} input
@@ -71,8 +77,12 @@ function toUrl(input) {
 		// not a hostname
 	}
 
+	return searchUrl(input);
+}
+
+function searchUrl(query) {
 	const engine = SEARCH[settings?.search] || SEARCH.brave;
-	return engine.replace("%s", encodeURIComponent(input));
+	return engine.replace("%s", encodeURIComponent(query.trim()));
 }
 
 let ready;
@@ -100,6 +110,7 @@ function displayHost(url) {
 }
 
 // A site's "favicon": the first letter of its name on a dark square.
+// (Sites' real icons would mean fetching them, and telling them.)
 function markFor(url) {
 	const mark = document.createElement("span");
 	mark.className = "mark";
@@ -114,6 +125,14 @@ function badgerMark() {
 	img.src = "/icons/badger.png";
 	img.alt = "";
 	return img;
+}
+
+function svgIcon(paths) {
+	const span = document.createElement("span");
+	span.className = "glyph";
+	span.setAttribute("aria-hidden", "true");
+	span.innerHTML = `<svg viewBox="0 0 24 24">${paths}</svg>`;
+	return span;
 }
 
 // ----------------------------------------------------------- site origins
@@ -208,15 +227,26 @@ function ensureAnchor(origin) {
 
 // -------------------------------------------------------------------- tabs
 
-/** @type {{ id: number, frame: HTMLIFrameElement, url: string, title: string, siteOrigin: string, loading: boolean }[]} */
+/**
+ * @typedef {{ id: number, frame: HTMLIFrameElement, url: string, title: string,
+ *   siteOrigin: string, loading: boolean, pending: boolean }} Tab
+ * `pending`: a restored tab whose page loads the first time it's shown.
+ */
+/** @type {Tab[]} */
 const tabs = [];
+/** @type {Tab | null} */
 let active = null;
+let lastActive = null;
+/** @type {[Tab, Tab] | null} the two tabs side by side in split view */
+let split = null;
 let nextTabId = 1;
+const MAX_TABS = 50;
 
-function createTab(url) {
+function createTab(url = "", { after = null, lazy = false, title = "", select = true } = {}) {
+	if (tabs.length >= MAX_TABS) return null;
 	const id = nextTabId++;
 	const frame = document.createElement("iframe");
-	// unique per tab: page.js aims target=_blank links at its own tab's name
+	// unique per tab: page.js aims links at its own tab's name
 	frame.name = `uvframe-${id}`;
 	frame.title = "Page";
 	frame.allow =
@@ -224,9 +254,18 @@ function createTab(url) {
 	frame.hidden = true;
 	framesEl.appendChild(frame);
 
-	const tab = { id, frame, url: "", title: "", siteOrigin: "", loading: false };
+	/** @type {Tab} */
+	const tab = {
+		id,
+		frame,
+		url: lazy ? url : "",
+		title: lazy ? title : "",
+		siteOrigin: "",
+		loading: false,
+		pending: lazy,
+	};
 	frame.addEventListener("load", () => {
-		if (!tab.url) return;
+		if (!tab.url || tab.pending) return;
 		setLoading(tab, false);
 		syncAddress(tab);
 		try {
@@ -235,21 +274,33 @@ function createTab(url) {
 			// cross-origin frame
 		}
 	});
-	tabs.push(tab);
-	selectTab(tab);
-	if (url) go(url, tab);
-	else homeInput.focus({ preventScroll: true });
+
+	const at = after && tabs.includes(after) ? tabs.indexOf(after) + 1 : tabs.length;
+	tabs.splice(at, 0, tab);
+	if (select) selectTab(tab);
+	else renderTabs();
+	if (url && !lazy) go(url, tab);
+	else if (!url && select) homeInput.focus({ preventScroll: true });
 	return tab;
 }
 
 function selectTab(tab) {
+	if (active && active !== tab) lastActive = active;
 	active = tab;
-	for (const t of tabs) t.frame.hidden = t !== tab || !t.url;
-	document.body.classList.toggle("browsing", !!tab.url);
-	document.body.classList.toggle("loading", tab.loading);
+	if (split && !split.includes(tab)) {
+		// a tab picked from the strip replaces the pane that was focused
+		if (tab.url) split[Math.max(0, split.indexOf(lastActive))] = tab;
+		else split = null;
+	}
+	if (tab.pending) {
+		tab.pending = false;
+		go(tab.url, tab);
+	}
 	error.textContent = "";
 	homeInput.value = "";
+	hideSuggest();
 	if (!tab.url) renderNewTab();
+	layout();
 	renderTabs();
 	showAddress();
 }
@@ -257,16 +308,35 @@ function selectTab(tab) {
 function closeTab(tab) {
 	const i = tabs.indexOf(tab);
 	if (i === -1) return;
+	if (split?.includes(tab)) split = null;
 	tabs.splice(i, 1);
 	tab.frame.remove();
+	if (lastActive === tab) lastActive = null;
 	if (!tabs.length) createTab();
 	else if (tab === active) selectTab(tabs[Math.min(i, tabs.length - 1)]);
-	else renderTabs();
+	else {
+		layout();
+		renderTabs();
+	}
 }
 
 function setLoading(tab, loading) {
 	tab.loading = loading;
 	if (tab === active) document.body.classList.toggle("loading", loading);
+}
+
+// Which frames show: the active tab, or both tabs in split view.
+function layout() {
+	if (!active) return;
+	const shown = split || [active];
+	for (const t of tabs) {
+		t.frame.hidden = !shown.includes(t) || !t.url;
+		t.frame.classList.toggle("focused", !!split && t === active);
+		t.frame.style.order = split ? String(split.indexOf(t)) : "";
+	}
+	framesEl.classList.toggle("split", !!split);
+	document.body.classList.toggle("browsing", !!active.url);
+	document.body.classList.toggle("loading", active.loading);
 }
 
 function tabLabel(tab) {
@@ -278,8 +348,10 @@ function renderTabs() {
 		...tabs.map((tab) => {
 			const el = document.createElement("div");
 			el.className = "tab";
+			el.classList.toggle("paired", !!split && split.includes(tab) && tab !== active);
 			el.setAttribute("role", "tab");
 			el.setAttribute("aria-selected", String(tab === active));
+			el.tabIndex = tab === active ? 0 : -1;
 			el.title = tabLabel(tab);
 			const title = document.createElement("span");
 			title.className = "tab-title";
@@ -296,6 +368,19 @@ function renderTabs() {
 			});
 			el.append(tab.url ? markFor(tab.url) : badgerMark(), title, close);
 			el.addEventListener("click", () => selectTab(tab));
+			el.addEventListener("keydown", (event) => {
+				if (event.target !== el) return;
+				if (event.key === "Enter" || event.key === " ") {
+					event.preventDefault();
+					selectTab(tab);
+				} else if (event.key === "ArrowRight" || event.key === "ArrowLeft") {
+					const next = tabs[tabs.indexOf(tab) + (event.key === "ArrowRight" ? 1 : -1)];
+					if (next) {
+						selectTab(next);
+						$("tabs").querySelector('[aria-selected="true"]')?.focus();
+					}
+				}
+			});
 			// middle click closes, like any browser
 			el.addEventListener("auxclick", (event) => {
 				if (event.button === 1) closeTab(tab);
@@ -303,26 +388,110 @@ function renderTabs() {
 			return el;
 		})
 	);
+	$("tabs").querySelector('[aria-selected="true"]')?.scrollIntoView({ block: "nearest", inline: "nearest" });
 	document.title = active?.url ? tabLabel(active) : "Badger";
+
+	const canSplitNow = canSplit();
+	splitBtn.disabled = !split && !canSplitNow;
+	splitBtn.setAttribute("aria-pressed", String(!!split));
+	splitBtn.title = split
+		? "Close split view"
+		: canSplitNow
+			? "Show two tabs side by side"
+			: "Open another page in a tab to use split view";
+	saveTabs();
 }
+
+// Open tabs are kept on this device so they come back when the app reopens.
+const TABS = "bios:tabs";
+
+function saveTabs() {
+	const open = tabs.filter((t) => t.url);
+	saveEntries(TABS, {
+		tabs: open.map(({ url, title }) => ({ url, title })),
+		active: open.indexOf(active),
+	});
+}
+
+function restoreTabs() {
+	const saved = readList(TABS);
+	const list = Array.isArray(saved?.tabs)
+		? saved.tabs
+				.filter((t) => typeof t?.url === "string" && /^https?:/.test(t.url))
+				.slice(0, MAX_TABS)
+		: [];
+	if (!list.length) return false;
+	const made = list.map((t) =>
+		createTab(t.url, { lazy: true, title: String(t.title || "").slice(0, 300), select: false })
+	);
+	selectTab(made[saved.active] || made[0]);
+	return true;
+}
+
+// ------------------------------------------------------------- split view
+
+const wide = matchMedia("(min-width: 900px)");
+
+function canSplit() {
+	return wide.matches && !!active?.url && tabs.some((t) => t !== active && t.url);
+}
+
+function toggleSplit() {
+	if (split) split = null;
+	else {
+		if (!canSplit()) return;
+		const partner = [lastActive, ...tabs].find(
+			(t) => t && t !== active && t.url && tabs.includes(t)
+		);
+		if (partner.pending) {
+			partner.pending = false;
+			go(partner.url, partner);
+		}
+		split = [active, partner];
+	}
+	layout();
+	renderTabs();
+}
+
+splitBtn.addEventListener("click", toggleSplit);
+wide.addEventListener("change", () => {
+	if (!wide.matches && split) toggleSplit();
+	else renderTabs();
+});
+
+// In split view, clicking into a pane makes it the active tab. Clicks inside
+// a frame never reach the shell, so watch which frame has focus.
+function followPaneFocus() {
+	if (!split) return;
+	const tab = split.find((t) => t.frame === document.activeElement);
+	if (tab && tab !== active) selectTab(tab);
+}
+window.addEventListener("blur", () => setTimeout(followPaneFocus, 0));
 
 // ------------------------------------------------------------- navigation
 
 let startup = Promise.resolve();
 
 async function go(input, tab = active) {
-	if (!input.trim()) return;
+	if (!input.trim() || !tab) return;
 	error.textContent = "";
+	hideSuggest();
 	try {
 		await startup;
 		await ensureReady();
 		const url = toUrl(input);
 		// before touching the tab: throws for addresses that can't be opened
 		const src = await frameUrlFor(url, tab);
+		if (!tabs.includes(tab)) return;
 		tab.url = url;
 		tab.title = "";
+		tab.pending = false;
 		setLoading(tab, true);
-		if (tab === active) selectTab(tab);
+		if (tab === active) {
+			layout();
+			showAddress();
+		}
+		renderTabs();
 		tab.frame.src = src;
 	} catch (err) {
 		error.textContent = err.message || String(err);
@@ -347,7 +516,9 @@ function showAddress() {
 	else if (url.startsWith("http:")) state = "warn";
 	siteBtn.dataset.state = state;
 	star.hidden = !url;
-	star.setAttribute("aria-pressed", String(isBookmarked(url)));
+	const marked = isBookmarked(url);
+	star.setAttribute("aria-pressed", String(marked));
+	star.setAttribute("aria-label", marked ? "Remove bookmark" : "Bookmark this page");
 	if (document.activeElement === barInput) return;
 	const shown = url ? displayHost(url) : "";
 	if (barInput.value !== shown) barInput.value = shown;
@@ -370,6 +541,38 @@ function syncAddress(tab) {
 
 const tabFor = (source) => tabs.find((t) => t.frame.contentWindow === source);
 
+// The tab a message came from: its own page, or a frame inside it.
+function tabOf(source) {
+	for (let w = source, depth = 0; w && depth < 20; depth++) {
+		const tab = tabFor(w);
+		if (tab) return tab;
+		if (w.parent === w) break;
+		w = w.parent;
+	}
+	return null;
+}
+
+// A page asked for a new window (target=_blank, window.open, Ctrl/Cmd-click,
+// middle click): open a tab next to it. Only right after a real click or
+// tap, and one tab per click, so a page can't open tabs by itself.
+let lastOpen = 0;
+function openFromPage(event) {
+	const tab = tabOf(event.source);
+	if (!tab || typeof event.data.url !== "string") return;
+	if (isolated ? !SITE_ORIGIN.test(event.origin) : event.origin !== location.origin) return;
+	if (navigator.userActivation && !navigator.userActivation.isActive) return;
+	if (Date.now() - lastOpen < 400) return;
+	let url;
+	try {
+		url = new URL(event.data.url);
+	} catch {
+		return;
+	}
+	if (url.protocol !== "http:" && url.protocol !== "https:") return;
+	lastOpen = Date.now();
+	createTab(url.href, { after: tab, select: !event.data.background });
+}
+
 async function onFrameMessage(event) {
 	const data = event.data;
 
@@ -381,6 +584,8 @@ async function onFrameMessage(event) {
 				addBlocked(data.count);
 		return;
 	}
+
+	if (data?.bios === "open") return openFromPage(event);
 
 	const tab = tabFor(event.source);
 	if (!tab) return;
@@ -424,13 +629,15 @@ async function onFrameMessage(event) {
 
 window.addEventListener("message", onFrameMessage);
 
-// catches pushState/SPA navigations
-setInterval(() => active && syncAddress(active), 500);
+// catches pushState/SPA navigations, and focus moving between split panes
+setInterval(() => {
+	followPaneFocus();
+	if (active) syncAddress(active);
+}, 400);
 
 // Back, forward and reload act on the tab's own page. In isolation mode the
 // frame is cross-origin, so the page does it when the shell asks.
-function tabCommand(cmd) {
-	const tab = active;
+function tabCommand(cmd, tab = active) {
 	if (!tab?.url) return;
 	if (cmd === "reload") setLoading(tab, true);
 	try {
@@ -451,8 +658,9 @@ $("new-tab").addEventListener("click", () => createTab());
 
 homeForm.addEventListener("submit", (event) => {
 	event.preventDefault();
+	const value = homeInput.value;
 	homeInput.blur();
-	go(homeInput.value);
+	go(value);
 });
 
 barForm.addEventListener("submit", (event) => {
@@ -471,12 +679,160 @@ barInput.addEventListener("blur", showAddress);
 
 // Cmd/Ctrl+K or +L: jump to the address bar (or the new tab's search box).
 document.addEventListener("keydown", (event) => {
+	if (event.key === "Escape") {
+		sheet.hidden = library.hidden = true;
+		hideSuggest();
+		return;
+	}
 	if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
 	const key = event.key.toLowerCase();
 	if (key !== "k" && key !== "l") return;
 	event.preventDefault();
 	(active?.url ? barInput : homeInput).focus();
 });
+
+// ---------------------------------------- address bar suggestions/commands
+
+const COMMANDS = [
+	{ name: "New tab", run: () => createTab() },
+	{ name: "Close tab", run: () => closeTab(active) },
+	{ name: "History", run: openHistory },
+	{ name: "Settings", run: openSheet },
+	{ name: "Bookmark this page", when: () => !!active?.url && !isBookmarked(active.url), run: toggleBookmark },
+	{ name: "Remove bookmark", when: () => isBookmarked(active?.url), run: toggleBookmark },
+	{ name: "Split view", when: () => !split && canSplit(), run: toggleSplit },
+	{ name: "Close split view", when: () => !!split, run: toggleSplit },
+	{ name: "Reload page", when: () => !!active?.url, run: () => tabCommand("reload") },
+	// opens Settings on the button rather than wiping from a typo
+	{
+		name: "Clear history and site data",
+		run: () => openSheet().then(() => $("wipe-now").focus()),
+	},
+];
+
+const SEARCH_GLYPH = '<circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.3-4.3"/>';
+const COMMAND_GLYPH = '<path d="M5 7l5 5-5 5M12 17h7"/>';
+
+let suggestFor = null;
+let suggestItems = [];
+let suggestIndex = 0;
+
+function suggestions(query) {
+	const q = query.trim().toLowerCase();
+	if (!q) return [];
+	const target = toUrl(query);
+	const items = [
+		{
+			glyph: SEARCH_GLYPH,
+			label: query.trim(),
+			detail: target === searchUrl(query) ? "Search" : "Go to address",
+			run: () => go(query),
+		},
+	];
+	if (q.length >= 2)
+		for (const c of COMMANDS)
+			if ((!c.when || c.when()) && c.name.toLowerCase().includes(q))
+				items.push({ glyph: COMMAND_GLYPH, label: c.name, detail: "Command", run: c.run });
+	const seen = new Set();
+	const pages = [
+		...readEntries(BOOKMARKS).map((e) => ({ ...e, bookmark: true })),
+		...readEntries(HISTORY),
+	];
+	for (const page of pages) {
+		if (items.length >= 8) break;
+		if (seen.has(page.url)) continue;
+		if (!(page.title || "").toLowerCase().includes(q) && !page.url.toLowerCase().includes(q))
+			continue;
+		seen.add(page.url);
+		items.push({
+			url: page.url,
+			label: nameOf(page),
+			detail: (page.bookmark ? "Bookmark · " : "") + displayHost(page.url),
+			run: () => go(page.url),
+		});
+	}
+	return items;
+}
+
+function showSuggest(input) {
+	suggestFor = input;
+	suggestItems = suggestions(input.value);
+	suggestIndex = 0;
+	// just "search for what you typed": nothing worth a list
+	if (suggestItems.length < 2) return hideSuggest();
+	const box = input.closest("form").getBoundingClientRect();
+	suggestEl.style.left = box.left + "px";
+	suggestEl.style.top = box.bottom + 6 + "px";
+	suggestEl.style.width = box.width + "px";
+	suggestEl.replaceChildren(
+		...suggestItems.map((item, i) => {
+			const li = document.createElement("li");
+			li.id = `suggest-${i}`;
+			li.setAttribute("role", "option");
+			const label = document.createElement("span");
+			label.className = "label";
+			label.textContent = item.label;
+			const detail = document.createElement("span");
+			detail.className = "detail";
+			detail.textContent = item.detail;
+			li.append(item.url ? markFor(item.url) : svgIcon(item.glyph), label, detail);
+			// mousedown: before the input's blur hides the list
+			li.addEventListener("mousedown", (event) => {
+				event.preventDefault();
+				pickSuggestion(i);
+			});
+			return li;
+		})
+	);
+	suggestEl.hidden = false;
+	input.setAttribute("aria-expanded", "true");
+	markSuggestion();
+}
+
+function markSuggestion() {
+	suggestEl.querySelectorAll("li").forEach((li, i) =>
+		li.setAttribute("aria-selected", String(i === suggestIndex))
+	);
+	suggestFor?.setAttribute("aria-activedescendant", `suggest-${suggestIndex}`);
+}
+
+function hideSuggest() {
+	suggestEl.hidden = true;
+	suggestItems = [];
+	suggestFor?.setAttribute("aria-expanded", "false");
+	suggestFor?.removeAttribute("aria-activedescendant");
+}
+
+function pickSuggestion(i) {
+	const item = suggestItems[i];
+	const input = suggestFor;
+	hideSuggest();
+	input?.blur();
+	item?.run();
+}
+
+for (const input of [barInput, homeInput]) {
+	input.setAttribute("role", "combobox");
+	input.setAttribute("aria-autocomplete", "list");
+	input.setAttribute("aria-controls", "suggest");
+	input.setAttribute("aria-expanded", "false");
+	input.addEventListener("input", () => showSuggest(input));
+	input.addEventListener("keydown", (event) => {
+		if (suggestEl.hidden || suggestFor !== input) return;
+		if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+			event.preventDefault();
+			const step = event.key === "ArrowDown" ? 1 : -1;
+			suggestIndex = (suggestIndex + step + suggestItems.length) % suggestItems.length;
+			markSuggestion();
+		} else if (event.key === "Enter" && suggestIndex > 0) {
+			// the first item is a plain search/go, which the form handles
+			event.preventDefault();
+			pickSuggestion(suggestIndex);
+		}
+	});
+	input.addEventListener("blur", () => setTimeout(() => suggestFor === input && hideSuggest(), 150));
+}
+window.addEventListener("resize", hideSuggest);
 
 // --------------------------------------------------------------- settings
 
@@ -550,14 +906,9 @@ function renderSheet() {
 }
 
 async function openSheet() {
+	library.hidden = true;
 	sheet.hidden = false;
 	renderSheet();
-	try {
-		await loadSettings();
-		renderSheet();
-	} catch (err) {
-		$("filter-status").textContent = err.message;
-	}
 	fetch("/filters/status", { cache: "no-store" })
 		.then((res) => res.json())
 		.then((status) => {
@@ -570,6 +921,12 @@ async function openSheet() {
 				: "Block lists are still downloading. Ads aren't blocked until they finish.";
 		})
 		.catch(() => {});
+	try {
+		await loadSettings();
+		renderSheet();
+	} catch (err) {
+		$("filter-status").textContent = err.message;
+	}
 }
 
 siteBtn.addEventListener("click", openSheet);
@@ -581,9 +938,6 @@ for (const panel of [sheet, library])
 	panel.addEventListener("click", (event) => {
 		if (event.target === panel) panel.hidden = true;
 	});
-document.addEventListener("keydown", (event) => {
-	if (event.key === "Escape") sheet.hidden = library.hidden = true;
-});
 
 for (const input of sheet.querySelectorAll("[data-setting]")) {
 	input.addEventListener("change", async () => {
@@ -671,11 +1025,13 @@ function clearOrigin(origin) {
 	});
 }
 
-// Deletes every site's cookies, storage and logins, and the history. Every
-// tab closes first so no page holds its databases open.
+// Deletes every site's cookies, storage and logins, the history and the open
+// tabs. Every tab closes first so no page holds its databases open.
 async function clearAllSiteData() {
 	localStorage.removeItem(HISTORY);
+	split = null;
 	for (const tab of [...tabs]) closeTab(tab);
+	localStorage.removeItem(TABS);
 	// let the closed pages release their databases first
 	await new Promise((resolve) => setTimeout(resolve, 50));
 	await clearStorageHere();
@@ -778,12 +1134,16 @@ function renderBookmarksBar() {
 			label.textContent = nameOf(b);
 			button.append(markFor(b.url), label);
 			button.addEventListener("click", () => go(b.url));
+			// middle click: open in a new tab
+			button.addEventListener("auxclick", (event) => {
+				if (event.button === 1) createTab(b.url, { after: active, select: false });
+			});
 			return button;
 		})
 	);
 }
 
-star.addEventListener("click", () => {
+function toggleBookmark() {
 	const url = active?.url;
 	if (!url) return;
 	const list = readEntries(BOOKMARKS);
@@ -794,7 +1154,9 @@ star.addEventListener("click", () => {
 	saveEntries(BOOKMARKS, list);
 	renderBookmarksBar();
 	showAddress();
-});
+}
+
+star.addEventListener("click", toggleBookmark);
 
 function renderHistory() {
 	const list = readEntries(HISTORY).slice(0, 300);
@@ -805,17 +1167,20 @@ function renderHistory() {
 	);
 }
 
-$("history-open").addEventListener("click", () => {
+function openHistory() {
 	sheet.hidden = true;
 	renderHistory();
 	library.hidden = false;
-});
+}
+
+$("history-open").addEventListener("click", openHistory);
 $("library-close").addEventListener("click", () => {
 	library.hidden = true;
 });
 $("history-clear").addEventListener("click", () => {
 	localStorage.removeItem(HISTORY);
 	renderHistory();
+	if (!active?.url) renderNewTab();
 });
 
 // ---------------------------------------------------------------- new tab
@@ -861,25 +1226,32 @@ function renderNewTab() {
 const BLOCKED = "bios:blocked";
 // local calendar day, YYYY-MM-DD
 const dayKey = (ms) => new Date(ms).toLocaleDateString("en-CA");
+const lastWeek = () =>
+	new Set(Array.from({ length: 7 }, (_, i) => dayKey(Date.now() - i * 86_400_000)));
+
+function blockedByDay() {
+	const byDay = readList(BLOCKED);
+	return byDay && typeof byDay === "object" && !Array.isArray(byDay) ? byDay : {};
+}
 
 function addBlocked(count) {
 	count = Math.min(Math.max(0, Math.floor(Number(count) || 0)), 10_000);
 	if (!count) return;
-	const days = readList(BLOCKED);
-	const byDay = days && typeof days === "object" && !Array.isArray(days) ? days : {};
+	const byDay = blockedByDay();
 	const today = dayKey(Date.now());
 	byDay[today] = (byDay[today] || 0) + count;
-	const week = new Set(Array.from({ length: 7 }, (_, i) => dayKey(Date.now() - i * 86_400_000)));
+	const week = lastWeek();
 	for (const day of Object.keys(byDay)) if (!week.has(day)) delete byDay[day];
 	saveEntries(BLOCKED, byDay);
 	if (!active?.url) $("stat-blocked").textContent = blockedThisWeek().toLocaleString();
 }
 
 function blockedThisWeek() {
-	const byDay = readList(BLOCKED);
-	if (!byDay || typeof byDay !== "object" || Array.isArray(byDay)) return 0;
-	const week = new Set(Array.from({ length: 7 }, (_, i) => dayKey(Date.now() - i * 86_400_000)));
-	return Object.entries(byDay).reduce((sum, [day, n]) => sum + (week.has(day) ? Number(n) || 0 : 0), 0);
+	const week = lastWeek();
+	return Object.entries(blockedByDay()).reduce(
+		(sum, [day, n]) => sum + (week.has(day) ? Number(n) || 0 : 0),
+		0
+	);
 }
 
 navigator.serviceWorker?.addEventListener("message", (event) => {
@@ -904,9 +1276,10 @@ renderBookmarksBar();
 if (location.hash.length > 1) {
 	const target = decodeURIComponent(location.hash.slice(1));
 	history.replaceState(null, "", "/");
+	restoreTabs();
 	createTab(target);
 } else {
-	createTab();
+	if (!restoreTabs()) createTab();
 	// warm up the service worker and transport so the first search is fast
 	startup.then(ensureReady).catch((err) => {
 		error.textContent = err.message || String(err);

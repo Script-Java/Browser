@@ -147,15 +147,22 @@ Most of this lives in `app/src/client/page.js` (`noPopups`). It runs inside ever
 
 | Would normally… | Now |
 | --- | --- |
-| `target="_blank"` / `_top` / unknown named target links and forms open a Safari sheet or replace the app | open in the app's tab |
-| `window.open(url)` opens a new window | navigates the tab; calls without a user gesture (pop-unders) are dropped |
+| `target="_blank"` / unknown named target links open a Safari sheet | open in a new Badger tab next to the page (Ctrl/⌘-click or middle click: in the background) |
+| `_top` links and forms replace the app | stay in the page's tab |
+| `window.open(url)` opens a new window | opens a new Badger tab after a click or tap; calls without one (pop-ups, pop-unders) are dropped |
 | `mailto:`, `tel:`, `sms:`, `maps:`, app-store links hand off to another app | blocked |
 | `alert` / `confirm` / `prompt` / `print` | silenced (`confirm` → true, `prompt` → null) |
 | location, camera/mic, notifications, motion sensors, share sheet, passkeys, Apple Pay, clipboard paste, storage-access prompts | denied without showing a prompt |
 | long-press link/image previews | disabled |
 | a proxied page escaping to the top level | gets wrapped back into the shell |
 
-The shell itself has no outbound links. It draws its own browser chrome (tabs, back, forward, reload, address bar, bookmarks), because standalone mode has none. Links that would open a new window open in the same tab.
+The shell itself has no outbound links. It draws its own browser chrome, because standalone mode has none:
+
+- **Tabs**: open, close (× or middle click), switch (click or arrow keys). Open tabs come back when the app reopens; background ones load when you switch to them.
+- **Address bar**: suggestions from bookmarks and history as you type, and commands (New tab, Close tab, History, Settings, Bookmark this page, Split view, Reload page, Clear history and site data). Arrow keys and Enter pick one; plain Enter always searches or opens what you typed. Ctrl/⌘+K or +L jumps to it.
+- **Bookmarks**: the star in the address bar, the bookmarks bar, and shortcuts on the new tab page.
+- **Split view** (wide screens): two tabs side by side; click a pane to make it the active tab, or pick a tab from the strip to put it in the focused pane.
+- **⋯ menu**: settings, history, and clearing data.
 
 Not covered: the iOS keyboard and its autofill bar, and file downloads served as attachments (iOS asks before saving them).
 

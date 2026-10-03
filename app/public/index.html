@@ -81,6 +81,12 @@
 					<kbd class="kbd">⌘K</kbd>
 				</form>
 
+				<button id="split-btn" class="icon-btn" type="button" aria-label="Split view" aria-pressed="false" disabled>
+					<svg viewBox="0 0 24 24">
+						<rect x="3.5" y="5" width="17" height="14" rx="2" />
+						<path d="M12 5v14" />
+					</svg>
+				</button>
 				<button id="menu-btn" class="icon-btn" type="button" aria-label="Settings and history">
 					<svg viewBox="0 0 24 24" class="filled">
 						<circle cx="5" cy="12" r="1.6" />
@@ -109,8 +115,8 @@
 					autocapitalize="off"
 					autocorrect="off"
 					spellcheck="false"
-					aria-label="Search or type a URL"
-					placeholder="Search or type a URL"
+					aria-label="Search, type a URL, or run a command"
+					placeholder="Search, type a URL, or run a command"
 				/>
 				<kbd class="kbd">⌘K</kbd>
 			</form>
@@ -206,6 +212,8 @@
 				<button id="history-clear" class="wide" type="button">Clear history</button>
 			</div>
 		</div>
+
+		<ul id="suggest" role="listbox" aria-label="Suggestions" hidden></ul>
 
 		<script src="/register-sw.js"></script>
 		<script src="/index.js"></script>
