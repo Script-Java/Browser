@@ -1,0 +1,187 @@
+/* Same palette as the app (app/public/index.css). System fonts only: the
+   site loads nothing from anyone else. */
+:root {
+	--bg: #faf9f7;
+	--surface: #ffffff;
+	--line: #e2e0dc;
+	--ink: #1f1e1d;
+	--text: #2b2a28;
+	--muted: #6f6c68;
+	--button: #1f1e1d;
+	--button-ink: #ffffff;
+}
+
+@media (prefers-color-scheme: dark) {
+	:root {
+		--bg: #1a1918;
+		--surface: #232220;
+		--line: #353330;
+		--ink: #f2f0ec;
+		--text: #e2dfda;
+		--muted: #a29e98;
+		--button: #f2f0ec;
+		--button-ink: #1a1918;
+	}
+}
+
+* {
+	box-sizing: border-box;
+}
+
+body {
+	margin: 0;
+	background: var(--bg);
+	color: var(--text);
+	font: 16px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+	-webkit-text-size-adjust: 100%;
+}
+
+a {
+	color: var(--ink);
+}
+
+.top,
+main,
+footer {
+	max-width: 960px;
+	margin: 0 auto;
+	padding: 0 16px;
+}
+
+.top {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	height: 64px;
+}
+
+.brand {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	font-weight: 650;
+	font-size: 18px;
+	text-decoration: none;
+}
+
+.quiet {
+	color: var(--muted);
+	font-size: 14px;
+}
+
+.hero {
+	padding: 56px 0 48px;
+	text-align: center;
+}
+
+.mark {
+	border-radius: 18px;
+}
+
+h1 {
+	margin: 18px 0 12px;
+	color: var(--ink);
+	font-size: clamp(32px, 6vw, 52px);
+	line-height: 1.08;
+	letter-spacing: -0.02em;
+}
+
+.lede {
+	max-width: 620px;
+	margin: 0 auto;
+	color: var(--muted);
+	font-size: 18px;
+}
+
+.actions {
+	display: flex;
+	flex-wrap: wrap;
+	justify-content: center;
+	gap: 10px;
+	margin-top: 28px;
+}
+
+.button {
+	display: inline-flex;
+	align-items: center;
+	min-height: 46px;
+	padding: 0 20px;
+	border: 1px solid var(--button);
+	border-radius: 10px;
+	background: var(--button);
+	color: var(--button-ink);
+	font-weight: 600;
+	text-decoration: none;
+}
+
+.button.secondary {
+	background: transparent;
+	border-color: var(--line);
+	color: var(--ink);
+}
+
+.button:focus-visible,
+a:focus-visible {
+	outline: 2px solid var(--ink);
+	outline-offset: 3px;
+}
+
+.small {
+	margin-top: 14px;
+	color: var(--muted);
+	font-size: 13.5px;
+}
+
+.grid {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+	gap: 12px;
+}
+
+.grid > div {
+	padding: 20px;
+	border: 1px solid var(--line);
+	border-radius: 12px;
+	background: var(--surface);
+}
+
+h2 {
+	margin: 0 0 6px;
+	color: var(--ink);
+	font-size: 17px;
+}
+
+.grid p {
+	margin: 0;
+	color: var(--muted);
+	font-size: 15px;
+}
+
+.steps {
+	max-width: 620px;
+	margin: 0 auto;
+	padding: 48px 0 24px;
+}
+
+.steps h2 {
+	margin-top: 20px;
+}
+
+.steps ol {
+	margin: 0;
+	padding-left: 22px;
+}
+
+footer {
+	padding-top: 24px;
+	padding-bottom: 40px;
+	border-top: 1px solid var(--line);
+	color: var(--muted);
+	font-size: 13.5px;
+	text-align: center;
+}
+
+footer p {
+	margin: 6px 0;
+}

@@ -11,7 +11,8 @@
 		"format": "prettier --write .",
 		"test": "node --test \"src/**/*.test.js\"",
 		"lint": "eslint ./src/",
-		"lint:fix": "eslint ./src/ --fix"
+		"lint:fix": "eslint ./src/ --fix",
+		"e2e": "playwright test"
 	},
 	"keywords": [
 		"proxy"
@@ -20,6 +21,7 @@
 	"author": "",
 	"license": "AGPL-3.0-or-later",
 	"devDependencies": {
+		"@playwright/test": "^1.63.0",
 		"eslint": "^9.39.2",
 		"prettier": "^3.8.1"
 	},

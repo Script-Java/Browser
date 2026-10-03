@@ -15,6 +15,7 @@ const bios = self.__biosConfig || {};
 function hook(win) {
 	const client = win[SCRAMJET];
 	if (!client) return;
+	noWebRTC(win);
 	noPopups(client, win);
 	pageShield(client, win);
 	hookFrames(win);
@@ -68,6 +69,58 @@ function hookFrames(win) {
 }
 
 hook(self);
+
+/**
+ * WebRTC talks to STUN servers over UDP straight from the device, around the
+ * proxy, and hands the page the device's real public IP address, with no
+ * prompt. So pages get no WebRTC at all; calls couldn't work through the
+ * proxy anyway (it carries TCP only).
+ * ponytail: a frame a page reaches only through window.frames[i] before its
+ * load event keeps WebRTC; the desktop app also turns it off in Chromium.
+ * @param {Window} win
+ */
+function noWebRTC(win) {
+	for (const name of [
+		"RTCPeerConnection",
+		"webkitRTCPeerConnection",
+		"RTCDataChannel",
+		"RTCIceCandidate",
+		"RTCSessionDescription",
+	]) {
+		try {
+			Object.defineProperty(win, name, { value: undefined, writable: false, configurable: false });
+		} catch {
+			// already locked
+		}
+	}
+}
+
+/**
+ * "Safer" security level: no WebGL or WebGPU. Both expose the graphics card
+ * (a strong fingerprint) and are a common way into browser bugs.
+ * ponytail: OffscreenCanvas inside a worker is out of reach here.
+ * @param {Window} win
+ */
+function noGpu(win) {
+	for (const ctor of [win.HTMLCanvasElement, win.OffscreenCanvas]) {
+		const proto = ctor?.prototype;
+		const real = proto?.getContext;
+		if (typeof real !== "function") continue;
+		Object.defineProperty(proto, "getContext", {
+			value: function getContext(type, ...rest) {
+				if (/webgl|webgpu/i.test(String(type))) return null;
+				return real.call(this, type, ...rest);
+			},
+			writable: true,
+			configurable: true,
+		});
+	}
+	try {
+		Object.defineProperty(win.navigator, "gpu", { value: undefined });
+	} catch {
+		// not configurable here
+	}
+}
 
 /**
  * Origin of the app shell. In isolation mode proxied pages live on
@@ -295,9 +348,16 @@ function noPopups(client, win) {
 				? link.getAttribute("target")
 				: baseTarget();
 			const modified = event.ctrlKey || event.metaKey || event.shiftKey;
-			if ((modified || opensNewWindow(target)) && openTab(link.href, modified)) {
-				event.preventDefault();
-				return;
+			if (modified || opensNewWindow(target)) {
+				// a script clicking its own link isn't the person asking for a tab
+				if (hasShell() && !userGesture()) {
+					event.preventDefault();
+					return;
+				}
+				if (openTab(link.href, modified)) {
+					event.preventDefault();
+					return;
+				}
 			}
 			const fixed = fixTarget(target);
 			if (fixed) link.setAttribute("target", fixed);
@@ -309,7 +369,7 @@ function noPopups(client, win) {
 	win.addEventListener(
 		"auxclick",
 		(event) => {
-			if (event.button !== 1) return;
+			if (event.button !== 1 || !event.isTrusted) return;
 			const path = event.composedPath ? event.composedPath() : [event.target];
 			const link = path.find(
 				(el) => el && (el.localName === "a" || el.localName === "area") && typeof el.href === "string"
@@ -420,9 +480,22 @@ function noPopups(client, win) {
 		return fake;
 	}
 
+	// The tap in the app that opened this page (Enter in the address bar, a
+	// bookmark) can carry over as "the user just tapped", so a page counts as
+	// tapped only once a real input event happened in it, like in any browser.
+	let touched = false;
+	for (const type of ["pointerdown", "mousedown", "touchstart", "keydown"])
+		win.addEventListener(
+			type,
+			(event) => {
+				if (event.isTrusted) touched = true;
+			},
+			true
+		);
+
 	function userGesture() {
 		const activation = win.navigator.userActivation;
-		return activation ? activation.isActive : true;
+		return touched && (activation ? activation.isActive : true);
 	}
 
 	const open = function (url, target) {
@@ -454,12 +527,18 @@ function noPopups(client, win) {
 			writable: true,
 			configurable: true,
 		});
+	// confirm/prompt show the real in-app dialog right after the person
+	// clicked or tapped in the page (a "Delete this?" they asked for).
+	// Otherwise they answer "no", so a page can't loop dialogs or get
+	// anything agreed to unseen.
+	const nativeConfirm = win.confirm;
+	const nativePrompt = win.prompt;
 	quiet("alert", function () {});
-	quiet("confirm", function () {
-		return true;
+	quiet("confirm", function (message) {
+		return userGesture() ? nativeConfirm.call(win, message) : false;
 	});
-	quiet("prompt", function () {
-		return null;
+	quiet("prompt", function (message, value) {
+		return userGesture() ? nativePrompt.call(win, message, value) : null;
 	});
 	quiet("print", function () {});
 
@@ -574,6 +653,7 @@ function pageShield(client, win) {
 		}
 	}
 	flags ||= {};
+	if (flags.safer) noGpu(win);
 	// keep the page's own scripts from rewriting our timers
 	const setTimer = win.setTimeout.bind(win);
 	const setRepeat = win.setInterval.bind(win);

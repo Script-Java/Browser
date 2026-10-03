@@ -727,6 +727,33 @@ body.browsing #newtab {
 	color: var(--ink);
 }
 
+.panel input[type="password"] {
+	width: 100%;
+	min-height: 40px;
+	margin-top: 10px;
+	padding: 0 10px;
+	border: 1px solid var(--line);
+	border-radius: 9px;
+	background: var(--surface);
+	color: var(--ink);
+	/* under 16px, iOS zooms in on focus */
+	font-size: 16px;
+}
+
+/* The passphrase screen covers the whole app on every screen size. */
+#vault.panel {
+	align-items: center;
+	justify-content: center;
+	padding: 16px;
+	background: var(--bg);
+}
+
+#vault .panel-card {
+	max-width: 380px;
+	border: 1px solid var(--line);
+	border-radius: 12px;
+}
+
 .links {
 	width: 100%;
 	margin: 6px 0 0;

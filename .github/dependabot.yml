@@ -15,6 +15,16 @@ updates:
       - dependency-name: "@mercuryworkshop/*"
         update-types: ["version-update:semver-major"]
 
+  # The desktop app ships its own Chromium inside Electron, so its security
+  # releases need to reach people quickly.
+  - package-ecosystem: npm
+    directory: /desktop
+    schedule:
+      interval: daily
+    allow:
+      - dependency-name: electron
+      - dependency-name: electron-updater
+
   - package-ecosystem: github-actions
     directory: /
     schedule:

@@ -24,3 +24,28 @@ jobs:
       - run: pnpm -C app test
       - run: pnpm -C app audit --prod --audit-level high
       - run: docker build -t browser-ios .
+
+  # Security behaviour in a real browser through the real proxy (app/e2e).
+  # The proxy reaches real sites, so this needs the internet.
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.28.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: pnpm -C app install --frozen-lockfile
+      - run: pnpm -C app exec playwright install --with-deps chromium
+      - run: pnpm -C app e2e
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: e2e-report
+          path: |
+            app/playwright-report/
+            app/test-results/
+          retention-days: 7

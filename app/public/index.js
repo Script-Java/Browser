@@ -144,7 +144,13 @@ function rememberOrigin(key) {
 	localStorage.setItem("bios:origins", JSON.stringify([...keys]));
 }
 
+// With a passphrase lock (see "passphrase lock" below) these live only in the
+// encrypted vault, decrypted in memory.
+const PRIVATE = new Set(["bios:history", "bios:bookmarks", "bios:tabs"]);
+let vault = null;
+
 function readList(name) {
+	if (vault && PRIVATE.has(name)) return vault.data[name] ?? [];
 	try {
 		return JSON.parse(localStorage.getItem(name) || "[]");
 	} catch {
@@ -229,8 +235,11 @@ function ensureAnchor(origin) {
 
 /**
  * @typedef {{ id: number, frame: HTMLIFrameElement, url: string, title: string,
- *   siteOrigin: string, loading: boolean, pending: boolean }} Tab
+ *   siteOrigin: string, loading: boolean, pending: boolean, back: string[],
+ *   fwd: string[], landing: boolean, navigated: boolean, ownHistory: boolean }} Tab
  * `pending`: a restored tab whose page loads the first time it's shown.
+ * `back`/`fwd`: the tab's own history (see step()). `landing`: go() started a
+ * load and recorded it; the page's first report only confirms where it landed.
  */
 /** @type {Tab[]} */
 const tabs = [];
@@ -263,10 +272,17 @@ function createTab(url = "", { after = null, lazy = false, title = "", select = 
 		siteOrigin: "",
 		loading: false,
 		pending: lazy,
+		back: [],
+		fwd: [],
+		landing: false,
+		navigated: false,
+		ownHistory: true,
 	};
 	frame.addEventListener("load", () => {
 		if (!tab.url || tab.pending) return;
 		setLoading(tab, false);
+		// a page without page.js (an image, a PDF) never reports itself
+		tab.landing = false;
 		syncAddress(tab);
 		try {
 			frame.contentWindow.addEventListener("pagehide", () => setLoading(tab, true));
@@ -424,7 +440,7 @@ function restoreTabs() {
 	const made = list.map((t) =>
 		createTab(t.url, { lazy: true, title: String(t.title || "").slice(0, 300), select: false })
 	);
-	selectTab(made[saved.active] || made[0]);
+	selectTab((Number.isInteger(saved.active) && made[saved.active]) || made[0]);
 	return true;
 }
 
@@ -472,7 +488,7 @@ window.addEventListener("blur", () => setTimeout(followPaneFocus, 0));
 
 let startup = Promise.resolve();
 
-async function go(input, tab = active) {
+async function go(input, tab = active, record = true) {
 	if (!input.trim() || !tab) return;
 	error.textContent = "";
 	hideSuggest();
@@ -483,9 +499,15 @@ async function go(input, tab = active) {
 		// before touching the tab: throws for addresses that can't be opened
 		const src = await frameUrlFor(url, tab);
 		if (!tabs.includes(tab)) return;
+		if (record && tab.url && tab.url !== url && !tab.pending) {
+			pushStep(tab.back, tab.url);
+			tab.fwd = [];
+		}
 		tab.url = url;
 		tab.title = "";
 		tab.pending = false;
+		tab.landing = true;
+		tab.navigated = true;
 		setLoading(tab, true);
 		if (tab === active) {
 			layout();
@@ -516,6 +538,8 @@ function showAddress() {
 	else if (url.startsWith("http:")) state = "warn";
 	siteBtn.dataset.state = state;
 	star.hidden = !url;
+	$("back").disabled = !active?.back.length;
+	$("forward").disabled = !active?.fwd.length;
 	const marked = isBookmarked(url);
 	star.setAttribute("aria-pressed", String(marked));
 	star.setAttribute("aria-label", marked ? "Remove bookmark" : "Bookmark this page");
@@ -524,8 +548,31 @@ function showAddress() {
 	if (barInput.value !== shown) barInput.value = shown;
 }
 
+const MAX_STEPS = 50;
+
+function pushStep(list, url) {
+	list.push(url);
+	if (list.length > MAX_STEPS) list.shift();
+}
+
 function updateTab(tab, url, title) {
 	const changed = url !== tab.url || title !== tab.title;
+	if (tab.landing) {
+		// go() already recorded this step; a redirect may land elsewhere
+		tab.landing = false;
+	} else if (url !== tab.url && tab.url) {
+		// The page moved by itself: a link, or its own history.back().
+		if (url === tab.back.at(-1)) {
+			tab.back.pop();
+			pushStep(tab.fwd, tab.url);
+		} else if (url === tab.fwd.at(-1)) {
+			tab.fwd.pop();
+			pushStep(tab.back, tab.url);
+		} else {
+			pushStep(tab.back, tab.url);
+			tab.fwd = [];
+		}
+	}
 	tab.url = url;
 	tab.title = title;
 	if (!changed) return;
@@ -535,6 +582,8 @@ function updateTab(tab, url, title) {
 }
 
 function syncAddress(tab) {
+	// while a new page loads, the frame still holds the old one
+	if (tab.landing) return;
 	const url = frameLocation(tab);
 	if (url && url !== tab.url) updateTab(tab, url, tab.title);
 }
@@ -651,8 +700,28 @@ function tabCommand(cmd, tab = active) {
 	}
 }
 
-$("back").addEventListener("click", () => tabCommand("back"));
-$("forward").addEventListener("click", () => tabCommand("forward"));
+// Back (-1) or forward (+1). Every tab's frame shares one session history,
+// so the frame's own history.back() can move whichever tab navigated last.
+// With a single tab that has pages it's still right, and it brings the page
+// back where it was scrolled; otherwise the shell reloads the address from
+// the tab's own history.
+// ponytail: with several tabs open, back reloads the page instead of restoring it.
+function step(dir, tab = active) {
+	if (!tab?.url) return;
+	const from = dir < 0 ? tab.back : tab.fwd;
+	if (!from.length) return;
+	const browsing = tabs.filter((t) => t.navigated);
+	if (tab.ownHistory && browsing.length === 1 && browsing[0] === tab)
+		return tabCommand(dir < 0 ? "back" : "forward", tab);
+	// once the shell has stepped, the frame's history no longer matches
+	tab.ownHistory = false;
+	const url = from.pop();
+	pushStep(dir < 0 ? tab.fwd : tab.back, tab.url);
+	go(url, tab, false);
+}
+
+$("back").addEventListener("click", () => step(-1));
+$("forward").addEventListener("click", () => step(1));
 $("reload").addEventListener("click", () => tabCommand("reload"));
 $("new-tab").addEventListener("click", () => createTab());
 
@@ -703,6 +772,7 @@ const COMMANDS = [
 	{ name: "Split view", when: () => !split && canSplit(), run: toggleSplit },
 	{ name: "Close split view", when: () => !!split, run: toggleSplit },
 	{ name: "Reload page", when: () => !!active?.url, run: () => tabCommand("reload") },
+	{ name: "New identity", run: () => newIdentity() },
 	// opens Settings on the button rather than wiping from a typo
 	{
 		name: "Clear history and site data",
@@ -891,6 +961,8 @@ function renderSheet() {
 	for (const input of sheet.querySelectorAll("[data-setting]"))
 		input.checked = !!settings[input.dataset.setting];
 	$("search-engine").value = settings.search;
+	$("security-level").value = settings.level;
+	$("level-note").textContent = LEVEL_NOTES[settings.level] || "";
 
 	$("lock-form").hidden = !config.auth;
 
@@ -953,6 +1025,23 @@ for (const input of sheet.querySelectorAll("[data-setting]")) {
 		}
 	});
 }
+
+const LEVEL_NOTES = {
+	standard: "Every site works as usual",
+	safer: "No web fonts, WebGL or WebGPU on any site, and no scripts on sites without https. Some sites look or work worse.",
+	safest: "Everything in Safer, and no site's own scripts at all. Many sites stop working: menus, videos, sign-ins.",
+};
+
+const levelSelect = $("security-level");
+levelSelect.addEventListener("change", async () => {
+	try {
+		await saveSettings({ ...settings, level: levelSelect.value });
+		tabCommand("reload");
+	} catch (err) {
+		levelSelect.value = settings.level;
+		$("filter-status").textContent = err.message;
+	}
+});
 
 const searchSelect = $("search-engine");
 searchSelect.addEventListener("change", async () => {
@@ -1028,10 +1117,10 @@ function clearOrigin(origin) {
 // Deletes every site's cookies, storage and logins, the history and the open
 // tabs. Every tab closes first so no page holds its databases open.
 async function clearAllSiteData() {
-	localStorage.removeItem(HISTORY);
+	saveEntries(HISTORY, []);
 	split = null;
 	for (const tab of [...tabs]) closeTab(tab);
-	localStorage.removeItem(TABS);
+	saveEntries(TABS, []);
 	// let the closed pages release their databases first
 	await new Promise((resolve) => setTimeout(resolve, 50));
 	await clearStorageHere();
@@ -1042,6 +1131,23 @@ async function clearAllSiteData() {
 	}
 	renderNewTab();
 }
+
+// New Identity, as in Tor Browser: a fresh start that sites can't link to
+// the last one. Every site's cookies, storage and logins, the history and
+// the open tabs go, the service workers forget the warnings clicked
+// through, and the app reloads. Settings and bookmarks stay.
+async function newIdentity() {
+	if (
+		!confirm(
+			"New identity: close every tab and sign out of every site?\n\nHistory and site data are cleared. Bookmarks and settings stay."
+		)
+	)
+		return;
+	await clearAllSiteData();
+	location.reload();
+}
+
+$("new-identity").addEventListener("click", () => newIdentity());
 
 $("wipe-now").addEventListener("click", async (event) => {
 	const button = event.currentTarget;
@@ -1076,12 +1182,198 @@ function readEntries(name) {
 }
 
 function saveEntries(name, list) {
+	if (vault && PRIVATE.has(name)) {
+		vault.data[name] = list;
+		seal();
+		return;
+	}
 	try {
 		localStorage.setItem(name, JSON.stringify(list));
 	} catch {
 		// storage full or blocked: skip rather than break browsing
 	}
 }
+
+// ------------------------------------------------------- passphrase lock
+// Optional. History, bookmarks and open tabs are kept in one AES-GCM blob
+// whose key comes from the passphrase (PBKDF2) and lives only in memory, so
+// someone holding the device can't read them. Site logins live in each
+// site's own storage, out of reach here: clearing on launch covers those.
+
+const VAULT = "bios:vault";
+const encoder = new TextEncoder();
+
+function toBase64(bytes) {
+	let text = "";
+	for (let i = 0; i < bytes.length; i += 0x8000)
+		text += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+	return btoa(text);
+}
+
+const fromBase64 = (text) => Uint8Array.from(atob(text), (c) => c.charCodeAt(0));
+
+async function deriveKey(passphrase, salt) {
+	const base = await crypto.subtle.importKey("raw", encoder.encode(passphrase), "PBKDF2", false, [
+		"deriveKey",
+	]);
+	return crypto.subtle.deriveKey(
+		// OWASP's 2023 figure for PBKDF2-SHA256: about a second on a phone
+		{ name: "PBKDF2", salt, iterations: 600_000, hash: "SHA-256" },
+		base,
+		{ name: "AES-GCM", length: 256 },
+		false,
+		["encrypt", "decrypt"]
+	);
+}
+
+// Writes are chained so an older snapshot never lands after a newer one.
+let sealing = Promise.resolve();
+
+function seal() {
+	const { key, salt } = vault;
+	const plain = encoder.encode(JSON.stringify(vault.data));
+	sealing = sealing.then(async () => {
+		try {
+			const iv = crypto.getRandomValues(new Uint8Array(12));
+			const box = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, plain));
+			localStorage.setItem(
+				VAULT,
+				JSON.stringify({ salt: toBase64(salt), iv: toBase64(iv), box: toBase64(box) })
+			);
+		} catch {
+			// storage full or blocked: skip this save rather than stall every later one
+		}
+	});
+	return sealing;
+}
+
+// Throws on a wrong passphrase (AES-GCM refuses to decrypt).
+async function openVault(passphrase) {
+	const sealed = JSON.parse(localStorage.getItem(VAULT));
+	const salt = fromBase64(sealed.salt);
+	const key = await deriveKey(passphrase, salt);
+	const plain = await crypto.subtle.decrypt(
+		{ name: "AES-GCM", iv: fromBase64(sealed.iv) },
+		key,
+		fromBase64(sealed.box)
+	);
+	vault = { key, salt, data: JSON.parse(new TextDecoder().decode(plain)) };
+}
+
+// Turns the lock on, or changes the passphrase.
+async function setPassphrase(passphrase) {
+	if (passphrase.length < 8) throw new Error("Use at least 8 characters.");
+	const data = vault ? vault.data : Object.fromEntries([...PRIVATE].map((n) => [n, readList(n)]));
+	const salt = crypto.getRandomValues(new Uint8Array(16));
+	vault = { key: await deriveKey(passphrase, salt), salt, data };
+	await seal();
+	for (const name of PRIVATE) localStorage.removeItem(name);
+}
+
+async function removePassphrase() {
+	const { data } = vault;
+	vault = null;
+	await sealing;
+	for (const name of PRIVATE) saveEntries(name, data[name] ?? []);
+	localStorage.removeItem(VAULT);
+}
+
+const vaultPanel = $("vault");
+let vaultDone = null;
+
+// mode "unlock" (on launch) or "set"; resolves once done or cancelled
+function askPassphrase(mode) {
+	const setting = mode === "set";
+	$("vault-title").textContent = setting ? "Set a passphrase" : "Unlock Badger";
+	$("vault-note").textContent = setting
+		? "History, bookmarks and open tabs are encrypted with it on this device, and it's asked each time the app opens. If you forget it, they can't be recovered."
+		: "Enter your passphrase to open your history, bookmarks and tabs.";
+	$("vault-form").reset();
+	$("vault-confirm").hidden = !setting;
+	$("vault-confirm").required = setting;
+	$("vault-pass").autocomplete = setting ? "new-password" : "current-password";
+	$("vault-submit").textContent = setting ? "Set passphrase" : "Unlock";
+	$("vault-cancel").hidden = !setting;
+	$("vault-erase").hidden = setting;
+	$("vault-error").textContent = "";
+	vaultPanel.hidden = false;
+	$("vault-pass").focus();
+	return new Promise((resolve) => {
+		vaultDone = resolve;
+	});
+}
+
+function closeVaultPanel() {
+	vaultPanel.hidden = true;
+	$("vault-form").reset();
+	vaultDone?.();
+	vaultDone = null;
+}
+
+function showVaultButtons() {
+	$("vault-set").textContent = vault
+		? "Change passphrase"
+		: "Lock history and bookmarks with a passphrase";
+	$("vault-off").hidden = !vault;
+}
+
+$("vault-form").addEventListener("submit", async (event) => {
+	event.preventDefault();
+	const setting = !$("vault-confirm").hidden;
+	const passphrase = $("vault-pass").value;
+	const button = $("vault-submit");
+	button.disabled = true;
+	$("vault-error").textContent = "";
+	try {
+		if (!setting) {
+			await openVault(passphrase).catch(() => {
+				throw new Error("Wrong passphrase.");
+			});
+		} else if (passphrase !== $("vault-confirm").value) {
+			throw new Error("The passphrases don't match.");
+		} else {
+			await setPassphrase(passphrase);
+		}
+		closeVaultPanel();
+	} catch (err) {
+		$("vault-error").textContent = err.message;
+	} finally {
+		button.disabled = false;
+	}
+});
+
+$("vault-cancel").addEventListener("click", closeVaultPanel);
+
+// Forgotten passphrase: start over. Site logins go too, so the lock can't
+// be skipped to reach the sites the last person was signed in to.
+$("vault-erase").addEventListener("click", async () => {
+	if (
+		!confirm(
+			"Erase your history, bookmarks and open tabs, and sign out of every site?\n\nThis can't be undone."
+		)
+	)
+		return;
+	localStorage.removeItem(VAULT);
+	await clearAllSiteData();
+	closeVaultPanel();
+});
+
+$("vault-set").addEventListener("click", async () => {
+	sheet.hidden = true;
+	await askPassphrase("set");
+	showVaultButtons();
+});
+
+$("vault-off").addEventListener("click", async () => {
+	if (
+		!confirm(
+			"Turn off the passphrase lock?\n\nHistory, bookmarks and open tabs will be kept unencrypted on this device."
+		)
+	)
+		return;
+	await removePassphrase();
+	showVaultButtons();
+});
 
 function recordVisit({ url, title }) {
 	if (!/^https?:/.test(url)) return;
@@ -1178,7 +1470,7 @@ $("library-close").addEventListener("click", () => {
 	library.hidden = true;
 });
 $("history-clear").addEventListener("click", () => {
-	localStorage.removeItem(HISTORY);
+	saveEntries(HISTORY, []);
 	renderHistory();
 	if (!active?.url) renderNewTab();
 });
@@ -1261,27 +1553,38 @@ navigator.serviceWorker?.startMessages();
 
 // ----------------------------------------------------------------- startup
 
-// A fresh launch (sessionStorage is empty after iOS closes the app) clears
-// site data first when that setting is on.
+// The passphrase comes first (nothing private can be read before it), then a
+// fresh launch (sessionStorage is empty after iOS closes the app) clears
+// site data when that setting is on, and only then do the tabs open.
 startup = (async () => {
+	if (localStorage.getItem(VAULT)) await askPassphrase("unlock");
+	showVaultButtons();
 	const firstLaunch = !sessionStorage.getItem("bios:session");
 	sessionStorage.setItem("bios:session", "1");
 	const loaded = await loadSettings().catch(() => null);
 	if (firstLaunch && loaded && loaded.wipe) await clearAllSiteData();
 })().catch((err) => console.warn("startup:", err));
 
-renderBookmarksBar();
+startup.then(() => {
+	renderBookmarksBar();
 
-// A proxied page that escaped to the top level redirects to /#<url>.
-if (location.hash.length > 1) {
-	const target = decodeURIComponent(location.hash.slice(1));
-	history.replaceState(null, "", "/");
-	restoreTabs();
-	createTab(target);
-} else {
-	if (!restoreTabs()) createTab();
-	// warm up the service worker and transport so the first search is fast
-	startup.then(ensureReady).catch((err) => {
-		error.textContent = err.message || String(err);
-	});
-}
+	// A proxied page that escaped to the top level redirects to /#<url>.
+	if (location.hash.length > 1) {
+		let target = "";
+		try {
+			target = decodeURIComponent(location.hash.slice(1));
+		} catch {
+			// malformed: just open the app
+		}
+		history.replaceState(null, "", "/");
+		restoreTabs();
+		if (target) createTab(target);
+		else if (!tabs.length) createTab();
+	} else {
+		if (!restoreTabs()) createTab();
+		// warm up the service worker and transport so the first search is fast
+		ensureReady().catch((err) => {
+			error.textContent = err.message || String(err);
+		});
+	}
+});

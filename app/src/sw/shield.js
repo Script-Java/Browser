@@ -11,7 +11,7 @@ import { FiltersEngine, Request as FilterRequest } from "@ghostery/adblocker";
 import { parse } from "tldts";
 import { siteOf, siteKey } from "../client/sitekey.js";
 import { DEFAULT_SETTINGS } from "../settings.js";
-import { PREFIX, decodeUrl } from "../codec.js";
+import { PREFIX, decodeUrl, encodeUrl } from "../codec.js";
 
 const FILTER_CACHE = "bios-filters";
 const ENGINE_RECHECK_MS = 6 * 3_600_000;
@@ -169,7 +169,10 @@ export function createShield(scramjet, configStored) {
 	// copy this worker keeps in memory too.
 	self.addEventListener("message", (event) => {
 		if (event.origin !== location.origin) return;
-		if (event.data?.bios === "wipe") scramjet.cookieStore.load("{}");
+		if (event.data?.bios !== "wipe") return;
+		scramjet.cookieStore.load("{}");
+		// New Identity: forget the warnings the person clicked through too
+		for (const set of [bypassed, plainHttp, allowOnce, inlineOnce]) set.clear();
 	});
 
 	let engine = null;
@@ -178,6 +181,8 @@ export function createShield(scramjet, configStored) {
 	let settingsAt = 0;
 	let settingsLoad = null;
 	const bypassed = new Set(); // hosts the user chose to open despite a warning
+	const plainHttp = new Set(); // sites (example.com) the user chose to open over http
+	const httpsWorks = new Set(); // hosts that answered over https
 	const allowOnce = new Set(); // proxied URLs to load once without ad blocking
 	const inlineOnce = new Set(); // proxied URLs to load in this origin once
 	const pages = new Map(); // site URL -> page info for the response hook
@@ -323,19 +328,38 @@ export function createShield(scramjet, configStored) {
 	// app), "tab" (the app's page frame) or "sub" (a frame inside a page).
 	const WHERE = `function where(){try{if(parent===self)return"top";if(parent.__biosShell)return"tab";parent.location.href;return"sub"}catch(e){return"tab"}}`;
 
+	const WARNINGS = {
+		phishing: {
+			danger: true,
+			title: "Deceptive site ahead",
+			text: "This site is on a list of known phishing sites. It may try to trick you into entering a password, card number or other personal details.",
+			go: "Continue anyway (unsafe)",
+			action: "bypass",
+		},
+		malware: {
+			danger: true,
+			title: "Dangerous site ahead",
+			text: "This site is on a list of sites known to spread malware.",
+			go: "Continue anyway (unsafe)",
+			action: "bypass",
+		},
+		ads: {
+			title: "Page blocked",
+			text: "This address belongs to a known ad or tracking network, so it was blocked.",
+			go: "Open anyway",
+			action: "allow",
+		},
+		http: {
+			title: "This site isn't secure",
+			text: "It doesn't offer a secure (https) connection. What you see and send there passes through the app's server and the internet unencrypted, so others along the way could read or change it. Don't enter passwords or personal details.",
+			go: "Continue (not secure)",
+			action: "http",
+		},
+	};
+
 	function interstitial({ kind, host, url }) {
-		const danger = kind === "phishing" || kind === "malware";
-		const title = danger
-			? kind === "phishing"
-				? "Deceptive site ahead"
-				: "Dangerous site ahead"
-			: "Page blocked";
-		const text = danger
-			? kind === "phishing"
-				? "This site is on a list of known phishing sites. It may try to trick you into entering a password, card number or other personal details."
-				: "This site is on a list of sites known to spread malware."
-			: "This address belongs to a known ad or tracking network, so it was blocked.";
-		const proceed = goUrl(danger ? "bypass" : "allow", url);
+		const { danger, title, text, go, action } = WARNINGS[kind];
+		const proceed = goUrl(action, url);
 		return new Response(
 			`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${htmlEscape(title)}</title>
 <style>
@@ -351,7 +375,7 @@ body.sub{display:none}
 <p>${htmlEscape(text)}</p>
 <p><code>${htmlEscape(host)}</code></p>
 <button id="back" type="button">Go back</button>
-<button id="go" type="button">${danger ? "Continue anyway (unsafe)" : "Open anyway"}</button>
+<button id="go" type="button">${htmlEscape(go)}</button>
 <script>
 ${WHERE}
 if (where() === "sub") document.body.className = "sub";
@@ -480,6 +504,7 @@ function go(key) {
 			if (action === "inline") inlineOnce.add(to);
 			else if (action === "allow") allowOnce.add(to);
 			else if (action === "bypass") bypassed.add(target.hostname.toLowerCase());
+			else if (action === "http") plainHttp.add(siteOf(target.hostname.toLowerCase()));
 			return Response.redirect(to, 307);
 		}
 		if (request.method === "POST" && path === "cosmetic") {
@@ -566,6 +591,63 @@ function go(key) {
 		return page && page.href === target.href ? EMPTY[destination]() : null;
 	}
 
+	// ------------------------------------------------------------ HTTPS-Only
+
+	// Whether a host answers over https at all: one quick request. A yes is
+	// remembered while this worker runs; a no is asked again next time, in
+	// case it was the connection failing rather than the site.
+	async function speaksHttps(host) {
+		if (httpsWorks.has(host)) return true;
+		const probe = scramjet.client
+			.fetch(`https://${host}/`, { method: "HEAD", redirect: "manual" })
+			.then(
+				() => true,
+				() => false
+			);
+		const timeout = new Promise((resolve) => setTimeout(resolve, 6000, false));
+		const ok = await Promise.race([probe, timeout]);
+		if (ok) httpsWorks.add(host);
+		return ok;
+	}
+
+	// http:// requests: the https address instead (307 keeps a form POST), or
+	// for a page with no https, a warning. Subresources are just upgraded,
+	// unless their page is one the person chose to open over http.
+	async function httpsOnly(request, target, isPage, url) {
+		if (target.protocol !== "http:") return null;
+		const host = target.hostname.toLowerCase();
+		if (plainHttp.has(siteOf(host))) return null;
+		// a page load gets fresh settings, so the switch applies at once
+		if (isPage) settingsAt = 0;
+		await getSettings();
+		if (!settings.httpsOnly) return null;
+		if (!isPage) {
+			const page = decode(request.referrer);
+			if (page && plainHttp.has(siteOf(page.hostname.toLowerCase()))) return null;
+		}
+		if (isPage && !(await speaksHttps(host)))
+			return interstitial({ kind: "http", host: target.hostname, url });
+		const secure = new URL(target.href);
+		secure.protocol = "https:";
+		return Response.redirect(location.origin + encodeUrl(secure.href), 307);
+	}
+
+	// "Safer" level: no web fonts (a fingerprinting and font-parser attack
+	// surface), and no scripts from pages that came over plain http.
+	// "Safest": the same, and no site's scripts on any page.
+	const hardened = () => settings.level === "safer" || settings.level === "safest";
+	const noSiteScripts = (url) =>
+		settings.level === "safest" || (settings.level === "safer" && url?.protocol === "http:");
+
+	function saferBlock(destination, source) {
+		if (!hardened()) return null;
+		if (destination === "font") return blocked(destination);
+		const scripted =
+			destination === "script" || destination === "worker" || destination === "sharedworker";
+		if (scripted && noSiteScripts(source)) return blocked(destination);
+		return null;
+	}
+
 	async function handle(event) {
 		const { request } = event;
 		const url = request.url;
@@ -598,6 +680,9 @@ function go(key) {
 
 		const empty = await emptyAttribute(event, target, destination);
 		if (empty) return empty;
+
+		const upgraded = await httpsOnly(request, target, isPage, url);
+		if (upgraded) return upgraded;
 
 		const enginePromise = waitForEngine();
 
@@ -639,6 +724,9 @@ function go(key) {
 		const pageHost = isPage ? target.hostname : source && source.hostname;
 		const blocking = settings.ads && !isAllowed(pageHost);
 
+		const safer = !isPage && saferBlock(destination, source);
+		if (safer) return safer;
+
 		if (blocking && !allowOnce.delete(url)) {
 			await enginePromise;
 			if (engine) {
@@ -675,6 +763,9 @@ function go(key) {
 				hostname: target.hostname,
 				cosmetic: blocking && settings.cosmetic,
 				videoAds: settings.videoAds && !isAllowed(target.hostname),
+				safer: hardened(),
+				// "Safest", or "Safer" on a plain http page: none of the page's own scripts run
+				noScripts: noSiteScripts(target),
 			});
 		}
 		return scramjet.fetch(event);
@@ -701,15 +792,17 @@ function go(key) {
 			scripts = result.scripts || [];
 		}
 
-		const flags = { cosmetic: page.cosmetic, videoAds: page.videoAds };
+		const flags = { cosmetic: page.cosmetic, videoAds: page.videoAds, safer: page.safer };
+		// With a CSP on the page (see handleResponse), only our scripts carry the nonce.
+		const nonce = page.nonce ? ` nonce="${page.nonce}"` : "";
 		let after =
-			`<script>self.__biosPage=${scriptJson(flags)};document.currentScript.remove();</script>` +
+			`<script${nonce}>self.__biosPage=${scriptJson(flags)};document.currentScript.remove();</script>` +
 			`<script src="${location.origin}/bios/page.js"></script>`;
 		if (styles)
 			after += `<style>${styles.replace(/<\/style/gi, "<\\/style")}</style>`;
 		if (scripts.length)
 			after +=
-				"<script>" +
+				`<script${nonce}>` +
 				scripts
 					.map(
 						(s) =>
@@ -736,6 +829,16 @@ function go(key) {
 		pages.delete(event.url.href);
 		// lets the page load in the app's frame across subdomains
 		event.responseHeaders["cross-origin-resource-policy"] = "same-site";
+		if (page.noScripts) {
+			// Its inline scripts and handlers don't run; Scramjet's own scripts
+			// (data: and this origin) and ours (the nonce) still do. The page's
+			// external scripts are refused in handle(). Scramjet builds functions
+			// from strings and runs WebAssembly as it starts, hence the evals;
+			// with none of the page's code running, nothing else can call them.
+			page.nonce = crypto.randomUUID().replace(/-/g, "");
+			event.responseHeaders["content-security-policy"] =
+				`script-src 'self' data: 'nonce-${page.nonce}' 'unsafe-eval' 'wasm-unsafe-eval'; object-src 'none'`;
+		}
 		const type = event.responseHeaders["content-type"] || "";
 		if (typeof event.responseBody === "string" && /^text\/html/i.test(type))
 			event.responseBody = injectHtml(event.responseBody, page);

@@ -6,8 +6,49 @@
 //   without accounts, a database or a third-party captcha.
 // - "off" (neither set): local development only; production refuses to start.
 
-import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import {
+	createCipheriv,
+	createDecipheriv,
+	createHash,
+	createHmac,
+	randomBytes,
+	timingSafeEqual,
+} from "node:crypto";
 import { clientKey } from "./limits.js";
+
+/**
+ * A value -> an opaque cookie-safe token (AES-256-GCM): without the 32-byte
+ * key it can be neither read nor changed.
+ * @param {Buffer} key
+ * @param {unknown} value
+ */
+export function seal(key, value) {
+	const iv = randomBytes(12);
+	const cipher = createCipheriv("aes-256-gcm", key, iv);
+	const body = Buffer.concat([cipher.update(JSON.stringify(value)), cipher.final()]);
+	return Buffer.concat([iv, body, cipher.getAuthTag()]).toString("base64url");
+}
+
+/**
+ * The value back, or null if the token wasn't sealed with this key.
+ * @param {Buffer} key
+ * @param {string} token
+ */
+export function unseal(key, token) {
+	try {
+		const raw = Buffer.from(String(token), "base64url");
+		// a fixed tag length: GCM otherwise accepts short, forgeable tags
+		const decipher = createDecipheriv("aes-256-gcm", key, raw.subarray(0, 12), {
+			authTagLength: 16,
+		});
+		decipher.setAuthTag(raw.subarray(-16));
+		return JSON.parse(
+			Buffer.concat([decipher.update(raw.subarray(12, -16)), decipher.final()]).toString()
+		);
+	} catch {
+		return null;
+	}
+}
 
 const COOKIE = "bios_auth";
 const SESSION_DAYS = { password: 180, challenge: 30 };
@@ -41,8 +82,14 @@ export function parseCookies(header = "") {
 		const eq = part.indexOf("=");
 		if (eq === -1) continue;
 		const name = part.slice(0, eq).trim();
-		if (!(name in cookies))
+		if (name in cookies) continue;
+		// A bad %-escape must not throw: this runs in the WebSocket upgrade
+		// handler too, where an exception kills the server.
+		try {
 			cookies[name] = decodeURIComponent(part.slice(eq + 1).trim());
+		} catch {
+			cookies[name] = part.slice(eq + 1).trim();
+		}
 	}
 	return cookies;
 }

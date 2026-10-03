@@ -165,6 +165,26 @@
 					<input type="checkbox" data-setting="threats" role="switch" />
 				</label>
 
+				<h3>Security</h3>
+				<label class="row">
+					<span>
+						HTTPS-Only
+						<small>Opens the secure version of sites, and warns before a site without one</small>
+					</span>
+					<input type="checkbox" data-setting="httpsOnly" role="switch" />
+				</label>
+				<label class="row">
+					<span>
+						Security level
+						<small id="level-note"></small>
+					</span>
+					<select id="security-level">
+						<option value="standard">Standard</option>
+						<option value="safer">Safer</option>
+						<option value="safest">Safest</option>
+					</select>
+				</label>
+
 				<h3>Search</h3>
 				<label class="row">
 					<span>
@@ -187,6 +207,9 @@
 					</span>
 					<input type="checkbox" data-setting="wipe" role="switch" />
 				</label>
+				<button id="vault-set" class="wide" type="button">Lock history and bookmarks with a passphrase</button>
+				<button id="vault-off" class="wide" type="button" hidden>Turn off the passphrase lock</button>
+				<button id="new-identity" class="wide" type="button">New identity</button>
 				<button id="wipe-now" class="wide" type="button">Clear history and site data now</button>
 				<form id="lock-form" method="post" action="/logout" hidden>
 					<button class="wide" type="submit">Lock</button>
@@ -214,6 +237,21 @@
 		</div>
 
 		<ul id="suggest" role="listbox" aria-label="Suggestions" hidden></ul>
+
+		<div id="vault" class="panel" hidden>
+			<form id="vault-form" class="panel-card" role="dialog" aria-modal="true" aria-labelledby="vault-title">
+				<div class="panel-head">
+					<strong id="vault-title" class="panel-title">Unlock Badger</strong>
+					<button id="vault-cancel" class="panel-close" type="button" hidden>Cancel</button>
+				</div>
+				<p id="vault-note" class="note"></p>
+				<input id="vault-pass" type="password" aria-label="Passphrase" placeholder="Passphrase" required />
+				<input id="vault-confirm" type="password" aria-label="Passphrase again" placeholder="Passphrase again" autocomplete="new-password" hidden />
+				<p id="vault-error" class="note" role="alert"></p>
+				<button id="vault-submit" class="wide" type="submit">Unlock</button>
+				<button id="vault-erase" class="wide" type="button">Forgot it? Erase and start over</button>
+			</form>
+		</div>
 
 		<script src="/register-sw.js"></script>
 		<script src="/index.js"></script>

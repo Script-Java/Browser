@@ -4,7 +4,11 @@
 
 ```
 app/           server (express + wisp-js) and the PWA shell; Scramjet comes from npm
+desktop/       Windows app (Electron) that opens your server in its own window
+site/          the download page (badgerbrowser.com): static, no scripts or cookies
 ```
+
+The download page is plain files plus Netlify's `_headers`. It runs on its own domain (`badgerbrowser.com`), apart from the proxy (`browse.badgerbrowser.com`), and sets no cookies, so nothing a proxied page does can affect it. Its download button points at `releases/latest/download/Badger-Setup.exe`, so it always serves the newest published release.
 
 ## Deploy to Railway (one command)
 
@@ -57,6 +61,16 @@ So neither one user nor everyone together can run up the bandwidth bill:
 
 Limits are per IP address (IPv6: per /64), so people behind one home router share them.
 
+The address comes from the first entry of `X-Forwarded-For`, which Railway's edge sets. Check once after deploying that a client can't fake it, by getting your own address locked out of sign-in and then trying again under a made-up one:
+
+```sh
+APP=https://your-app.up.railway.app
+for i in $(seq 9); do curl -s -o /dev/null -w "%{redirect_url}\n" -d "password=x" "$APP/login"; done
+curl -s -o /dev/null -w "%{redirect_url}\n" -d "password=x" -H "X-Forwarded-For: 203.0.113.9" "$APP/login"
+```
+
+The 9th line says "Too many attempts". If the last one says it too, the header can't be faked. If it says "Wrong password" (or "Check failed" on a public deploy), anyone can dodge the limits by sending a different address each time, and `clientKey` in `app/src/limits.js` must use the last entry instead. The lockout ends after 15 minutes.
+
 ## Privacy: what the server sees and keeps
 
 The server has no database and keeps no accounts, history or site data. The only thing it saves to disk is the downloaded block lists.
@@ -94,6 +108,54 @@ It needs a domain you own, because Railway's free `*.up.railway.app` address can
 
 The shield menu says whether isolation is on.
 
+## Desktop app (Windows)
+
+`desktop/` is an installable Windows app that opens your Badger server (the Railway deploy) in its own window. It works like the phone app: sites see the server's address, not the computer's, and it gets around network filters the same way. Blocking, warnings, isolation, tabs and sign-in all come from the server.
+
+Before building, put the server's address in `SERVER_URL` at the top of `desktop/main.js`. Use the `ISOLATION_DOMAIN` address if the deploy has one (for example `https://browse.example.com`); the `*.up.railway.app` address runs without site isolation.
+
+```sh
+pnpm -C desktop install      # once: Electron and the installer builder
+pnpm desktop                 # run it from source
+pnpm desktop:dist            # build desktop/dist/Badger-Setup.exe
+```
+
+Running `Badger-Setup.exe` installs Badger for the current user, with a Start menu and desktop shortcut. Uninstall it from Windows Settings like any other app. It signs in like the phone app: with the password, or the automatic check on a public server. The desktop app keeps its own sign-in, separate from any browser's.
+
+How it's locked down:
+
+- **Everything goes through the server:** the window may only contact your server and its per-site subdomains. A page that slips past the proxy still can't reach the internet directly, open a window, or hand a link to the system browser.
+- **Permissions are refused:** camera, microphone, location, notifications and the like are all turned down. Full screen, copying to the clipboard and pointer lock are allowed.
+- **No WebRTC:** turned off inside Chromium too, so it can't send UDP around the network lock and show sites the computer's real address.
+- **Electron hardened:**
+  - Fuses: Node mode, `NODE_OPTIONS` and the inspector are off, and the app only loads from its own (integrity-checked) package.
+  - Cookies are encrypted on disk.
+  - Sites see a plain Chrome user agent.
+
+If the server can't be reached, the app says so and offers to try again.
+
+### Updates
+
+Badger ships its own Chromium, so browser security fixes only reach people through updates. The installed app checks this repo's GitHub Releases at launch and every 6 hours, downloads a newer version in the background and installs it when the app quits. Dependabot opens a pull request the day a new Electron comes out.
+
+To publish a release:
+
+1. Raise `version` in `desktop/package.json`, since the updater only installs higher versions.
+2. Create a GitHub token that can write releases to this repo.
+3. Run `GH_TOKEN=<token> pnpm -C desktop release`. It builds the installer and uploads it, with the `latest.yml` the updater reads, to a draft release.
+4. Publish that draft on GitHub.
+
+### Code signing
+
+The installer isn't signed yet, so Windows SmartScreen warns on first run (More info → Run anyway). Signing also lets the updater check that an update came from you. Once you have a code-signing certificate (from a certificate authority, or Azure Trusted Signing), set these before `dist` or `release` and electron-builder signs the app, the installer and every update:
+
+```sh
+CSC_LINK=path/to/certificate.pfx     # or a base64 string of it
+CSC_KEY_PASSWORD=...
+```
+
+From the first signed release on, the updater refuses updates that aren't signed by the same publisher.
+
 ## Run locally
 
 ```sh
@@ -105,6 +167,17 @@ pnpm -C app test # unit tests (CI also runs lint, audit and a Docker build)
 The iPhone needs HTTPS for the proxy's service worker, so a local `http://` address only works on this computer.
 
 To try site isolation locally, run `ISOLATION_DOMAIN=app.localhost pnpm start` and open `http://app.localhost:8787` in Chrome. Chrome sends every `*.localhost` name to this computer.
+
+### Security tests
+
+```sh
+pnpm -C app exec playwright install chromium   # once
+pnpm -C app e2e                                # about a minute; needs the internet
+```
+
+`app/e2e/` checks in a real browser, through the real proxy, what Badger promises: nothing a page loads goes around the proxy, pages get no WebRTC, no popups or dialogs or hand-offs to other apps without a tap in the page, HTTPS-Only, the Standard, Safer and Safest levels, ad blocking, New identity, the browser check and site isolation, and the server's headers and access rules. It starts two servers itself (ports 8811 and 8812, one in production-like isolation mode).
+
+The browser under test sends everything except the app's own addresses to a small fake proxy (`e2e/leak-catcher.js`) that records whatever reaches it, so a request that escapes Badger's proxy fails the test that caused it. Test pages are served by httpbin.org, so pages can be tried over both http and https. CI runs the suite on every push to `main` and every pull request, and keeps the report and traces when it fails.
 
 | Variable | What it does |
 | --- | --- |
@@ -128,7 +201,13 @@ Tap the shield or lock icon at the left of the address bar to see what's on and 
 | Skipping video ads | uBlock Origin's site fixes (for example YouTube's) run in each page before the site's own scripts. As a backup, the app clicks "Skip ad" in YouTube, JW Player and video.js players, and mutes and fast-forwards ad videos that can't be skipped. |
 | Malware and phishing warnings | The server keeps the [malware-filter](https://gitlab.com/malware-filter) phishing and URLhaus lists, updated daily, and checks every page you open. Listed sites show a red warning first; **Continue anyway** opens the site. |
 | Per-site switch | Turns blocking off for one site when it breaks. |
-| Clear site data on launch | On by default. Each fresh launch deletes every site's cookies, storage and logins. **Clear all site data now** does it on demand. |
+| HTTPS-Only | On by default. `http://` pages pass through the server unencrypted, so the app opens the `https://` version instead. When a site has none, a warning comes first; **Continue (not secure)** opens that site (and its subdomains) over http for the rest of the session. Images and scripts on a page are upgraded to https too. |
+| Security level | Like Tor Browser's. **Standard**: every site works as usual. **Safer**: no web fonts, WebGL or WebGPU on any site (they fingerprint the device and are a common way into browser bugs), and none of a page's own scripts on sites without https; some sites look or work worse. **Safest**: everything in Safer, and no site's own scripts at all (a Content-Security-Policy on every page lets only the proxy's and the app's scripts run); many sites stop working. |
+| New identity | Settings → **New identity** (or the address bar command), like Tor Browser's: after a confirmation, every tab closes, every site's cookies, storage and logins and the history are deleted, the warnings you clicked through are forgotten, and the app restarts. Settings and bookmarks stay. |
+| No WebRTC | WebRTC talks to servers over UDP straight from the device, around the proxy, and would show sites the device's real IP address. Pages get no WebRTC at all (the desktop app also turns it off inside Chromium). Video calls in the browser don't work through the proxy anyway. |
+| Strict policy on the app's own pages | The app's pages run only their own scripts (a Content-Security-Policy with hashes of the few inline ones), may only be framed by the app, and are HTTPS-only for six months once visited over HTTPS (HSTS). |
+| Clear site data on launch | On by default, so a lost or shared device doesn't keep the last session's logins (turn it off in Settings to stay signed in). Each fresh launch deletes every site's cookies, storage and logins, the history and the open tabs (bookmarks are kept). **Clear history and site data now** does it on demand. |
+| Passphrase lock | Optional (Settings → **Lock history and bookmarks with a passphrase**). History, bookmarks and open tabs are stored on the device encrypted (AES-GCM, with a key made from the passphrase by PBKDF2-SHA256 at 600,000 rounds). The key is only ever in memory, so the passphrase is asked each time the app opens. A forgotten passphrase can't be recovered: **Erase and start over** deletes them along with every site's logins. Site logins themselves aren't encrypted; clearing on launch covers them. |
 | Password | See above. It also guards the proxy connection itself, not only the page. |
 | Site isolation | See above. |
 | Trustworthy address bar | The bar shows the site's real domain, never a page's own claim. Look-alike letters from other alphabets show up as `xn--…` instead of passing for a real domain. With site isolation on, the app checks every address against the walled-off address the browser gave that page, so a page can't make the bar show another site. Without isolation, a malicious page can reach into the app and change the bar. |
@@ -151,7 +230,8 @@ Most of this lives in `app/src/client/page.js` (`noPopups`). It runs inside ever
 | `_top` links and forms replace the app | stay in the page's tab |
 | `window.open(url)` opens a new window | opens a new Badger tab after a click or tap; calls without one (pop-ups, pop-unders) are dropped |
 | `mailto:`, `tel:`, `sms:`, `maps:`, app-store links hand off to another app | blocked |
-| `alert` / `confirm` / `prompt` / `print` | silenced (`confirm` → true, `prompt` → null) |
+| `alert` / `print` | silenced |
+| `confirm` / `prompt` | the real in-app dialog right after a click or tap; without one they answer "no" (`false` / `null`), so pages can't loop dialogs or get anything agreed to unseen |
 | location, camera/mic, notifications, motion sensors, share sheet, passkeys, Apple Pay, clipboard paste, storage-access prompts | denied without showing a prompt |
 | long-press link/image previews | disabled |
 | a proxied page escaping to the top level | gets wrapped back into the shell |
@@ -160,6 +240,7 @@ The shell itself has no outbound links. It draws its own browser chrome, because
 
 - **Tabs**: open, close (× or middle click), switch (click or arrow keys). Open tabs come back when the app reopens; background ones load when you switch to them.
 - **Address bar**: suggestions from bookmarks and history as you type, and commands (New tab, Close tab, History, Settings, Bookmark this page, Split view, Reload page, Clear history and site data). Arrow keys and Enter pick one; plain Enter always searches or opens what you typed. Ctrl/⌘+K or +L jumps to it.
+- **Back and forward**: with one tab open they use the page's own history, so it comes back where it was scrolled. With more, the shell keeps each tab's history and reloads the address, because tab frames share one session history and the page's own "back" could move a different tab.
 - **Bookmarks**: the star in the address bar, the bookmarks bar, and shortcuts on the new tab page.
 - **Split view** (wide screens): two tabs side by side; click a pane to make it the active tab, or pick a tab from the strip to put it in the focused pane.
 - **⋯ menu**: settings, history, and clearing data.

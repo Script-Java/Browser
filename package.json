@@ -4,6 +4,8 @@
 	"type": "module",
 	"scripts": {
 		"setup": "pnpm -C app install",
-		"start": "node app/src/index.js"
+		"start": "node app/src/index.js",
+		"desktop": "pnpm -C desktop start",
+		"desktop:dist": "pnpm -C desktop dist"
 	}
 }

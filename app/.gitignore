@@ -1,1 +1,5 @@
 node_modules
+# end-to-end tests (pnpm e2e)
+.e2e/
+test-results/
+playwright-report/

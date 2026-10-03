@@ -87,6 +87,9 @@ function upstreamRequest(url, headers, method, redirects = 0) {
 		const literal = url.hostname.replace(/^\[|\]$/g, "");
 		if (net.isIP(literal) && isBlockedAddress(literal))
 			return reject(new Error(`Blocked connection to a private address (${literal})`));
+		// same ports as wisp, so this can't be used for port scans either; checked per redirect hop
+		if (url.port && url.port !== "80" && url.port !== "443")
+			return reject(new Error(`Blocked port ${url.port}`));
 		const lib = url.protocol === "https:" ? https : http;
 		const req = lib.request(
 			url,

@@ -1,8 +1,8 @@
 import { resolve } from "node:path";
 import { tmpdir, hostname } from "node:os";
 import { createServer } from "node:http";
-import { readFile } from "node:fs/promises";
-import { createHmac } from "node:crypto";
+import { readFile, readdir } from "node:fs/promises";
+import { createHash, createHmac } from "node:crypto";
 import express from "express";
 import { routeRequest } from "./wisp.js";
 import { build } from "esbuild";
@@ -11,7 +11,7 @@ import { epoxyPath } from "@mercuryworkshop/epoxy-transport";
 import { baremuxPath } from "@mercuryworkshop/bare-mux/node";
 import { scramjetPath } from "@mercuryworkshop/scramjet/path";
 
-import { CHALLENGE_BITS, createAuth, parseCookies } from "./auth.js";
+import { CHALLENGE_BITS, createAuth, parseCookies, seal, unseal } from "./auth.js";
 import { Filters } from "./filters.js";
 import { serveMedia } from "./media.js";
 import { clientKey, createLimits } from "./limits.js";
@@ -95,32 +95,26 @@ function cookieDomain(req) {
 
 const auth = createAuth({ password: PASSWORD, secret: SECRET, cookieDomain });
 
-// Settings live in a signed cookie shared by the shell and every site origin,
-// so a proxied page can't switch protections off by writing its own cookie.
+// Settings live in an encrypted cookie shared by the shell and every site
+// origin: a proxied page can't switch protections off by writing its own
+// cookie, and someone holding the device can't read the allowed-sites list.
 const SETTINGS_COOKIE = "bios_settings";
-const settingsKey = createHmac("sha256", "bios-settings").update(SECRET + "\0" + PASSWORD).digest();
+const settingsKey = createHmac("sha256", SECRET + "\0" + PASSWORD).update("bios-settings-aes").digest();
+
+/** The stored settings, or null when there's no cookie it can open. */
+function storedSettings(req) {
+	const raw = parseCookies(req.headers.cookie)[SETTINGS_COOKIE];
+	const stored = raw ? unseal(settingsKey, raw) : null;
+	return stored && typeof stored === "object" && !Array.isArray(stored) ? stored : null;
+}
 
 function readSettings(req) {
-	const raw = parseCookies(req.headers.cookie)[SETTINGS_COOKIE];
-	if (raw) {
-		const [data, mac] = raw.split(".");
-		const expected = createHmac("sha256", settingsKey).update(data).digest("base64url");
-		if (mac === expected) {
-			try {
-				return { ...DEFAULT_SETTINGS, ...JSON.parse(Buffer.from(data, "base64url").toString()) };
-			} catch {
-				// fall through to defaults
-			}
-		}
-	}
-	return { ...DEFAULT_SETTINGS };
+	return { ...DEFAULT_SETTINGS, ...storedSettings(req) };
 }
 
 function writeSettings(req, res, settings) {
-	const data = Buffer.from(JSON.stringify(settings)).toString("base64url");
-	const mac = createHmac("sha256", settingsKey).update(data).digest("base64url");
 	const parts = [
-		`${SETTINGS_COOKIE}=${data}.${mac}`,
+		`${SETTINGS_COOKIE}=${seal(settingsKey, settings)}`,
 		"Path=/",
 		"HttpOnly",
 		"SameSite=Lax",
@@ -172,14 +166,50 @@ const staticOptions = {
 	setHeaders: (res) => res.setHeader("Cache-Control", "no-cache"),
 };
 
+// ------------------------------------------------- CSP for the app's pages
+
+// The inline <script>s in the app's own pages, allowed by hash, so no other
+// inline script (an injected one) can run. Browsers hash a script after
+// turning CRLF line ends into LF, and a Windows checkout has CRLF.
+const scriptHashes = [];
+for (const name of (await readdir(publicPath)).filter((n) => n.endsWith(".html"))) {
+	const html = (await readFile(resolve(publicPath, name), "utf8")).replace(/\r\n?/g, "\n");
+	for (const [, code] of html.matchAll(/<script>([\s\S]*?)<\/script>/g))
+		scriptHashes.push(`'sha256-${createHash("sha256").update(code).digest("base64")}'`);
+}
+
+const portOf = (req) => String(req.headers.host || "").match(/:\d+$/)?.[0] || "";
+const framing = (req) =>
+	"frame-ancestors 'self'" + (ISOLATION ? ` ${req.protocol}://${ISOLATION}${portOf(req)}` : "");
+
+function pageCsp(req) {
+	// isolation: the shell frames every site's own subdomain
+	const sites = ISOLATION ? ` ${req.protocol}://*.${ISOLATION}${portOf(req)}` : "";
+	return [
+		"default-src 'self'",
+		`script-src 'self' ${scriptHashes.join(" ")}`,
+		"style-src 'self' 'unsafe-inline'",
+		"img-src 'self' data:",
+		`frame-src 'self'${sites}`,
+		"object-src 'none'",
+		"base-uri 'none'",
+		"form-action 'self'",
+		framing(req),
+	].join("; ");
+}
+
 const app = express();
 app.set("trust proxy", true);
 app.disable("x-powered-by");
 
 // For the host's health check (railway.json); before the site and password rules.
+// With ?nonce=, it answers HMAC(AUTH_SECRET, nonce): only this server could,
+// so a check can tell it apart from a look-alike or a stale instance.
 app.get("/healthz", (req, res) => {
 	res.setHeader("Cache-Control", "no-store");
-	res.type("text/plain").send("ok");
+	const nonce = String(req.query.nonce || "");
+	if (!/^[\w-]{1,64}$/.test(nonce)) return res.type("text/plain").send("ok");
+	res.type("text/plain").send(createHmac("sha256", SECRET).update("healthz:" + nonce).digest("hex"));
 });
 
 app.use((req, res, next) => {
@@ -189,6 +219,19 @@ app.use((req, res, next) => {
 	res.setHeader("Cross-Origin-Resource-Policy", "same-site");
 	res.setHeader("Referrer-Policy", "same-origin");
 	res.setHeader("X-Content-Type-Options", "nosniff");
+	// keeps the proxy out of search results
+	res.setHeader("X-Robots-Tag", "noindex, nofollow");
+	// Only the app frames its own pages (tabs, anchors, wipers), so another
+	// site can't wrap it to trick taps. The app's own pages also get a strict
+	// policy: only its own scripts run. Workers keep just the framing rule
+	// (Scramjet and the transport compile WebAssembly in them), and proxied
+	// pages come from the service worker, so neither gets the strict one.
+	// Without Sec-Fetch-Dest (iOS before 16.4) fail closed: only a .js file
+	// can be a worker, and on other non-pages the policy does nothing anyway.
+	const dest = req.headers["sec-fetch-dest"];
+	const page = dest ? dest === "document" || dest === "iframe" || dest === "frame" : !req.path.endsWith(".js");
+	res.setHeader("Content-Security-Policy", page ? pageCsp(req) : framing(req));
+	if (req.secure) res.setHeader("Strict-Transport-Security", "max-age=15552000; includeSubDomains");
 	next();
 });
 
@@ -229,7 +272,8 @@ app.get("/terms", async (req, res) => {
 	res.type("html").send(await terms);
 });
 app.post("/login", express.urlencoded({ extended: false, limit: "4kb" }), auth.login);
-app.post("/logout", auth.logout);
+// another site can't sign people out
+app.post("/logout", (req, res, next) => (fromShell(req) ? auth.logout(req, res, next) : res.status(403).end()));
 
 app.use(auth.gate);
 
@@ -287,7 +331,12 @@ app.get("/filters/status", (req, res) => {
 
 app.get("/api/settings", (req, res) => {
 	res.setHeader("Cache-Control", "no-store");
-	res.json(readSettings(req));
+	const settings = readSettings(req);
+	// a cookie it can't open (the older readable format, or an old key):
+	// overwrite it rather than leave it on the device
+	if (parseCookies(req.headers.cookie)[SETTINGS_COOKIE] && !storedSettings(req) && fromShell(req))
+		writeSettings(req, res, settings);
+	res.json(settings);
 });
 
 app.post("/api/settings", express.json({ limit: "16kb" }), (req, res) => {

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { test } from "node:test";
-import { CHALLENGE_BITS, createAuth } from "./auth.js";
+import { CHALLENGE_BITS, createAuth, parseCookies, seal, unseal } from "./auth.js";
 
 const zeroBits = (hex) => {
 	const bits = BigInt("0x" + hex).toString(2).padStart(256, "0");
@@ -36,4 +36,24 @@ test("proof-of-work challenge", () => {
 test("modes", () => {
 	assert.equal(createAuth({ password: "p", secret: "", cookieDomain: () => null }).mode, "password");
 	assert.equal(createAuth({ password: "", secret: "", cookieDomain: () => null }).mode, "off");
+});
+
+test("a malformed cookie doesn't throw", () => {
+	assert.deepEqual(parseCookies("bios_auth=%E0%A4%A; a=b%20c"), { bios_auth: "%E0%A4%A", a: "b c" });
+	const auth = createAuth({ password: "pw", cookieDomain: () => null });
+	assert.equal(auth.isAuthed({ headers: { cookie: "bios_auth=%E0%A4%A" } }), false);
+});
+
+test("sealed cookies can't be read, changed or opened with another key", () => {
+	const key = randomBytes(32);
+	const token = seal(key, { allow: ["secret-site.example"] });
+	assert.deepEqual(unseal(key, token), { allow: ["secret-site.example"] });
+	assert.ok(!Buffer.from(token, "base64url").toString("latin1").includes("secret-site"));
+	assert.equal(unseal(randomBytes(32), token), null);
+	const flipped = Buffer.from(token, "base64url");
+	flipped[20] ^= 1;
+	assert.equal(unseal(key, flipped.toString("base64url")), null);
+	// a truncated tag must not pass
+	assert.equal(unseal(key, token.slice(0, -10)), null);
+	assert.equal(unseal(key, "not.a.token"), null);
 });

@@ -1,3 +1,4 @@
 node_modules/
 # upstream clone history, kept aside; not part of this repo
 .git-upstream/
+desktop/dist/
