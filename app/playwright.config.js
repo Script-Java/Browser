@@ -1,7 +1,7 @@
 // End-to-end security tests: a real browser against real servers (`pnpm e2e`).
 // The proxy reaches real sites, so these need internet access.
 
-import { defineConfig } from "@playwright/test";
+import { defineConfig, devices } from "@playwright/test";
 import { CATCHER, ISOLATED, SECRET, SHARED } from "./e2e/env.js";
 
 export default defineConfig({
@@ -13,8 +13,12 @@ export default defineConfig({
 	// one browser at a time: every test also checks the leak catcher's list
 	workers: 1,
 	reporter: process.env.CI ? "list" : [["list"], ["html", { open: "never" }]],
+	// Safari's engine at a phone's size is what the home-screen app runs on.
+	projects: [
+		{ name: "chromium", use: { browserName: "chromium" } },
+		{ name: "iphone", use: { ...devices["iPhone 15"] } },
+	],
 	use: {
-		browserName: "chromium",
 		// Everything but the app's own addresses goes to the leak catcher.
 		proxy: {
 			server: `http://127.0.0.1:${CATCHER}`,

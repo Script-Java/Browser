@@ -52,6 +52,10 @@ new ResizeObserver(() =>
 ).observe(chrome);
 
 const isMac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+// iPadOS calls itself a Mac, but has a touch screen
+const MOBILE =
+	/iPhone|iPad|iPod|Android/.test(navigator.userAgent) ||
+	(navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
 for (const kbd of document.querySelectorAll(".kbd"))
 	kbd.textContent = isMac ? "⌘K" : "Ctrl K";
 
@@ -260,6 +264,17 @@ function createTab(url = "", { after = null, lazy = false, title = "", select = 
 	frame.title = "Page";
 	frame.allow =
 		"autoplay; fullscreen; encrypted-media; picture-in-picture; clipboard-write";
+	// Phones and tablets: the browser itself keeps a page from opening a
+	// window or replacing the app (no allow-popups, no allow-top-navigation),
+	// which would load a site directly, around the proxy. page.js already
+	// turns new windows into tabs, but a page can reach around it.
+	// ponytail: not on desktop, where a sandboxed frame can't show a PDF; the
+	// desktop app refuses windows and navigations in Electron instead.
+	if (MOBILE)
+		frame.setAttribute(
+			"sandbox",
+			"allow-scripts allow-same-origin allow-forms allow-modals allow-downloads allow-pointer-lock allow-presentation"
+		);
 	frame.hidden = true;
 	framesEl.appendChild(frame);
 
@@ -1277,6 +1292,16 @@ async function removePassphrase() {
 	for (const name of PRIVATE) saveEntries(name, data[name] ?? []);
 	localStorage.removeItem(VAULT);
 }
+
+// A phone keeps a home-screen app alive in the background for days, so "each
+// time the app opens" would almost never come. Away this long counts as
+// closed: the reload forgets the key and asks for the passphrase again.
+const RELOCK_MS = 5 * 60_000;
+let hiddenAt = 0;
+document.addEventListener("visibilitychange", () => {
+	if (document.hidden) hiddenAt = Date.now();
+	else if (vault && hiddenAt && Date.now() - hiddenAt > RELOCK_MS) location.reload();
+});
 
 const vaultPanel = $("vault");
 let vaultDone = null;

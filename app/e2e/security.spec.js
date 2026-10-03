@@ -99,6 +99,31 @@ setTimeout(function () {
 	await app.waitForTimeout(4000);
 });
 
+test("on a phone, even a tapped page can't open a window around the proxy", async ({ app, isMobile }) => {
+	test.skip(!isMobile, "the frame sandbox is for phones and tablets");
+	// the browser's own window.open, from a frame without the proxy's hooks
+	const frame = await open(
+		app,
+		testPage(`<!doctype html><title>pop</title><body><button id="pop">pop</button>
+<script>
+var added = document.createElement("iframe");
+document.body.appendChild(added);
+var raw = window[window.length - 1];
+document.getElementById("pop").onclick = function () {
+	var opened = null;
+	try { opened = raw.open("https://example.com/popup"); } catch (e) {}
+	try { raw.top.location = "https://example.net/top"; } catch (e) {}
+	document.title = opened ? "OPENED" : "refused";
+};
+</script>`)
+	);
+	await frame.click("#pop");
+	await expect.poll(() => frame.title()).toBe("refused");
+	await app.waitForTimeout(3000);
+	expect(app.context().pages().length).toBe(1);
+	expect(app.url().startsWith(SHARED_URL)).toBe(true);
+});
+
 test("pages can't open windows, show dialogs or hand off to other apps", async ({ app }) => {
 	// The page tries it all by itself right after it loads, with no click or
 	// tap of its own, and reports the results in its title. (The app's tap

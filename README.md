@@ -168,11 +168,11 @@ To try site isolation locally, run `ISOLATION_DOMAIN=app.localhost pnpm start` a
 ### Security tests
 
 ```sh
-pnpm -C app exec playwright install chromium   # once
-pnpm -C app e2e                                # about a minute; needs the internet
+pnpm -C app exec playwright install chromium webkit   # once
+pnpm -C app e2e                                       # a few minutes; needs the internet
 ```
 
-`app/e2e/` checks in a real browser, through the real proxy, what Badger promises: nothing a page loads goes around the proxy, pages get no WebRTC, no popups or dialogs or hand-offs to other apps without a tap in the page, HTTPS-Only, the Standard, Safer and Safest levels, ad blocking, New identity, the browser check and site isolation, and the server's headers and access rules. It starts two servers itself (ports 8811 and 8812, one in production-like isolation mode).
+`app/e2e/` checks in a real browser, through the real proxy, what Badger promises: nothing a page loads goes around the proxy, pages get no WebRTC, no popups or dialogs or hand-offs to other apps without a tap in the page, HTTPS-Only, the Standard, Safer and Safest levels, ad blocking, New identity, the browser check and site isolation, and the server's headers and access rules. It starts two servers itself (ports 8811 and 8812, one in production-like isolation mode), and runs everything twice: in Chromium, and in Safari's engine at an iPhone's size, which is what the home-screen app runs on.
 
 The browser under test sends everything except the app's own addresses to a small fake proxy (`e2e/leak-catcher.js`) that records whatever reaches it, so a request that escapes Badger's proxy fails the test that caused it. Test pages are served by httpbin.org, so pages can be tried over both http and https. CI runs the suite on every push to `main` and every pull request, and keeps the report and traces when it fails.
 
@@ -205,7 +205,7 @@ Tap the shield or lock icon at the left of the address bar to see what's on and 
 | Network lock | Every proxied page and worker carries a Content-Security-Policy that only lets it talk to the app's own address, which is the proxy. A page that gets around the proxy's hooks (a fresh frame has the browser's own `fetch` and `WebSocket`) still can't reach a site directly. |
 | Strict policy on the app's own pages | The app's pages run only their own scripts (a Content-Security-Policy with hashes of the few inline ones), may only be framed by the app, and are HTTPS-only for six months once visited over HTTPS (HSTS). |
 | Clear site data on launch | On by default, so a lost or shared device doesn't keep the last session's logins (turn it off in Settings to stay signed in). Each fresh launch deletes every site's cookies, storage and logins, the history and the open tabs (bookmarks are kept). **Clear history and site data now** does it on demand. |
-| Passphrase lock | Optional (Settings → **Lock history and bookmarks with a passphrase**). History, bookmarks and open tabs are stored on the device encrypted (AES-GCM, with a key made from the passphrase by PBKDF2-SHA256 at 600,000 rounds). The key is only ever in memory, so the passphrase is asked each time the app opens. A forgotten passphrase can't be recovered: **Erase and start over** deletes them along with every site's logins. Site logins themselves aren't encrypted; clearing on launch covers them. |
+| Passphrase lock | Optional (Settings → **Lock history and bookmarks with a passphrase**). History, bookmarks and open tabs are stored on the device encrypted (AES-GCM, with a key made from the passphrase by PBKDF2-SHA256 at 600,000 rounds). The key is only ever in memory, so the passphrase is asked each time the app opens. A phone keeps the app alive in the background, so coming back after five minutes away asks again too. A forgotten passphrase can't be recovered: **Erase and start over** deletes them along with every site's logins. Site logins themselves aren't encrypted; clearing on launch covers them. |
 | Password | See above. It also guards the proxy connection itself, not only the page. |
 | Site isolation | See above. |
 | Trustworthy address bar | The bar shows the site's real domain, never a page's own claim. Look-alike letters from other alphabets show up as `xn--…` instead of passing for a real domain. With site isolation on, the app checks every address against the walled-off address the browser gave that page, so a page can't make the bar show another site. Without isolation, a malicious page can reach into the app and change the bar. |
@@ -233,6 +233,7 @@ Most of this lives in `app/src/client/page.js` (`noPopups`). It runs inside ever
 | location, camera/mic, notifications, motion sensors, share sheet, passkeys, Apple Pay, clipboard paste, storage-access prompts | denied without showing a prompt |
 | long-press link/image previews | disabled |
 | a proxied page escaping to the top level | gets wrapped back into the shell |
+| a page reaching around all of the above for the browser's own `window.open` | on phones and tablets the browser refuses it: tabs are sandboxed frames without permission to open windows or replace the app |
 
 The shell itself has no outbound links. It draws its own browser chrome, because standalone mode has none:
 

@@ -331,6 +331,10 @@ export function createShield(scramjet, configStored) {
 		return h;
 	}
 
+	// A 307, which keeps a form POST intact. Not Response.redirect(): Safari
+	// refuses a redirect into the app's frame unless it carries these headers.
+	const redirect = (to) => new Response(null, { status: 307, headers: { ...headers(), location: to } });
+
 	// Runs in a page we generate. Works out where it is: "top" (escaped the
 	// app), "tab" (the app's page frame) or "sub" (a frame inside a page).
 	const WHERE = `function where(){try{if(parent===self)return"top";if(parent.__biosShell)return"tab";parent.location.href;return"sub"}catch(e){return"tab"}}`;
@@ -515,7 +519,7 @@ function go(key) {
 			else if (action === "allow") allowOnce.add(to);
 			else if (action === "bypass") bypassed.add(target.hostname.toLowerCase());
 			else if (action === "http") plainHttp.add(siteOf(target.hostname.toLowerCase()));
-			return Response.redirect(to, 307);
+			return redirect(to);
 		}
 		if (request.method === "POST" && path === "cosmetic") {
 			const { url, classes, ids, hrefs } = await request.json();
@@ -639,7 +643,7 @@ function go(key) {
 			return interstitial({ kind: "http", host: target.hostname, url });
 		const secure = new URL(target.href);
 		secure.protocol = "https:";
-		return Response.redirect(location.origin + encodeUrl(secure.href), 307);
+		return redirect(location.origin + encodeUrl(secure.href));
 	}
 
 	// "Safer" level: no web fonts (a fingerprinting and font-parser attack
