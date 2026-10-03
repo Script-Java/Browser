@@ -273,7 +273,7 @@ function createTab(url = "", { after = null, lazy = false, title = "", select = 
 	if (MOBILE)
 		frame.setAttribute(
 			"sandbox",
-			"allow-scripts allow-same-origin allow-forms allow-modals allow-downloads allow-pointer-lock allow-presentation"
+			"allow-scripts allow-same-origin allow-forms allow-modals allow-downloads allow-pointer-lock"
 		);
 	frame.hidden = true;
 	framesEl.appendChild(frame);

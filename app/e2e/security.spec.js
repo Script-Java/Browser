@@ -200,6 +200,13 @@ test("a page whose stylesheets set cookies still finishes loading", async ({ app
 	await expect.poll(() => frame.evaluate(() => document.readyState)).toBe("complete");
 });
 
+test("the new tab's search bar takes a click, text and Enter", async ({ app }) => {
+	await app.click("#home-input");
+	await app.keyboard.type("example.com");
+	await app.keyboard.press("Enter");
+	await app.waitForFunction(() => active.url === "https://example.com/" && !active.loading);
+});
+
 test("HTTPS-Only opens the secure version of a site", async ({ app }) => {
 	await open(app, "http://example.com/");
 	await app.waitForFunction(() => active.url === "https://example.com/");

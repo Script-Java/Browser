@@ -433,6 +433,12 @@ body.browsing #newtab {
 	display: none;
 }
 
+/* The page area lies over the new tab page; with no page showing, clicks
+   and taps go through it to the search bar and shortcuts. */
+body:not(.browsing) #frames {
+	pointer-events: none;
+}
+
 #newtab {
 	display: flex;
 	flex-direction: column;
