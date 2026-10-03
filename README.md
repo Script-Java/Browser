@@ -1,10 +1,9 @@
 # browser-ios
 
-[Ultraviolet](https://github.com/titaniumnetwork-dev/Ultraviolet) packaged as an iOS home-screen app (PWA) where nothing pops out of the app.
+[Scramjet](https://github.com/MercuryWorkshop/scramjet) packaged as an iOS home-screen app (PWA) where nothing pops out of the app.
 
 ```
-Ultraviolet/   UV library, built from source (one small patch, see below)
-app/           server (express + wisp) and the PWA shell
+app/           server (express + wisp-js) and the PWA shell; Scramjet comes from npm
 ```
 
 ## Deploy to Railway (one command)
@@ -97,7 +96,7 @@ The shield menu says whether isolation is on.
 ## Run locally
 
 ```sh
-pnpm run setup   # build Ultraviolet, install the app
+pnpm run setup   # install the app
 pnpm start       # http://localhost:8787  (PORT=... to change)
 pnpm -C app test # unit tests (CI also runs lint, audit and a Docker build)
 ```
@@ -143,7 +142,7 @@ Limits:
 
 ## What "no popups" covers
 
-Most of this lives in `app/public/uv/uv.config.js` (`noPopups`). It runs inside every proxied page, including iframes that scripts create.
+Most of this lives in `app/src/client/page.js` (`noPopups`). It runs inside every proxied page and frame. Frames a page writes itself (`about:blank`, `srcdoc`) get it once they finish loading, so one that opens a popup before then isn't caught.
 
 | Would normally… | Now |
 | --- | --- |
@@ -159,13 +158,15 @@ The shell itself has no outbound links. Back, forward, address, reload, and home
 
 Not covered: the iOS keyboard and its autofill bar, and file downloads served as attachments (iOS asks before saving them).
 
-## Changes to upstream
+## How it sits on Scramjet
 
-- `Ultraviolet/src/uv.handler.js`: at the end of `__uvHook`, it calls `__uv$config.construct(__uv, window, type)` when that is defined. This lets the config hook every window UV hooks.
-- `app/public/uv/uv.config.js`: a `decodeUrl` that fixes GET form submissions. Upstream's xor decode garbles the `?query` that the browser appends.
-- `app/public/register-sw.js`: waits for the worker to activate. `serviceWorker.ready` never settles because the shell page is outside the `/uv/` scope.
-- `app/src/index.js`: serves the locally built UV, sends `Cache-Control: no-cache` because iOS PWAs cache aggressively, and has a recovery page that re-registers the service worker when iOS evicts it. It also runs the password gate (`auth.js`), the block lists (`filters.js`), the signed settings cookie, and the site-isolation host rules. At startup it bundles `src/sw/shield.js` (the service worker's blocker) and `src/client/sitekey.js` with esbuild.
+Scramjet is used unmodified from npm. Everything app-specific is around it:
+
+- `app/public/scramjet-sw.js`: the service worker (scope `/scramjet/`). `shield.js` checks each request before Scramjet fetches it, and after Scramjet rewrites an HTML page it adds `/bios/page.js`, the page's hiding rules and its scriptlets.
+- `app/src/sw/shield.js`: the worker's blocker. It also stores Scramjet's config itself (Scramjet normally expects a page to post it), clears Scramjet's in-memory cookies on "Clear all site data", and when the connection to the server has died (a deploy, a network change) asks an open page to reconnect and retries the request once.
+- `app/src/client/page.js`: runs in every proxied page after Scramjet has hooked it: the no-popup layer, generic ad hiding, video-ad skipping, and reporting the address to the shell. It isn't rewritten by Scramjet, so it reads the site's address from Scramjet's client. Scramjet lets `mailto:` through unproxied, so this drops those navigations.
+- `app/src/codec.js`: proxied URLs are `/scramjet/<encodeURIComponent(url)>` (Scramjet's default codec); the server's media fallback and the service worker decode them the same way.
+- `app/public/register-sw.js`: registers the worker, waits for it to activate (`serviceWorker.ready` never settles because the shell is outside the worker's scope), removes the old Ultraviolet worker, and answers the worker's reconnect requests.
+- `app/src/index.js`: serves Scramjet's files at `/scram/`, sends `Cache-Control: no-cache` because iOS PWAs cache aggressively, and has a recovery page that re-registers the service worker when iOS evicts it. It also runs the password gate (`auth.js`), the block lists (`filters.js`), the signed settings cookie, and the site-isolation host rules. At startup it bundles `shield.js`, `page.js` and `sitekey.js` with esbuild.
 - `app/src/media.js`: iOS plays video with its own media engine, which skips the service worker and asks the server for the proxied URL directly. The server fetches the video itself and rewrites HLS playlists so every segment in them is proxied too.
-- `app/public/uv/sw.js`: replaces UV's stock service worker so `shield.js` checks each request before UV fetches it, and adds hiding rules and scriptlets to each page after UV rewrites it.
-- `Ultraviolet/src/uv.handler.js`: the `construct` hook also receives UV's client, which holds the unhooked `fetch`.
-- `app/patches/wisp-server-node@1.1.7.patch`: the wisp server refuses connections to private, loopback and link-local addresses.
+- `app/src/wisp.js`: the wisp server (wisp-js) only connects to ports 80 and 443 over TCP, and refuses private, loopback and link-local addresses. wisp-js has its own check, but it misses IPv6 private addresses (`fc00::/7`) and IPv4-mapped ones, so ours runs in front of it.

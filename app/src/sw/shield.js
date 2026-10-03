@@ -1,22 +1,35 @@
-// Runs inside the proxy's service worker (bundled to /uv/shield.js).
+// Runs inside the proxy's service worker (bundled to /bios/shield.js).
 //
-// Before Ultraviolet fetches anything it decides whether the request is
+// Before Scramjet fetches anything it decides whether the request is
 // allowed: known ad/tracker requests are dropped, known malware/phishing pages
 // get a warning page, and (in isolation mode) a page that belongs to another
-// site is moved to that site's own subdomain. After Ultraviolet rewrites an
-// HTML page, it adds the page's element-hiding CSS and anti-ad scriptlets.
+// site is moved to that site's own subdomain. After Scramjet rewrites an
+// HTML page, it adds our page script, the page's element-hiding CSS and
+// anti-ad scriptlets.
 
 import { FiltersEngine, Request as FilterRequest } from "@ghostery/adblocker";
 import { parse } from "tldts";
 import { siteOf, siteKey } from "../client/sitekey.js";
 import { DEFAULT_SETTINGS } from "../settings.js";
+import { PREFIX, decodeUrl } from "../codec.js";
 
 const FILTER_CACHE = "bios-filters";
 const ENGINE_RECHECK_MS = 6 * 3_600_000;
 const ENGINE_WAIT_MS = 4000;
 const SETTINGS_TTL_MS = 30_000;
 const THREAT_TTL_MS = 10 * 60_000;
-const API = "/uv/__bios/";
+const API = PREFIX + "__bios/";
+
+// Scramjet's config. The service worker stores it itself (Scramjet normally
+// expects a page to), so every origin's worker works on its first request.
+const SCRAMJET_CONFIG = {
+	prefix: PREFIX,
+	files: {
+		wasm: "/scram/scramjet.wasm.wasm",
+		all: "/scram/scramjet.all.js",
+		sync: "/scram/scramjet.sync.js",
+	},
+};
 
 const REQUEST_TYPES = {
 	iframe: "sub_frame",
@@ -60,12 +73,32 @@ const scriptJson = (value) =>
 		.replace(/\u2029/g, "\\u2029");
 
 /**
- * @param {any} uv UVServiceWorker instance
- * @param {any} config __uv$config (with .bios from the server)
+ * Saves Scramjet's config to its database. Call before creating the
+ * ScramjetServiceWorker: it opens that database without creating its tables,
+ * and the first open of a new database is the one that gets to create them.
  */
-export function createShield(uv, config) {
-	const prefix = location.origin + config.prefix;
-	const bios = config.bios || {};
+export function storeConfig() {
+	const { ScramjetController } = self.$scramjetLoadController();
+	const save = () => new ScramjetController(SCRAMJET_CONFIG).openIDB();
+	return save().catch(async (err) => {
+		// a database left without tables: start it over
+		console.warn("bios: rebuilding Scramjet's database:", err);
+		await new Promise((resolve) => {
+			const req = indexedDB.deleteDatabase("$scramjet");
+			req.onsuccess = req.onerror = req.onblocked = resolve;
+		});
+		return save();
+	});
+}
+
+/**
+ * @param {any} scramjet ScramjetServiceWorker instance
+ * @param {Promise<unknown>} configStored from storeConfig()
+ */
+export function createShield(scramjet, configStored) {
+	const prefix = location.origin + PREFIX;
+	// Server settings, prepended to this script by the server.
+	const bios = self.__biosConfig || {};
 	const isolationDomain = bios.isolation || null;
 	const isolated =
 		!!isolationDomain && location.hostname.endsWith("." + isolationDomain);
@@ -89,8 +122,51 @@ export function createShield(uv, config) {
 	const goUrl = (action, to) =>
 		`${location.origin}${API}go?do=${action}&u=${encodeURIComponent(to)}`;
 
-	const decoder = new self.Ultraviolet(config);
-	decoder.meta.origin = location.origin;
+	let configLoad = null;
+	function ensureConfig() {
+		if (scramjet.config) return;
+		configLoad ||= configStored
+			.then(() => scramjet.loadConfig())
+			.finally(() => (configLoad = null));
+		return configLoad;
+	}
+
+	// The transport's connection to the server died (a deploy, a network
+	// change) and epoxy doesn't reopen it. Ask one open page of this origin
+	// to connect again, then retry the request once.
+	const DEAD_TRANSPORT = /MuxTaskEnded|WebSocket (is )?closed|wisp.*clos/i;
+	let reconnecting = null;
+	function reconnect() {
+		reconnecting ||= (async () => {
+			const pages = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+			// the shell or a site's anchor frame: pages that load register-sw.js
+			const page = pages.find((client) => !client.url.startsWith(prefix));
+			if (!page) return;
+			const channel = new MessageChannel();
+			const answered = new Promise((resolve) => (channel.port1.onmessage = resolve));
+			page.postMessage({ bios: "reconnect" }, [channel.port2]);
+			await Promise.race([answered, new Promise((resolve) => setTimeout(resolve, 5000))]);
+		})().finally(() => (reconnecting = null));
+		return reconnecting;
+	}
+	const transportFetch = scramjet.client.fetch.bind(scramjet.client);
+	scramjet.client.fetch = async (url, init) => {
+		try {
+			return await transportFetch(url, init);
+		} catch (err) {
+			if (!DEAD_TRANSPORT.test(String(err?.message || err))) throw err;
+			await reconnect();
+			return transportFetch(url, init);
+		}
+	};
+
+	// "Clear all site data" deleted Scramjet's cookie database; forget the
+	// copy this worker keeps in memory too.
+	self.addEventListener("message", (event) => {
+		if (event.data?.bios === "wipe") scramjet.cookieStore.load("{}");
+		// the shell saved new settings: fetch them on the next request
+		if (event.data?.bios === "settings") settingsAt = 0;
+	});
 
 	let engine = null;
 	let engineLoad = null;
@@ -101,7 +177,7 @@ export function createShield(uv, config) {
 	const bypassed = new Set(); // hosts the user chose to open despite a warning
 	const allowOnce = new Set(); // proxied URLs to load once without ad blocking
 	const inlineOnce = new Set(); // proxied URLs to load in this origin once
-	const pages = new WeakMap(); // Request -> page info for the response hook
+	const pages = new Map(); // site URL -> page info for the response hook
 
 	// ---------------------------------------------------------------- engine
 
@@ -200,7 +276,7 @@ export function createShield(uv, config) {
 				.then((res) => (res.ok ? res.json() : null))
 				.then(applySettings, () => settings || applySettings(null))
 				.finally(() => (settingsLoad = null));
-			if (!settings) await settingsLoad;
+			await settingsLoad;
 		}
 		return settings;
 	}
@@ -209,7 +285,8 @@ export function createShield(uv, config) {
 	async function checkNavigation(hostname) {
 		const cached = threatCache.get(hostname);
 		if (cached && settings && Date.now() - cached.at < THREAT_TTL_MS) {
-			getSettings();
+			// stale settings would undo a switch the person just flipped
+			await getSettings();
 			return cached.verdict;
 		}
 		try {
@@ -247,7 +324,7 @@ export function createShield(uv, config) {
 
 	// Runs in a page we generate. Works out where it is: "top" (escaped the
 	// app), "tab" (the app's page frame) or "sub" (a frame inside a page).
-	const WHERE = `function where(){try{if(parent===self)return"top";if(parent.__uvShell)return"tab";parent.location.href;return"sub"}catch(e){return"tab"}}`;
+	const WHERE = `function where(){try{if(parent===self)return"top";if(parent.__biosShell)return"tab";parent.location.href;return"sub"}catch(e){return"tab"}}`;
 
 	function interstitial({ kind, host, url }) {
 		const danger = kind === "phishing" || kind === "malware";
@@ -291,10 +368,10 @@ document.getElementById("go").onclick = function () { location.replace(${scriptJ
 	// Re-issues a navigation from a tiny page we serve (GET or form POST).
 	// `plan` decides the destination once the page knows where it is.
 	//
-	// The page may get hooked by Ultraviolet (a parent page touching the
-	// frame does that), which reroutes fetch() and form.action through the
-	// proxy. So it only uses location.replace() and forms written in the
-	// markup, which Ultraviolet leaves alone.
+	// The page may get hooked by Scramjet (a parent page touching the frame
+	// does that), which reroutes fetch() through the proxy. So it only uses
+	// location.replace() and forms written in the markup, which go to the
+	// browser's own Location and form handling.
 	async function trampoline(request, plan) {
 		let fields = null;
 		if (request.method === "POST") {
@@ -395,7 +472,7 @@ function go(key) {
 	// ------------------------------------------------------------ internal API
 
 	async function api(request, path) {
-		// /uv/__bios/go?do=<inline|allow|bypass>&u=<proxied URL>: remember the
+		// /scramjet/__bios/go?do=<inline|allow|bypass>&u=<proxied URL>: remember the
 		// choice, then continue to the page (307 keeps a form POST intact).
 		if (path === "go") {
 			const params = new URL(request.url).searchParams;
@@ -440,12 +517,8 @@ function go(key) {
 	// ----------------------------------------------------------- the request
 
 	function decode(url) {
-		try {
-			if (!url || !url.startsWith(prefix)) return null;
-			return new URL(decoder.sourceUrl(url));
-		} catch {
-			return null;
-		}
+		if (!url || !url.startsWith(prefix)) return null;
+		return decodeUrl(url);
 	}
 
 	function blocked(destination) {
@@ -465,10 +538,13 @@ function go(key) {
 				request,
 				url.slice((location.origin + API).length).split("?")[0]
 			);
-		if (!uv.route(event)) return fetch(request);
+		await ensureConfig();
+		if (!scramjet.route(event)) return fetch(request);
 
+		// decodeUrl only returns http(s) pages; data:, blob: and Scramjet's
+		// own files go straight to Scramjet
 		const target = decode(url);
-		if (!target || !/^https?:$/.test(target.protocol)) return uv.fetch(event);
+		if (!target) return scramjet.fetch(event);
 
 		const destination = request.destination;
 		const isPage =
@@ -543,17 +619,19 @@ function go(key) {
 		}
 
 		if (isPage) {
-			pages.set(request, {
+			// ponytail: entries for pages that never answer stay until this clears
+			if (pages.size > 200) pages.clear();
+			pages.set(target.href, {
 				url: target.href,
 				hostname: target.hostname,
 				cosmetic: blocking && settings.cosmetic,
 				videoAds: settings.videoAds && !isAllowed(target.hostname),
 			});
 		}
-		return uv.fetch(event);
+		return scramjet.fetch(event);
 	}
 
-	// ------------------------------------------------- after UV rewrites HTML
+	// -------------------------------------------- after Scramjet rewrites HTML
 
 	function injectHtml(html, page) {
 		let styles = "";
@@ -575,8 +653,9 @@ function go(key) {
 		}
 
 		const flags = { cosmetic: page.cosmetic, videoAds: page.videoAds };
-		const before = `<script __uv-script="1">self.__biosPage=${scriptJson(flags)};</script>`;
-		let after = "";
+		let after =
+			`<script>self.__biosPage=${scriptJson(flags)};document.currentScript.remove();</script>` +
+			`<script src="${location.origin}/bios/page.js"></script>`;
 		if (styles)
 			after += `<style>${styles.replace(/<\/style/gi, "<\\/style")}</style>`;
 		if (scripts.length)
@@ -590,30 +669,24 @@ function go(key) {
 					.join("\n") +
 				";document.currentScript&&document.currentScript.remove();</script>";
 
-		const first = html.indexOf("<script __uv-script");
-		const handler = html.indexOf(`src="${config.handler}"`);
-		const handlerEnd = handler === -1 ? -1 : html.indexOf("</script>", handler);
-		if (first === -1 || handlerEnd === -1) return html;
-		const end = handlerEnd + "</script>".length;
-		return (
-			html.slice(0, first) +
-			before +
-			html.slice(first, end) +
-			after +
-			html.slice(end)
-		);
+		// Right after Scramjet's own scripts at the top of <head>, the last of
+		// which starts Scramjet in the page.
+		const boot = html.indexOf('<script src="data:application/javascript;base64,');
+		const bootEnd = boot === -1 ? -1 : html.indexOf("</script>", boot);
+		if (bootEnd === -1) return html;
+		const end = bootEnd + "</script>".length;
+		return html.slice(0, end) + after + html.slice(end);
 	}
 
-	uv.on("response", (event) => {
-		const ctx = event.data;
-		const request = ctx.request && ctx.request.request;
-		const page = request && pages.get(request);
+	scramjet.addEventListener("handleResponse", (event) => {
+		const page = pages.get(event.url.href);
 		if (!page) return;
+		pages.delete(event.url.href);
 		// lets the page load in the app's frame across subdomains
-		ctx.headers["cross-origin-resource-policy"] = "same-site";
-		const type = ctx.getHeader("content-type") || "";
-		if (typeof ctx.body === "string" && /^text\/html/i.test(type))
-			ctx.body = injectHtml(ctx.body, page);
+		event.responseHeaders["cross-origin-resource-policy"] = "same-site";
+		const type = event.responseHeaders["content-type"] || "";
+		if (typeof event.responseBody === "string" && /^text\/html/i.test(type))
+			event.responseBody = injectHtml(event.responseBody, page);
 	});
 
 	loadEngine();
@@ -622,7 +695,7 @@ function go(key) {
 		handle(event) {
 			return handle(event).catch((err) => {
 				console.error("bios:", err);
-				return uv.fetch(event);
+				return scramjet.fetch(event);
 			});
 		},
 	};

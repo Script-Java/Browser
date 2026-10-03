@@ -1,8 +1,8 @@
 "use strict";
 
-// Marks this window as the shell so the no-popup layer in uv.config.js can
-// find the tab frame and never navigate the shell itself.
-window.__uvShell = true;
+// Marks this window as the shell so the no-popup layer in proxied pages
+// (src/client/page.js) can find the tab frame and never navigate the shell.
+window.__biosShell = true;
 
 // Keys match SEARCH_ENGINES in src/settings.js.
 const SEARCH = {
@@ -12,7 +12,7 @@ const SEARCH = {
 	brave: "https://search.brave.com/search?q=%s",
 };
 
-const config = __uv$config.bios || {};
+const config = self.__biosConfig || {};
 // Isolation mode: the shell runs on ISOLATION_DOMAIN and every site on its
 // own <key>.ISOLATION_DOMAIN origin, walled off from the shell and each other.
 const isolated = !!config.isolation && location.hostname === config.isolation;
@@ -100,8 +100,20 @@ function readList(name) {
 	}
 }
 
+// Scramjet's address for a site URL (src/codec.js encodeUrl).
+function proxyPath(url) {
+	const target = new URL(url);
+	const hash = target.hash.slice(1);
+	target.hash = "";
+	return (
+		"/scramjet/" +
+		encodeURIComponent(target.href) +
+		(hash ? "#" + encodeURIComponent(hash) : "")
+	);
+}
+
 async function frameUrlFor(url) {
-	const path = __uv$config.prefix + __uv$config.encodeUrl(url);
+	const path = proxyPath(url);
 	if (!isolated) return path;
 	const key = await BiosSiteKey.siteKey(new URL(url).hostname);
 	rememberOrigin(key);
@@ -186,10 +198,8 @@ async function go(input) {
 function frameLocation() {
 	if (isolated) return "";
 	try {
-		const { href, origin } = frame.contentWindow.location;
-		const prefix = origin + __uv$config.prefix;
-		if (!href.startsWith(prefix)) return "";
-		return __uv$config.decodeUrl(href.slice(prefix.length));
+		const client = frame.contentWindow[Symbol.for("scramjet client global")];
+		return client ? client.url.href : "";
 	} catch {
 		return "";
 	}
@@ -367,6 +377,11 @@ async function saveSettings(next) {
 	});
 	if (!res.ok) throw new Error(`Couldn't save settings (${res.status})`);
 	settings = await res.json();
+	// the proxy's service worker keeps a copy for 30s; have it fetch these
+	navigator.serviceWorker
+		?.getRegistration("/scramjet/")
+		.then((reg) => reg?.active?.postMessage({ bios: "settings" }))
+		.catch(() => {});
 	renderSheet();
 }
 
@@ -509,9 +524,10 @@ async function clearStorageHere() {
 		if (!keep(key)) localStorage.removeItem(key);
 	for (const key of Object.keys(sessionStorage))
 		if (!keep(key)) sessionStorage.removeItem(key);
-	const names = indexedDB.databases
-		? (await indexedDB.databases()).map((db) => db.name)
-		: ["__op"];
+	const names = (
+		indexedDB.databases ? (await indexedDB.databases()).map((db) => db.name) : []
+	).filter((name) => name !== "$scramjet");
+	await clearProxyCookies();
 	await Promise.all(
 		names.map(
 			(name) =>

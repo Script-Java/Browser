@@ -153,7 +153,7 @@ export function createAuth({ password, secret, cookieDomain }) {
 			req.method === "GET" && (req.headers.accept || "").includes("text/html");
 		if (wantsPage && (req.path === "/" || req.path === "/index.html"))
 			return res.redirect("/login");
-		if (req.path.startsWith("/uv/service/"))
+		if (req.path.startsWith("/scramjet/"))
 			console.warn(
 				`signed-out proxied request: dest=${req.headers["sec-fetch-dest"] || "?"} range=${req.headers.range || "-"} ua=${String(req.headers["user-agent"] || "").slice(0, 60)}`
 			);

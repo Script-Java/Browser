@@ -1,7 +1,7 @@
 {
 	"name": "browser-ios",
 	"version": "1.0.0",
-	"description": "Ultraviolet instance",
+	"description": "Private iOS proxy browser (Scramjet)",
 	"type": "module",
 	"engines": {
 		"node": ">=22.0.0"
@@ -25,8 +25,9 @@
 	},
 	"dependencies": {
 		"@ghostery/adblocker": "^2.18.2",
-		"@mercuryworkshop/bare-mux": "^2.1.8",
+		"@mercuryworkshop/bare-mux": "^2.1.9",
 		"@mercuryworkshop/epoxy-transport": "2.1.28",
+		"@mercuryworkshop/scramjet": "1.1.0",
 		"@mercuryworkshop/wisp-js": "0.5.0",
 		"esbuild": "^0.25.12",
 		"express": "^5.2.1",

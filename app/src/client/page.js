@@ -1,41 +1,41 @@
-// This file overwrites the stock UV config.js.
-// It is loaded by the shell page, the service worker, and every proxied page.
-// The server puts `self.__biosConfig = {...}` in front of it.
+// Runs in every proxied page (bundled to /bios/page.js). The service worker
+// puts it in each HTML page right after Scramjet's own scripts, so Scramjet
+// has already hooked the page. The server puts `self.__biosConfig = {...}`
+// in front of it; the service worker sets `self.__biosPage` (this page's
+// ad-blocking flags) just before it.
+//
+// This code is not rewritten by Scramjet: `location` here is the proxy's
+// real address, and the site's address comes from the Scramjet client.
 
-// Ultraviolet hides navigator.serviceWorker from pages; grab it first (this
-// file runs before uv.handler.js).
-const swContainer =
-	typeof window !== "undefined" && window.navigator && window.navigator.serviceWorker;
+const SCRAMJET = Symbol.for("scramjet client global");
+// Server settings: { isolation: "<domain>" | null, auth: boolean }.
+const bios = self.__biosConfig || {};
 
-self.__uv$config = {
-	prefix: "/uv/service/",
-	encodeUrl: Ultraviolet.codec.xor.encode,
-	decodeUrl,
-	handler: "/uv/uv.handler.js",
-	client: "/uv/uv.client.js",
-	bundle: "/uv/uv.bundle.js",
-	config: "/uv/uv.config.js",
-	sw: "/uv/uv.sw.js",
-	// Server settings: { isolation: "<domain>" | null, auth: boolean }.
-	bios: self.__biosConfig || {},
-	// Called by the (patched) uv.handler.js for every hooked window.
-	construct(__uv, win, type, client) {
-		if (type !== "window") return;
-		// The service worker asks open pages for a connection to the proxy
-		// transport (bare-mux). Those messages only arrive once the page's
-		// message queue is started, and in isolation mode the pages of a site
-		// are the only ones that can answer.
-		if (win === self && swContainer) {
-			try {
-				swContainer.startMessages();
-			} catch {
-				// ignore
-			}
+/** @param {Window} win */
+function hook(win) {
+	const client = win[SCRAMJET];
+	if (!client) return;
+	noPopups(client, win);
+	pageShield(client, win);
+}
+
+hook(self);
+
+// Same-origin frames a page writes itself (about:blank, srcdoc) get
+// Scramjet's hooks from their parent but never load this script.
+// ponytail: catches them once loaded; one that pops up before its load event slips through.
+self.addEventListener(
+	"load",
+	(event) => {
+		if (event.target?.localName !== "iframe") return;
+		try {
+			hook(event.target.contentWindow);
+		} catch {
+			// cross-origin frame
 		}
-		noPopups(__uv, win);
-		pageShield(__uv, win, client);
 	},
-};
+	true
+);
 
 /**
  * Origin of the app shell. In isolation mode proxied pages live on
@@ -43,7 +43,7 @@ self.__uv$config = {
  * @param {Window} win
  */
 function shellOrigin(win) {
-	const domain = self.__uv$config.bios.isolation;
+	const domain = bios.isolation;
 	const loc = win.location;
 	if (domain && loc.hostname.endsWith("." + domain))
 		return `${loc.protocol}//${domain}${loc.port ? ":" + loc.port : ""}`;
@@ -57,38 +57,10 @@ function shellOrigin(win) {
 function isTab(win) {
 	if (win.parent === win) return false;
 	try {
-		return !!win.parent.__uvShell;
+		return !!win.parent.__biosShell;
 	} catch {
 		// cross-origin parent: only the shell (isolation mode)
 		return true;
-	}
-}
-
-/**
- * xor decode that survives browser-appended query strings and fragments.
- *
- * Encoded URLs never contain a literal "?" or "#" (encodeURIComponent escapes
- * them), so any that appear were added by the browser: a GET form submission
- * (which replaces the original query) or a #fragment.
- * @param {string} str
- */
-function decodeUrl(str) {
-	if (!str) return str;
-	const match = /[?#]/.exec(str);
-	if (!match) return Ultraviolet.codec.xor.decode(str);
-
-	const decoded = Ultraviolet.codec.xor.decode(str.slice(0, match.index));
-	const rest = str.slice(match.index);
-	try {
-		const url = new URL(decoded);
-		const hashAt = rest.indexOf("#");
-		const search = hashAt === -1 ? rest : rest.slice(0, hashAt);
-		const hash = hashAt === -1 ? "" : rest.slice(hashAt);
-		if (search) url.search = search;
-		if (hash) url.hash = hash;
-		return url.href;
-	} catch {
-		return decoded + rest;
 	}
 }
 
@@ -101,26 +73,41 @@ function decodeUrl(str) {
  * dialog. This keeps every navigation inside the proxy tab and silences the
  * APIs that show system prompts.
  *
- * @param {object} __uv The Ultraviolet instance for this window.
+ * @param {object} client The Scramjet client for this window.
  * @param {Window} win The window being hooked.
  */
-function noPopups(__uv, win) {
+function noPopups(client, win) {
 	if (win.__noPopups) return;
 	win.__noPopups = true;
 
-	// UV leaves mailto: URLs unproxied, so `location.href = "mailto:..."` would
-	// hand off to the Mail app. Proxying them turns that into a harmless error
-	// page inside the tab (tel:, sms:, etc. are already proxied).
-	__uv.urlRegex = /^(#|about:|data:)/;
-
 	const doc = win.document;
-	const proxyPrefix = __uv.meta.origin + __uv.prefix;
 	const SHELL_FRAME = "uvframe";
 	const SAFE_SCHEMES = ["http:", "https:", "javascript:", "about:", "blob:"];
 
+	// Scramjet leaves mailto: URLs unproxied, so `location.href = "mailto:..."`
+	// would hand off to the Mail app. Drop navigations to other apps' schemes
+	// (tel:, sms:, etc. are proxied into a harmless error page already).
+	const toOtherApp = (url) => /^\s*mailto:/i.test(String(url));
+	const urlAccessor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(client), "url");
+	Object.defineProperty(client, "url", {
+		get: urlAccessor.get,
+		set(url) {
+			if (!toOtherApp(url)) urlAccessor.set.call(this, url);
+		},
+		configurable: true,
+	});
+	const fakeLocation = client.locationProxy;
+	for (const name of ["assign", "replace"]) {
+		const real = fakeLocation?.[name];
+		if (typeof real === "function")
+			fakeLocation[name] = function (url) {
+				if (!toOtherApp(url)) return real.apply(this, arguments);
+			};
+	}
+
 	function hasShell() {
 		try {
-			return !!win.top.__uvShell;
+			return !!win.top.__biosShell;
 		} catch {
 			// a cross-origin top is the shell (isolation mode)
 			return win.top !== win;
@@ -132,7 +119,7 @@ function noPopups(__uv, win) {
 	function tabWindow() {
 		let w = win;
 		try {
-			while (w.parent !== w && !w.parent.__uvShell) w = w.parent;
+			while (w.parent !== w && !w.parent.__biosShell) w = w.parent;
 		} catch {
 			// cross-origin ancestor; stay where we are
 		}
@@ -158,9 +145,9 @@ function noPopups(__uv, win) {
 
 	// Re-wrap pages that escaped the shell (e.g. a target=_top that slipped
 	// through) so the toolbar is never lost.
-	if (win === win.top && !win.__uvShell) {
+	if (win === win.top && !win.__biosShell) {
 		try {
-			const source = __uv.sourceUrl(win.location.href);
+			const source = client.url.href;
 			win.location.replace(
 				shellOrigin(win) + "/#" + encodeURIComponent(source)
 			);
@@ -178,7 +165,7 @@ function noPopups(__uv, win) {
 		if (lower === "" || lower === "_self") return null;
 		if (lower === "_parent") {
 			try {
-				if (win.parent !== win && !win.parent.__uvShell) return null;
+				if (win.parent !== win && !win.parent.__biosShell) return null;
 			} catch {
 				// fall through
 			}
@@ -271,15 +258,17 @@ function noPopups(__uv, win) {
 	// window.open: never create a window. Navigate the tab (or the named
 	// frame) instead. Calls without a user gesture (pop-unders) are dropped.
 	function navigateTo(targetWin, url) {
-		let proxied;
+		let target;
 		try {
-			proxied = __uv.rewriteUrl(String(url));
+			// relative to this page's real address, like window.open
+			target = new URL(String(url), client.url);
 		} catch {
 			return false;
 		}
-		if (!proxied.startsWith(proxyPrefix) && !proxied.startsWith(__uv.prefix))
-			return false;
-		targetWin.location.href = proxied;
+		if (target.protocol !== "http:" && target.protocol !== "https:") return false;
+		const targetClient = targetWin[SCRAMJET];
+		if (!targetClient) return false;
+		targetClient.url = target.href;
 		return true;
 	}
 
@@ -462,11 +451,10 @@ function noPopups(__uv, win) {
  * and ids that actually appear), skipping ads inside video players, and
  * telling the shell which address the tab is showing.
  *
- * @param {object} __uv
+ * @param {object} client Scramjet client
  * @param {Window} win
- * @param {object} [client] UV client (for the unhooked fetch)
  */
-function pageShield(__uv, win, client) {
+function pageShield(client, win) {
 	if (win.__biosShield) return;
 	Object.defineProperty(win, "__biosShield", { value: true });
 
@@ -490,19 +478,21 @@ function pageShield(__uv, win, client) {
 		else fn();
 	}
 
-	if (flags.cosmetic && client && client.fetch && client.fetch.fetch)
-		hideGenericAds(win, client.fetch.fetch, setTimer);
-	if (flags.videoAds) skipVideoAds(__uv, win, setRepeat, whenReady);
-	if (isTab(win)) reportToShell(__uv, win, setRepeat, whenReady);
+	// Scramjet keeps the fetch it replaced; ours must reach the service
+	// worker, not be sent on to the site.
+	const nativeFetch = client.natives.store.fetch;
+	if (flags.cosmetic && nativeFetch) hideGenericAds(client, win, nativeFetch, setTimer);
+	if (flags.videoAds) skipVideoAds(win, setRepeat, whenReady);
+	if (isTab(win)) reportToShell(client, win, setRepeat, whenReady);
 }
 
 /**
  * Generic element hiding: send the class names and ids on the page to the
  * service worker, which answers with the CSS for the matching filters.
  */
-function hideGenericAds(win, nativeFetch, setTimer) {
+function hideGenericAds(client, win, nativeFetch, setTimer) {
 	const doc = win.document;
-	const endpoint = win.location.origin + "/uv/__bios/cosmetic";
+	const endpoint = win.location.origin + "/scramjet/__bios/cosmetic";
 	const seenClasses = new Set();
 	const seenIds = new Set();
 	let classes = [];
@@ -538,7 +528,7 @@ function hideGenericAds(win, nativeFetch, setTimer) {
 		timer = 0;
 		if (!classes.length && !ids.length) return;
 		const body = JSON.stringify({
-			url: win.__uv.location.href,
+			url: client.url.href,
 			classes,
 			ids,
 		});
@@ -587,7 +577,7 @@ function hideGenericAds(win, nativeFetch, setTimer) {
  * the playback speed (the real video would stall at high speed), and never
  * seeks long or live videos, which may be the real video with the ad stitched in.
  */
-function skipVideoAds(__uv, win, setRepeat, whenReady) {
+function skipVideoAds(win, setRepeat, whenReady) {
 	const SKIP_BUTTONS = [
 		".ytp-ad-skip-button",
 		".ytp-ad-skip-button-modern",
@@ -662,13 +652,13 @@ function skipVideoAds(__uv, win, setRepeat, whenReady) {
  * that the address belongs to the site this frame's origin was created for,
  * so a page can't make the address bar show another site.
  */
-function reportToShell(__uv, win, setRepeat, whenReady) {
+function reportToShell(client, win, setRepeat, whenReady) {
 	const target = shellOrigin(win);
 	let last = "";
 	function send() {
 		let url;
 		try {
-			url = __uv.location.href;
+			url = client.url.href;
 		} catch {
 			return;
 		}

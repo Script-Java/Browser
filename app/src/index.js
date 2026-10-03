@@ -9,6 +9,7 @@ import { build } from "esbuild";
 
 import { epoxyPath } from "@mercuryworkshop/epoxy-transport";
 import { baremuxPath } from "@mercuryworkshop/bare-mux/node";
+import { scramjetPath } from "@mercuryworkshop/scramjet/path";
 
 import { CHALLENGE_BITS, createAuth, parseCookies } from "./auth.js";
 import { Filters } from "./filters.js";
@@ -16,8 +17,6 @@ import { serveMedia } from "./media.js";
 import { clientKey, createLimits } from "./limits.js";
 import { DEFAULT_SETTINGS, SEARCH_ENGINES } from "./settings.js";
 
-// Ultraviolet is built from ../Ultraviolet (patched to support config.construct).
-const uvPath = resolve(import.meta.dirname, "..", "..", "Ultraviolet", "dist");
 const publicPath = resolve(import.meta.dirname, "..", "public");
 
 // ---------------------------------------------------------------- settings
@@ -171,7 +170,8 @@ async function bundle(entry, globalName) {
 const bundles = Promise.all([
 	bundle("sw/shield.js", "BiosShield"),
 	bundle("client/sitekey.js", "BiosSiteKey"),
-]).then(([shield, sitekey]) => ({ shield, sitekey }));
+	bundle("client/page.js"),
+]).then(([shield, sitekey, page]) => ({ shield, sitekey, page }));
 
 // `auth`: whether the shield menu offers Lock (only useful with a password).
 const clientConfig = JSON.stringify({ isolation: ISOLATION || null, auth: auth.mode === "password" });
@@ -205,7 +205,7 @@ app.use((req, res, next) => {
 
 // Site origins only serve what the proxy needs, never the shell: if the shell
 // ran on a site origin, that site could reach into it.
-const SITE_PATHS = /^\/(uv\/|baremux\/|epoxy\/|filters\/|api\/(nav|settings)$|register-sw\.js$|wipe\.html$|anchor\.html$)/;
+const SITE_PATHS = /^\/(scramjet\/|scram\/|bios\/(shield|page)\.js$|baremux\/|epoxy\/|filters\/|api\/(nav|settings)$|scramjet-sw\.js$|register-sw\.js$|wipe\.html$|anchor\.html$)/;
 app.use((req, res, next) => {
 	if (hostKind(req) === "site" && !SITE_PATHS.test(req.path)) {
 		if (req.path === "/" && req.method === "GET")
@@ -244,14 +244,19 @@ app.post("/logout", auth.logout);
 
 app.use(auth.gate);
 
-app.get("/uv/uv.config.js", async (req, res) => {
+// Server settings for the shell, the service worker and every proxied page.
+const withConfig = (source) => `self.__biosConfig = ${clientConfig};\n${source}`;
+app.get("/bios/config.js", (req, res) => {
 	res.type("text/javascript").setHeader("Cache-Control", "no-cache");
-	const source = await readFile(resolve(publicPath, "uv", "uv.config.js"), "utf8");
-	res.send(`self.__biosConfig = ${clientConfig};\n${source}`);
+	res.send(withConfig(""));
 });
-app.get("/uv/shield.js", async (req, res) => {
+app.get("/bios/shield.js", async (req, res) => {
 	res.type("text/javascript").setHeader("Cache-Control", "no-cache");
-	res.send((await bundles).shield);
+	res.send(withConfig((await bundles).shield));
+});
+app.get("/bios/page.js", async (req, res) => {
+	res.type("text/javascript").setHeader("Cache-Control", "no-cache");
+	res.send(withConfig((await bundles).page));
 });
 app.get("/sitekey.js", async (req, res) => {
 	res.type("text/javascript").setHeader("Cache-Control", "no-cache");
@@ -312,18 +317,15 @@ app.get("/api/nav", (req, res) => {
 	res.json({ settings: readSettings(req), threat: host ? filters.threat(host) : null });
 });
 
-// Load our publicPath first and prioritize it over UV.
 app.use(express.static(publicPath, staticOptions));
-// Load vendor files last.
-// The vendor's uv.config.js won't conflict with our uv.config.js inside the publicPath directory.
-app.use("/uv/", express.static(uvPath, staticOptions));
+app.use("/scram/", express.static(scramjetPath, staticOptions));
 app.use("/epoxy/", express.static(epoxyPath, staticOptions));
 app.use("/baremux/", express.static(baremuxPath, staticOptions));
 
 // A proxied URL reached the server, so the service worker isn't controlling
 // the page (iOS evicts it sometimes, and every isolated site origin starts
 // without one). Register it, connect the proxy and reload once.
-app.all("/uv/service/{*rest}", async (req, res) => {
+app.all("/scramjet/{*rest}", async (req, res) => {
 	res.setHeader("Cache-Control", "no-store");
 	// iOS plays video with its own media engine, which skips the service
 	// worker and asks the server for the proxied URL directly.
