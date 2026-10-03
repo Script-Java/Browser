@@ -1,7 +1,7 @@
 "use strict";
 
 // Marks this window as the shell so the no-popup layer in proxied pages
-// (src/client/page.js) can find the tab frame and never navigate the shell.
+// (src/client/page.js) can find its tab's frame and never navigate the shell.
 window.__biosShell = true;
 
 // Keys match SEARCH_ENGINES in src/settings.js.
@@ -30,18 +30,24 @@ const SITE_ORIGIN = config.isolation
 		)
 	: null;
 
-const frame = document.getElementById("uv-frame");
-const homeForm = document.getElementById("home-form");
-const homeInput = document.getElementById("home-input");
-const barForm = document.getElementById("bar-form");
-const barInput = document.getElementById("bar-input");
-const siteBtn = document.getElementById("site-btn");
-const error = document.getElementById("error");
-const sheet = document.getElementById("sheet");
+const $ = (id) => document.getElementById(id);
+const chrome = $("chrome");
+const framesEl = $("frames");
+const homeForm = $("home-form");
+const homeInput = $("home-input");
+const barForm = $("bar-form");
+const barInput = $("bar-input");
+const siteBtn = $("site-btn");
+const star = $("star");
+const error = $("error");
+const sheet = $("sheet");
+const library = $("library");
 
-// What the tab is showing. `url` only changes on messages the shell can
-// trust (see onFrameMessage).
-let current = { url: "", title: "" };
+// The page area starts below the chrome, whose height changes with the
+// bookmarks bar.
+new ResizeObserver(() =>
+	document.documentElement.style.setProperty("--chrome-h", chrome.offsetHeight + "px")
+).observe(chrome);
 
 /**
  * @param {string} input
@@ -83,6 +89,33 @@ function ensureReady() {
 	return ready;
 }
 
+function displayHost(url) {
+	try {
+		// URL.hostname is ASCII (punycode), so look-alike letters from other
+		// alphabets show up as xn--... instead of passing for a real domain.
+		return new URL(url).hostname;
+	} catch {
+		return url;
+	}
+}
+
+// A site's "favicon": the first letter of its name on a dark square.
+function markFor(url) {
+	const mark = document.createElement("span");
+	mark.className = "mark";
+	mark.setAttribute("aria-hidden", "true");
+	mark.textContent = (displayHost(url).replace(/^www\./, "")[0] || "?").toUpperCase();
+	return mark;
+}
+
+function badgerMark() {
+	const img = document.createElement("img");
+	img.className = "mark";
+	img.src = "/icons/badger.png";
+	img.alt = "";
+	return img;
+}
+
 // ----------------------------------------------------------- site origins
 
 function rememberOrigin(key) {
@@ -114,13 +147,13 @@ function proxyPath(url) {
 	);
 }
 
-async function frameUrlFor(url) {
+async function frameUrlFor(url, tab) {
 	const path = proxyPath(url);
 	if (!isolated) return path;
 	const key = await BiosSiteKey.siteKey(new URL(url).hostname);
 	rememberOrigin(key);
 	const origin = originFor(key);
-	tabSiteOrigin = origin;
+	tab.siteOrigin = origin;
 	await ensureAnchor(origin);
 	return origin + path;
 }
@@ -162,92 +195,198 @@ function ensureAnchor(origin) {
 	anchor = { frame: holder, ready };
 	anchors.set(origin, anchor);
 
+	// Drop the least recently used anchors, but never one an open tab is on.
+	const inUse = new Set(tabs.map((t) => t.siteOrigin));
 	for (const [old, entry] of anchors) {
 		if (anchors.size <= MAX_ANCHORS) break;
-		if (old === origin || old === tabOrigin()) continue;
+		if (old === origin || inUse.has(old)) continue;
 		entry.frame.remove();
 		anchors.delete(old);
 	}
 	return ready;
 }
 
-// Site origin the tab is on (isolation mode).
-let tabSiteOrigin = "";
-const tabOrigin = () => tabSiteOrigin;
+// -------------------------------------------------------------------- tabs
+
+/** @type {{ id: number, frame: HTMLIFrameElement, url: string, title: string, siteOrigin: string, loading: boolean }[]} */
+const tabs = [];
+let active = null;
+let nextTabId = 1;
+
+function createTab(url) {
+	const id = nextTabId++;
+	const frame = document.createElement("iframe");
+	// unique per tab: page.js aims target=_blank links at its own tab's name
+	frame.name = `uvframe-${id}`;
+	frame.title = "Page";
+	frame.allow =
+		"autoplay; fullscreen; encrypted-media; picture-in-picture; clipboard-write";
+	frame.hidden = true;
+	framesEl.appendChild(frame);
+
+	const tab = { id, frame, url: "", title: "", siteOrigin: "", loading: false };
+	frame.addEventListener("load", () => {
+		if (!tab.url) return;
+		setLoading(tab, false);
+		syncAddress(tab);
+		try {
+			frame.contentWindow.addEventListener("pagehide", () => setLoading(tab, true));
+		} catch {
+			// cross-origin frame
+		}
+	});
+	tabs.push(tab);
+	selectTab(tab);
+	if (url) go(url, tab);
+	else homeInput.focus({ preventScroll: true });
+	return tab;
+}
+
+function selectTab(tab) {
+	active = tab;
+	for (const t of tabs) t.frame.hidden = t !== tab || !t.url;
+	document.body.classList.toggle("browsing", !!tab.url);
+	document.body.classList.toggle("loading", tab.loading);
+	error.textContent = "";
+	homeInput.value = "";
+	if (!tab.url) renderNewTab();
+	renderTabs();
+	showAddress();
+}
+
+function closeTab(tab) {
+	const i = tabs.indexOf(tab);
+	if (i === -1) return;
+	tabs.splice(i, 1);
+	tab.frame.remove();
+	if (!tabs.length) createTab();
+	else if (tab === active) selectTab(tabs[Math.min(i, tabs.length - 1)]);
+	else renderTabs();
+}
+
+function setLoading(tab, loading) {
+	tab.loading = loading;
+	if (tab === active) document.body.classList.toggle("loading", loading);
+}
+
+function tabLabel(tab) {
+	return tab.title || (tab.url ? displayHost(tab.url) : "New Tab");
+}
+
+function renderTabs() {
+	$("tabs").replaceChildren(
+		...tabs.map((tab) => {
+			const el = document.createElement("div");
+			el.className = "tab";
+			el.setAttribute("role", "tab");
+			el.setAttribute("aria-selected", String(tab === active));
+			el.title = tabLabel(tab);
+			const title = document.createElement("span");
+			title.className = "tab-title";
+			title.textContent = tabLabel(tab);
+			const close = document.createElement("button");
+			close.type = "button";
+			close.className = "tab-close";
+			close.setAttribute("aria-label", `Close ${tabLabel(tab)}`);
+			close.innerHTML =
+				'<svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>';
+			close.addEventListener("click", (event) => {
+				event.stopPropagation();
+				closeTab(tab);
+			});
+			el.append(tab.url ? markFor(tab.url) : badgerMark(), title, close);
+			el.addEventListener("click", () => selectTab(tab));
+			// middle click closes, like any browser
+			el.addEventListener("auxclick", (event) => {
+				if (event.button === 1) closeTab(tab);
+			});
+			return el;
+		})
+	);
+	document.title = active?.url ? tabLabel(active) : "Badger";
+}
 
 // ------------------------------------------------------------- navigation
 
 let startup = Promise.resolve();
 
-async function go(input) {
+async function go(input, tab = active) {
 	if (!input.trim()) return;
 	error.textContent = "";
 	try {
 		await startup;
 		await ensureReady();
+		const url = toUrl(input);
+		// before touching the tab: throws for addresses that can't be opened
+		const src = await frameUrlFor(url, tab);
+		tab.url = url;
+		tab.title = "";
+		setLoading(tab, true);
+		if (tab === active) selectTab(tab);
+		tab.frame.src = src;
 	} catch (err) {
 		error.textContent = err.message || String(err);
-		return;
 	}
-	const url = toUrl(input);
-	document.body.classList.add("browsing", "loading");
-	current = { url, title: "" };
-	showAddress();
-	frame.src = await frameUrlFor(url);
 }
 
 // Shared mode only: the frame is same-origin, so read its address directly.
-function frameLocation() {
+function frameLocation(tab) {
 	if (isolated) return "";
 	try {
-		const client = frame.contentWindow[Symbol.for("scramjet client global")];
+		const client = tab.frame.contentWindow[Symbol.for("scramjet client global")];
 		return client ? client.url.href : "";
 	} catch {
 		return "";
 	}
 }
 
-function displayHost(url) {
-	try {
-		// URL.hostname is ASCII (punycode), so look-alike letters from other
-		// alphabets show up as xn--... instead of passing for a real domain.
-		return new URL(url).hostname;
-	} catch {
-		return url;
-	}
-}
-
 function showAddress() {
-	const browsing = document.body.classList.contains("browsing");
-	const url = browsing ? current.url : "";
+	const url = active?.url || "";
 	let state = "shield";
 	if (url.startsWith("https:")) state = "lock";
 	else if (url.startsWith("http:")) state = "warn";
 	siteBtn.dataset.state = state;
+	star.hidden = !url;
+	star.setAttribute("aria-pressed", String(isBookmarked(url)));
 	if (document.activeElement === barInput) return;
 	const shown = url ? displayHost(url) : "";
 	if (barInput.value !== shown) barInput.value = shown;
 }
 
-function syncAddress() {
-	const url = frameLocation();
-	if (url && url !== current.url) {
-		current = { url, title: current.title };
-		recordVisit(current);
-	}
-	showAddress();
+function updateTab(tab, url, title) {
+	const changed = url !== tab.url || title !== tab.title;
+	tab.url = url;
+	tab.title = title;
+	if (!changed) return;
+	recordVisit(tab);
+	renderTabs();
+	if (tab === active) showAddress();
 }
 
+function syncAddress(tab) {
+	const url = frameLocation(tab);
+	if (url && url !== tab.url) updateTab(tab, url, tab.title);
+}
+
+const tabFor = (source) => tabs.find((t) => t.frame.contentWindow === source);
+
 async function onFrameMessage(event) {
-	if (event.source !== frame.contentWindow) return;
 	const data = event.data;
 
+	// Isolation mode: a site's anchor frame passing on its service worker's
+	// count of blocked requests.
+	if (data?.bios === "blocked") {
+		for (const [origin, anchor] of anchors)
+			if (anchor.frame.contentWindow === event.source && event.origin === origin)
+				addBlocked(data.count);
+		return;
+	}
+
+	const tab = tabFor(event.source);
+	if (!tab) return;
+
 	// The tab landed on a site origin with no proxy connection yet.
-	if (
-		isolated &&
-		data?.bios === "need-anchor" &&
-		SITE_ORIGIN.test(event.origin)
-	) {
+	if (isolated && data?.bios === "need-anchor" && SITE_ORIGIN.test(event.origin)) {
 		await ensureAnchor(event.origin);
 		event.source.postMessage({ bios: "anchor-ready" }, event.origin);
 		return;
@@ -274,43 +413,41 @@ async function onFrameMessage(event) {
 			return;
 		}
 		rememberOrigin(match[1]);
-		tabSiteOrigin = event.origin;
+		tab.siteOrigin = event.origin;
 		ensureAnchor(event.origin);
 	} else if (event.origin !== location.origin) {
 		return;
 	}
 
-	current = { url: url.href, title: String(data.title || "") };
-	recordVisit(current);
-	showAddress();
-}
-
-function goHome() {
-	document.body.classList.remove("browsing", "loading");
-	frame.src = "about:blank";
-	current = { url: "", title: "" };
-	barInput.value = "";
-	homeInput.value = "";
-	showAddress();
-	renderBookmarks();
+	updateTab(tab, url.href, String(data.title || "").slice(0, 300));
 }
 
 window.addEventListener("message", onFrameMessage);
 
-frame.addEventListener("load", () => {
-	document.body.classList.remove("loading");
-	syncAddress();
-	try {
-		frame.contentWindow.addEventListener("pagehide", () => {
-			document.body.classList.add("loading");
-		});
-	} catch {
-		// cross-origin frame
-	}
-});
-
 // catches pushState/SPA navigations
-setInterval(syncAddress, 500);
+setInterval(() => active && syncAddress(active), 500);
+
+// Back, forward and reload act on the tab's own page. In isolation mode the
+// frame is cross-origin, so the page does it when the shell asks.
+function tabCommand(cmd) {
+	const tab = active;
+	if (!tab?.url) return;
+	if (cmd === "reload") setLoading(tab, true);
+	try {
+		const win = tab.frame.contentWindow;
+		if (cmd === "back") win.history.back();
+		else if (cmd === "forward") win.history.forward();
+		else win.location.reload();
+	} catch {
+		if (tab.siteOrigin)
+			tab.frame.contentWindow.postMessage({ bios: "cmd", cmd }, tab.siteOrigin);
+	}
+}
+
+$("back").addEventListener("click", () => tabCommand("back"));
+$("forward").addEventListener("click", () => tabCommand("forward"));
+$("reload").addEventListener("click", () => tabCommand("reload"));
+$("new-tab").addEventListener("click", () => createTab());
 
 homeForm.addEventListener("submit", (event) => {
 	event.preventDefault();
@@ -327,43 +464,19 @@ barForm.addEventListener("submit", (event) => {
 });
 
 barInput.addEventListener("focus", () => {
-	if (current.url && document.body.classList.contains("browsing"))
-		barInput.value = current.url;
+	if (active?.url) barInput.value = active.url;
 	barInput.select();
 });
 barInput.addEventListener("blur", showAddress);
 
-document.getElementById("back").addEventListener("click", () => {
-	if (!document.body.classList.contains("browsing")) return;
-	try {
-		frame.contentWindow.history.back();
-	} catch {
-		history.back();
-	}
+// Cmd/Ctrl+K or +L: jump to the address bar (or the new tab's search box).
+document.addEventListener("keydown", (event) => {
+	if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
+	const key = event.key.toLowerCase();
+	if (key !== "k" && key !== "l") return;
+	event.preventDefault();
+	(active?.url ? barInput : homeInput).focus();
 });
-
-document.getElementById("forward").addEventListener("click", () => {
-	if (!document.body.classList.contains("browsing")) return;
-	try {
-		frame.contentWindow.history.forward();
-	} catch {
-		history.forward();
-	}
-});
-
-document.getElementById("reload").addEventListener("click", () => {
-	if (!document.body.classList.contains("browsing")) return;
-	document.body.classList.add("loading");
-	try {
-		frame.contentWindow.location.reload();
-	} catch {
-		// cross-origin (isolation mode): ask the page to reload itself
-		if (tabSiteOrigin)
-			frame.contentWindow.postMessage({ bios: "cmd", cmd: "reload" }, tabSiteOrigin);
-	}
-});
-
-document.getElementById("home-btn").addEventListener("click", goHome);
 
 // --------------------------------------------------------------- settings
 
@@ -388,13 +501,8 @@ async function saveSettings(next) {
 	renderSheet();
 }
 
-function reloadTab() {
-	if (document.body.classList.contains("browsing"))
-		document.getElementById("reload").click();
-}
-
 function currentSite() {
-	const host = current.url && displayHost(current.url);
+	const host = active?.url && displayHost(active.url);
 	return host ? BiosSiteKey.siteOf(host) : "";
 }
 
@@ -409,38 +517,28 @@ function timeAgo(ms) {
 
 function renderSheet() {
 	if (!settings) return;
-	const site = document.body.classList.contains("browsing")
-		? currentSite()
-		: "";
-	document.getElementById("sheet-site").textContent = site
-		? displayHost(current.url)
-		: "Protection";
+	const site = currentSite();
+	$("sheet-site").textContent = site ? displayHost(active.url) : "Settings";
 
-	const trust = document.getElementById("sheet-trust");
+	const trust = $("sheet-trust");
 	if (!site) trust.textContent = "";
-	else if (current.url.startsWith("http:"))
+	else if (active.url.startsWith("http:"))
 		trust.textContent = "Not secure: this connection isn't encrypted.";
 	else if (isolated)
 		trust.textContent =
 			"Address verified. This site runs walled off from other sites.";
 	else trust.textContent = "Encrypted connection.";
 
-	const siteRow = document.getElementById("site-row");
-	siteRow.hidden = !site;
-	document.getElementById("site-toggle").checked =
-		!settings.allow.includes(site);
-
-	const bookmarkBtn = document.getElementById("bookmark-btn");
-	bookmarkBtn.hidden = !site;
-	bookmarkBtn.textContent = isBookmarked(current.url) ? "Remove bookmark" : "Add bookmark";
+	$("site-row").hidden = !site;
+	$("site-toggle").checked = !settings.allow.includes(site);
 
 	for (const input of sheet.querySelectorAll("[data-setting]"))
 		input.checked = !!settings[input.dataset.setting];
-	document.getElementById("search-engine").value = settings.search;
+	$("search-engine").value = settings.search;
 
-	document.getElementById("lock-form").hidden = !config.auth;
+	$("lock-form").hidden = !config.auth;
 
-	const iso = document.getElementById("isolation-status");
+	const iso = $("isolation-status");
 	if (isolated)
 		iso.textContent =
 			"Site isolation is on: each site gets its own separate space.";
@@ -458,12 +556,12 @@ async function openSheet() {
 		await loadSettings();
 		renderSheet();
 	} catch (err) {
-		document.getElementById("filter-status").textContent = err.message;
+		$("filter-status").textContent = err.message;
 	}
 	fetch("/filters/status", { cache: "no-store" })
 		.then((res) => res.json())
 		.then((status) => {
-			document.getElementById("filter-status").textContent = status.updatedAt
+			$("filter-status").textContent = status.updatedAt
 				? `Block lists updated ${timeAgo(status.updatedAt)}: ${(
 						status.networkFilters + status.cosmeticFilters
 					).toLocaleString()} ad rules, ${(
@@ -475,11 +573,16 @@ async function openSheet() {
 }
 
 siteBtn.addEventListener("click", openSheet);
-document.getElementById("sheet-close").addEventListener("click", () => {
+$("menu-btn").addEventListener("click", openSheet);
+$("sheet-close").addEventListener("click", () => {
 	sheet.hidden = true;
 });
-sheet.addEventListener("click", (event) => {
-	if (event.target === sheet) sheet.hidden = true;
+for (const panel of [sheet, library])
+	panel.addEventListener("click", (event) => {
+		if (event.target === panel) panel.hidden = true;
+	});
+document.addEventListener("keydown", (event) => {
+	if (event.key === "Escape") sheet.hidden = library.hidden = true;
 });
 
 for (const input of sheet.querySelectorAll("[data-setting]")) {
@@ -489,40 +592,38 @@ for (const input of sheet.querySelectorAll("[data-setting]")) {
 				...settings,
 				[input.dataset.setting]: input.checked,
 			});
-			if (input.dataset.setting !== "wipe") reloadTab();
+			if (input.dataset.setting !== "wipe") tabCommand("reload");
 		} catch (err) {
 			input.checked = !input.checked;
-			document.getElementById("filter-status").textContent = err.message;
+			$("filter-status").textContent = err.message;
 		}
 	});
 }
 
-const searchSelect = document.getElementById("search-engine");
+const searchSelect = $("search-engine");
 searchSelect.addEventListener("change", async () => {
 	try {
 		await saveSettings({ ...settings, search: searchSelect.value });
 	} catch (err) {
 		searchSelect.value = settings.search;
-		document.getElementById("filter-status").textContent = err.message;
+		$("filter-status").textContent = err.message;
 	}
 });
 
-document
-	.getElementById("site-toggle")
-	.addEventListener("change", async (event) => {
-		const site = currentSite();
-		if (!site) return;
-		const allow = new Set(settings.allow);
-		if (event.target.checked) allow.delete(site);
-		else allow.add(site);
-		try {
-			await saveSettings({ ...settings, allow: [...allow] });
-			reloadTab();
-		} catch (err) {
-			event.target.checked = !event.target.checked;
-			document.getElementById("filter-status").textContent = err.message;
-		}
-	});
+$("site-toggle").addEventListener("change", async (event) => {
+	const site = currentSite();
+	if (!site) return;
+	const allow = new Set(settings.allow);
+	if (event.target.checked) allow.delete(site);
+	else allow.add(site);
+	try {
+		await saveSettings({ ...settings, allow: [...allow] });
+		tabCommand("reload");
+	} catch (err) {
+		event.target.checked = !event.target.checked;
+		$("filter-status").textContent = err.message;
+	}
+});
 
 // ------------------------------------------------------------------ wiping
 
@@ -570,11 +671,12 @@ function clearOrigin(origin) {
 	});
 }
 
-// Deletes every site's cookies, storage and logins.
+// Deletes every site's cookies, storage and logins, and the history. Every
+// tab closes first so no page holds its databases open.
 async function clearAllSiteData() {
 	localStorage.removeItem(HISTORY);
-	goHome();
-	// let the tab's page close its databases first
+	for (const tab of [...tabs]) closeTab(tab);
+	// let the closed pages release their databases first
 	await new Promise((resolve) => setTimeout(resolve, 50));
 	await clearStorageHere();
 	if (config.isolation) {
@@ -582,9 +684,10 @@ async function clearAllSiteData() {
 		await Promise.all(keys.map((key) => clearOrigin(originFor(key))));
 		localStorage.setItem("bios:origins", "[]");
 	}
+	renderNewTab();
 }
 
-document.getElementById("wipe-now").addEventListener("click", async (event) => {
+$("wipe-now").addEventListener("click", async (event) => {
 	const button = event.currentTarget;
 	button.disabled = true;
 	button.textContent = "Clearing…";
@@ -608,7 +711,6 @@ document.getElementById("wipe-now").addEventListener("click", async (event) => {
 const HISTORY = "bios:history";
 const BOOKMARKS = "bios:bookmarks";
 const MAX_HISTORY = 1000;
-const library = document.getElementById("library");
 
 function readEntries(name) {
 	const list = readList(name);
@@ -639,90 +741,151 @@ function recordVisit({ url, title }) {
 
 const isBookmarked = (url) => !!url && readEntries(BOOKMARKS).some((b) => b.url === url);
 
-function linkRow(item, detail, onRemove) {
+const nameOf = (entry) => entry.title || displayHost(entry.url).replace(/^www\./, "");
+
+function linkRow(item, detail) {
 	const li = document.createElement("li");
 	const open = document.createElement("button");
 	open.type = "button";
 	open.className = "link";
+	const text = document.createElement("span");
+	text.className = "text";
 	const title = document.createElement("span");
-	title.textContent = item.title || displayHost(item.url);
+	title.textContent = nameOf(item);
 	const small = document.createElement("small");
 	small.textContent = detail;
-	open.append(title, small);
+	text.append(title, small);
+	open.append(markFor(item.url), text);
 	open.addEventListener("click", () => {
 		library.hidden = true;
 		go(item.url);
 	});
 	li.append(open);
-	if (onRemove) {
-		const remove = document.createElement("button");
-		remove.type = "button";
-		remove.className = "remove";
-		remove.textContent = "×";
-		remove.setAttribute("aria-label", `Remove ${title.textContent}`);
-		remove.addEventListener("click", onRemove);
-		li.append(remove);
-	}
 	return li;
 }
 
-function renderBookmarks() {
+function renderBookmarksBar() {
 	const list = readEntries(BOOKMARKS);
-	document.getElementById("bookmarks").hidden = !list.length;
-	document.getElementById("bookmark-list").replaceChildren(
-		...list.map((b) =>
-			linkRow(b, displayHost(b.url), () => {
-				saveEntries(
-					BOOKMARKS,
-					readEntries(BOOKMARKS).filter((x) => x.url !== b.url)
-				);
-				renderBookmarks();
-			})
-		)
+	const bar = $("bookmarks-bar");
+	bar.hidden = !list.length;
+	bar.replaceChildren(
+		...list.map((b) => {
+			const button = document.createElement("button");
+			button.type = "button";
+			button.className = "bookmark";
+			button.title = b.url;
+			const label = document.createElement("span");
+			label.textContent = nameOf(b);
+			button.append(markFor(b.url), label);
+			button.addEventListener("click", () => go(b.url));
+			return button;
+		})
 	);
 }
 
-document.getElementById("bookmark-btn").addEventListener("click", () => {
+star.addEventListener("click", () => {
+	const url = active?.url;
+	if (!url) return;
 	const list = readEntries(BOOKMARKS);
-	const i = list.findIndex((b) => b.url === current.url);
+	const i = list.findIndex((b) => b.url === url);
 	if (i === -1)
-		list.unshift({
-			url: current.url,
-			title: (current.title || displayHost(current.url)).slice(0, 200),
-		});
+		list.unshift({ url, title: nameOf({ url, title: active.title }).slice(0, 200) });
 	else list.splice(i, 1);
 	saveEntries(BOOKMARKS, list);
-	renderSheet();
-	renderBookmarks();
+	renderBookmarksBar();
+	showAddress();
 });
 
 function renderHistory() {
 	const list = readEntries(HISTORY).slice(0, 300);
-	document.getElementById("history-empty").hidden = list.length > 0;
-	document.getElementById("history-clear").hidden = !list.length;
-	document
-		.getElementById("history-list")
-		.replaceChildren(
-			...list.map((h) => linkRow(h, `${displayHost(h.url)} · ${timeAgo(h.at)}`))
-		);
+	$("history-empty").hidden = list.length > 0;
+	$("history-clear").hidden = !list.length;
+	$("history-list").replaceChildren(
+		...list.map((h) => linkRow(h, `${displayHost(h.url)} · ${timeAgo(h.at)}`))
+	);
 }
 
-document.getElementById("history-btn").addEventListener("click", () => {
+$("history-open").addEventListener("click", () => {
+	sheet.hidden = true;
 	renderHistory();
 	library.hidden = false;
 });
-document.getElementById("library-close").addEventListener("click", () => {
+$("library-close").addEventListener("click", () => {
 	library.hidden = true;
 });
-library.addEventListener("click", (event) => {
-	if (event.target === library) library.hidden = true;
-});
-document.getElementById("history-clear").addEventListener("click", () => {
+$("history-clear").addEventListener("click", () => {
 	localStorage.removeItem(HISTORY);
 	renderHistory();
 });
 
-renderBookmarks();
+// ---------------------------------------------------------------- new tab
+
+// Shortcuts: bookmarks first, then the most visited sites from history.
+function shortcuts() {
+	const picked = new Map();
+	for (const b of readEntries(BOOKMARKS)) picked.set(displayHost(b.url), b);
+	const visits = new Map();
+	for (const h of readEntries(HISTORY)) {
+		const host = displayHost(h.url);
+		const seen = visits.get(host);
+		if (seen) seen.count++;
+		else visits.set(host, { count: 1, entry: { url: new URL(h.url).origin + "/", title: "" } });
+	}
+	for (const [host, { entry }] of [...visits].sort((a, b) => b[1].count - a[1].count))
+		if (!picked.has(host)) picked.set(host, entry);
+	return [...picked.values()].slice(0, 10);
+}
+
+function renderNewTab() {
+	$("tiles").replaceChildren(
+		...shortcuts().map((s) => {
+			const li = document.createElement("li");
+			const button = document.createElement("button");
+			button.type = "button";
+			button.className = "tile";
+			button.title = s.url;
+			const label = document.createElement("span");
+			label.textContent = nameOf(s);
+			button.append(markFor(s.url), label);
+			button.addEventListener("click", () => go(s.url));
+			li.append(button);
+			return li;
+		})
+	);
+	$("stat-blocked").textContent = blockedThisWeek().toLocaleString();
+}
+
+// Trackers blocked: the proxy's service worker reports how many requests it
+// blocked (directly in shared mode, through each site's anchor frame in
+// isolation mode). Counted per day, on this device only.
+const BLOCKED = "bios:blocked";
+// local calendar day, YYYY-MM-DD
+const dayKey = (ms) => new Date(ms).toLocaleDateString("en-CA");
+
+function addBlocked(count) {
+	count = Math.min(Math.max(0, Math.floor(Number(count) || 0)), 10_000);
+	if (!count) return;
+	const days = readList(BLOCKED);
+	const byDay = days && typeof days === "object" && !Array.isArray(days) ? days : {};
+	const today = dayKey(Date.now());
+	byDay[today] = (byDay[today] || 0) + count;
+	const week = new Set(Array.from({ length: 7 }, (_, i) => dayKey(Date.now() - i * 86_400_000)));
+	for (const day of Object.keys(byDay)) if (!week.has(day)) delete byDay[day];
+	saveEntries(BLOCKED, byDay);
+	if (!active?.url) $("stat-blocked").textContent = blockedThisWeek().toLocaleString();
+}
+
+function blockedThisWeek() {
+	const byDay = readList(BLOCKED);
+	if (!byDay || typeof byDay !== "object" || Array.isArray(byDay)) return 0;
+	const week = new Set(Array.from({ length: 7 }, (_, i) => dayKey(Date.now() - i * 86_400_000)));
+	return Object.entries(byDay).reduce((sum, [day, n]) => sum + (week.has(day) ? Number(n) || 0 : 0), 0);
+}
+
+navigator.serviceWorker?.addEventListener("message", (event) => {
+	if (event.data?.bios === "blocked") addBlocked(event.data.count);
+});
+navigator.serviceWorker?.startMessages();
 
 // ----------------------------------------------------------------- startup
 
@@ -735,14 +898,15 @@ startup = (async () => {
 	if (firstLaunch && loaded && loaded.wipe) await clearAllSiteData();
 })().catch((err) => console.warn("startup:", err));
 
-showAddress();
+renderBookmarksBar();
 
 // A proxied page that escaped to the top level redirects to /#<url>.
 if (location.hash.length > 1) {
 	const target = decodeURIComponent(location.hash.slice(1));
 	history.replaceState(null, "", "/");
-	go(target);
+	createTab(target);
 } else {
+	createTab();
 	// warm up the service worker and transport so the first search is fast
 	startup.then(ensureReady).catch((err) => {
 		error.textContent = err.message || String(err);

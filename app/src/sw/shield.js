@@ -518,6 +518,23 @@ function go(key) {
 		return decodeUrl(url);
 	}
 
+	// Counts blocked requests for the new tab's "trackers blocked" stat and
+	// tells the app's own pages every few seconds: the shell (shared mode) or
+	// this site's anchor frame (isolation mode), never the proxied pages.
+	let blockedCount = 0;
+	let blockedTimer = null;
+	function countBlocked() {
+		blockedCount++;
+		blockedTimer ||= setTimeout(async () => {
+			const count = blockedCount;
+			blockedCount = 0;
+			blockedTimer = null;
+			const pages = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+			for (const page of pages)
+				if (!page.url.startsWith(prefix)) page.postMessage({ bios: "blocked", count });
+		}, 3000);
+	}
+
 	function blocked(destination) {
 		if (destination === "script" || destination === "worker")
 			return new Response("", { headers: headers("text/javascript") });
@@ -600,6 +617,7 @@ function go(key) {
 					})
 				);
 				if (redirect && !isPage) {
+					countBlocked();
 					return new Response(
 						redirect.contentType.includes("base64")
 							? Uint8Array.from(atob(redirect.body), (c) => c.charCodeAt(0))
@@ -610,6 +628,7 @@ function go(key) {
 				if (match) {
 					if (isPage)
 						return interstitial({ kind: "ads", host: target.hostname, url });
+					countBlocked();
 					return blocked(destination);
 				}
 			}

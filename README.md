@@ -62,7 +62,7 @@ Limits are per IP address (IPv6: per /64), so people behind one home router shar
 The server has no database and keeps no accounts, history or site data. The only thing it saves to disk is the downloaded block lists.
 
 - **Logins and cookies stay on the phone.** Sites' cookies, logins and storage live in the app's own browser storage on each device, not on the server. They stay until the person clears them (shield menu → **Clear history and site data now**, or the "clear when the app opens" switch).
-- **History and bookmarks stay on the phone too.** They're kept in the app's own storage on the device and never sent to the server. Bookmarks show on the home screen (star a page from the shield menu); **History** is below them. Clearing site data also clears history but keeps bookmarks. With site isolation, sites can't read either, because they run on other addresses.
+- **History and bookmarks stay on the phone too.** They're kept in the app's own storage on the device and never sent to the server. Star a page in the address bar to bookmark it; bookmarks show in the bookmarks bar and as shortcuts on the new tab page, and **History** is in the ⋯ menu. The new tab's "trackers blocked this week" count is kept on the device too. Clearing site data also clears history but keeps bookmarks. With site isolation, sites can't read either, because they run on other addresses.
 - **HTTPS is encrypted on the phone.** The encryption (TLS) runs inside the app on the phone, and the server only relays encrypted bytes. It can't read passwords, cookies or pages of `https://` sites.
 - **What the server does learn:** the name of each site opened (for example `example.com`), so it can check it against the malware and phishing lists. It's used for that check and not logged. Videos that iOS plays with its own player are fetched by the server itself, so for those the server sees the video's address, and the host's request logs (Railway's HTTP logs) record it.
 - **Cookies the app sets:** a pass from the bot check (30 days) or the password sign-in, and the person's settings. Neither identifies anyone.
@@ -155,7 +155,7 @@ Most of this lives in `app/src/client/page.js` (`noPopups`). It runs inside ever
 | long-press link/image previews | disabled |
 | a proxied page escaping to the top level | gets wrapped back into the shell |
 
-The shell itself has no outbound links. Back, forward, address, reload, and home are in the bottom bar, because standalone mode has no browser chrome.
+The shell itself has no outbound links. It draws its own browser chrome (tabs, back, forward, reload, address bar, bookmarks), because standalone mode has none. Links that would open a new window open in the same tab.
 
 Not covered: the iOS keyboard and its autofill bar, and file downloads served as attachments (iOS asks before saving them).
 

@@ -113,7 +113,6 @@ function noPopups(client, win) {
 	win.__noPopups = true;
 
 	const doc = win.document;
-	const SHELL_FRAME = "uvframe";
 	const SAFE_SCHEMES = ["http:", "https:", "javascript:", "about:", "blob:"];
 
 	// Scramjet leaves mailto: URLs unproxied, so `location.href = "mailto:..."`
@@ -158,8 +157,10 @@ function noPopups(client, win) {
 		return w;
 	}
 
+	// Each shell tab's frame has its own name (uvframe-<n>), so a link aimed
+	// at it lands in this tab, never another one.
 	function tabTargetName() {
-		return hasShell() ? SHELL_FRAME : "_top";
+		return hasShell() ? tabWindow().name || "_self" : "_top";
 	}
 
 	function findFrame(name, root = tabWindow()) {
@@ -205,7 +206,7 @@ function noPopups(client, win) {
 		}
 		if (lower === "_top" || lower === "_blank" || lower === "_new")
 			return tabTargetName();
-		if (target === SHELL_FRAME) return null;
+		if (hasShell() && target === tabWindow().name) return null;
 		return findFrame(target) ? null : tabTargetName();
 	}
 
@@ -713,5 +714,7 @@ function reportToShell(client, win, setRepeat, whenReady) {
 		const data = event.data;
 		if (!data || data.bios !== "cmd") return;
 		if (data.cmd === "reload") win.location.reload();
+		else if (data.cmd === "back") win.history.back();
+		else if (data.cmd === "forward") win.history.forward();
 	});
 }

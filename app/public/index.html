@@ -6,19 +6,16 @@
 			name="viewport"
 			content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover"
 		/>
-		<title>Browser</title>
+		<title>Badger</title>
 		<meta name="robots" content="noindex, nofollow" />
 
 		<!-- PWA / iOS standalone -->
 		<link rel="manifest" href="/manifest.webmanifest" />
 		<meta name="apple-mobile-web-app-capable" content="yes" />
 		<meta name="mobile-web-app-capable" content="yes" />
-		<meta name="apple-mobile-web-app-title" content="Browser" />
-		<meta
-			name="apple-mobile-web-app-status-bar-style"
-			content="black-translucent"
-		/>
-		<meta name="theme-color" content="#0e0e14" />
+		<meta name="apple-mobile-web-app-title" content="Badger" />
+		<meta name="apple-mobile-web-app-status-bar-style" content="default" />
+		<meta name="theme-color" content="#ecebe8" />
 		<meta name="format-detection" content="telephone=no, email=no, address=no, date=no" />
 		<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
 		<link rel="icon" href="/favicon.ico" />
@@ -30,10 +27,80 @@
 		<script src="/sitekey.js"></script>
 	</head>
 
-	<body>
-		<main id="home">
-			<img class="logo" src="/uv.png" alt="" draggable="false" />
-			<form id="home-form" autocomplete="off">
+	<body class="shell">
+		<header id="chrome">
+			<div id="tabstrip">
+				<div id="tabs" role="tablist" aria-label="Tabs"></div>
+				<button id="new-tab" class="icon-btn" type="button" aria-label="New tab">
+					<svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" /></svg>
+				</button>
+			</div>
+
+			<div id="toolbar">
+				<button id="back" class="icon-btn" type="button" aria-label="Back">
+					<svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7" /></svg>
+				</button>
+				<button id="forward" class="icon-btn" type="button" aria-label="Forward">
+					<svg viewBox="0 0 24 24"><path d="M9 5l7 7-7 7" /></svg>
+				</button>
+				<button id="reload" class="icon-btn" type="button" aria-label="Reload">
+					<svg viewBox="0 0 24 24">
+						<path d="M20 12a8 8 0 1 1-2.34-5.66" />
+						<path d="M20 4v5h-5" />
+					</svg>
+				</button>
+
+				<form id="bar-form" role="search" autocomplete="off">
+					<button id="site-btn" type="button" aria-label="Site protection">
+						<img class="icon-badger" src="/icons/badger.png" alt="" />
+						<svg viewBox="0 0 24 24" class="icon-lock">
+							<rect x="5" y="11" width="14" height="10" rx="2" />
+							<path d="M8 11V8a4 4 0 0 1 8 0v3" />
+						</svg>
+						<svg viewBox="0 0 24 24" class="icon-warn">
+							<path d="M12 4l9 16H3l9-16z" />
+							<path d="M12 10v4M12 17.5v.01" />
+						</svg>
+					</button>
+					<input
+						id="bar-input"
+						type="text"
+						inputmode="url"
+						enterkeyhint="go"
+						autocapitalize="off"
+						autocorrect="off"
+						spellcheck="false"
+						aria-label="Address"
+						placeholder="Search or type a URL"
+					/>
+					<button id="star" type="button" aria-label="Bookmark this page" aria-pressed="false" hidden>
+						<svg viewBox="0 0 24 24">
+							<path d="M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.3-4.1 5.9-.9z" />
+						</svg>
+					</button>
+					<kbd class="kbd">⌘K</kbd>
+				</form>
+
+				<button id="menu-btn" class="icon-btn" type="button" aria-label="Settings and history">
+					<svg viewBox="0 0 24 24" class="filled">
+						<circle cx="5" cy="12" r="1.6" />
+						<circle cx="12" cy="12" r="1.6" />
+						<circle cx="19" cy="12" r="1.6" />
+					</svg>
+				</button>
+			</div>
+
+			<nav id="bookmarks-bar" aria-label="Bookmarks" hidden></nav>
+			<div id="progress"></div>
+		</header>
+
+		<main id="newtab">
+			<img class="wordmark" src="/logo.png" alt="Badger" draggable="false" />
+			<form id="home-form" role="search" autocomplete="off">
+				<svg viewBox="0 0 24 24" class="search-icon" aria-hidden="true">
+					<circle cx="11" cy="11" r="6.5" />
+					<path d="M20 20l-4.3-4.3" />
+				</svg>
 				<input
 					id="home-input"
 					type="text"
@@ -42,83 +109,29 @@
 					autocapitalize="off"
 					autocorrect="off"
 					spellcheck="false"
-					placeholder="Search or enter address"
+					aria-label="Search or type a URL"
+					placeholder="Search or type a URL"
 				/>
+				<kbd class="kbd">⌘K</kbd>
 			</form>
 			<p id="error" role="alert"></p>
-			<section id="bookmarks" aria-labelledby="bookmarks-title" hidden>
-				<h2 id="bookmarks-title">Bookmarks</h2>
-				<ul id="bookmark-list" class="links"></ul>
-			</section>
-			<button id="history-btn" type="button">History</button>
+			<ul id="tiles" aria-label="Shortcuts"></ul>
+			<p id="stats"><span><b id="stat-blocked">0</b> trackers blocked this week</span></p>
 		</main>
 
-		<iframe
-			id="uv-frame"
-			name="uvframe"
-			title="Page"
-			allow="autoplay; fullscreen; encrypted-media; picture-in-picture; clipboard-write"
-		></iframe>
+		<div id="frames"></div>
 
-		<div id="progress"></div>
-
-		<nav id="bar">
-			<button id="back" type="button" aria-label="Back">
-				<svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7" /></svg>
-			</button>
-			<button id="forward" type="button" aria-label="Forward">
-				<svg viewBox="0 0 24 24"><path d="M9 5l7 7-7 7" /></svg>
-			</button>
-			<form id="bar-form" autocomplete="off">
-				<button id="site-btn" type="button" aria-label="Site protection">
-					<svg viewBox="0 0 24 24" class="icon-shield">
-						<path d="M12 3l7 3v5c0 4.5-3 8.3-7 10-4-1.7-7-5.5-7-10V6l7-3z" />
-					</svg>
-					<svg viewBox="0 0 24 24" class="icon-lock">
-						<rect x="5" y="11" width="14" height="10" rx="2" />
-						<path d="M8 11V8a4 4 0 0 1 8 0v3" />
-					</svg>
-					<svg viewBox="0 0 24 24" class="icon-warn">
-						<path d="M12 4l9 16H3l9-16z" />
-						<path d="M12 10v4M12 17.5v.01" />
-					</svg>
-				</button>
-				<input
-					id="bar-input"
-					type="text"
-					inputmode="url"
-					enterkeyhint="go"
-					autocapitalize="off"
-					autocorrect="off"
-					spellcheck="false"
-					placeholder="Search or enter address"
-				/>
-			</form>
-			<button id="reload" type="button" aria-label="Reload">
-				<svg viewBox="0 0 24 24">
-					<path d="M20 12a8 8 0 1 1-2.34-5.66" />
-					<path d="M20 4v5h-5" />
-				</svg>
-			</button>
-			<button id="home-btn" type="button" aria-label="Home">
-				<svg viewBox="0 0 24 24">
-					<path d="M4 11l8-7 8 7" />
-					<path d="M6 10v10h12V10" />
-				</svg>
-			</button>
-		</nav>
-
-		<div id="sheet" hidden>
-			<div id="sheet-card" role="dialog" aria-modal="true" aria-labelledby="sheet-site">
-				<div id="sheet-head">
+		<div id="sheet" class="panel" hidden>
+			<div class="panel-card" role="dialog" aria-modal="true" aria-labelledby="sheet-site">
+				<div class="panel-head">
 					<div>
-						<strong id="sheet-site">Protection</strong>
+						<strong id="sheet-site" class="panel-title">Settings</strong>
 						<p id="sheet-trust" class="note"></p>
 					</div>
-					<button id="sheet-close" type="button">Done</button>
+					<button id="sheet-close" class="panel-close" type="button">Done</button>
 				</div>
 
-				<button id="bookmark-btn" class="wide" type="button" hidden>Add bookmark</button>
+				<button id="history-open" class="wide" type="button">History</button>
 
 				<label class="row" id="site-row">
 					<span>
@@ -181,11 +194,11 @@
 			</div>
 		</div>
 
-		<div id="library" hidden>
-			<div id="library-card" role="dialog" aria-modal="true" aria-labelledby="library-title">
-				<div id="library-head">
-					<strong id="library-title">History</strong>
-					<button id="library-close" type="button">Done</button>
+		<div id="library" class="panel" hidden>
+			<div class="panel-card" role="dialog" aria-modal="true" aria-labelledby="library-title">
+				<div class="panel-head">
+					<strong id="library-title" class="panel-title">History</strong>
+					<button id="library-close" class="panel-close" type="button">Done</button>
 				</div>
 				<p class="note">Kept only on this device. The server never sees it.</p>
 				<ul id="history-list" class="links"></ul>
