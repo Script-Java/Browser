@@ -1,0 +1,69 @@
+{
+	"name": "badger-desktop",
+	"productName": "Badger",
+	"version": "1.0.0",
+	"description": "Badger for desktop: a private browser with ad, tracker and pop-up blocking",
+	"type": "module",
+	"main": "main.js",
+	"author": "Script-Java",
+	"license": "AGPL-3.0-or-later",
+	"private": true,
+	"packageManager": "pnpm@10.28.0",
+	"scripts": {
+		"start": "node stage.js && electron .",
+		"test": "node --test \"*.test.js\"",
+		"dist": "node stage.js && electron-builder --win --publish never",
+		"release": "node stage.js && electron-builder --win --publish always"
+	},
+	"devDependencies": {
+		"electron": "44.5.1",
+		"electron-builder": "26.15.3"
+	},
+	"dependencies": {
+		"@ghostery/adblocker-electron": "^2.18.2",
+		"electron-updater": "^6.8.9",
+		"tldts": "^7.4.16"
+	},
+	"build": {
+		"appId": "app.badger.desktop",
+		"productName": "Badger",
+		"files": [
+			"main.js",
+			"rules.js",
+			"preload.cjs",
+			"ui/**/*",
+			"package.json"
+		],
+		"directories": {
+			"output": "dist"
+		},
+		"win": {
+			"target": "nsis",
+			"icon": "ui/shared/icons/icon-512.png"
+		},
+		"electronFuses": {
+			"runAsNode": false,
+			"enableCookieEncryption": true,
+			"enableNodeOptionsEnvironmentVariable": false,
+			"enableNodeCliInspectArguments": false,
+			"enableEmbeddedAsarIntegrityValidation": true,
+			"onlyLoadAppFromAsar": true,
+			"grantFileProtocolExtraPrivileges": false
+		},
+		"publish": [
+			{
+				"provider": "github",
+				"owner": "Script-Java",
+				"repo": "Browser"
+			}
+		],
+		"nsis": {
+			"artifactName": "Badger-Setup-${version}.${ext}"
+		}
+	},
+	"pnpm": {
+		"onlyBuiltDependencies": [
+			"electron"
+		]
+	}
+}

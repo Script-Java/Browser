@@ -24,3 +24,10 @@ jobs:
       - run: pnpm -C app test
       - run: pnpm -C app audit --prod --audit-level high
       - run: docker build -t browser-ios .
+      # desktop app: its rules and a syntax check (no Electron binary needed)
+      - run: pnpm -C desktop install --frozen-lockfile
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+      - run: pnpm -C desktop test
+      - run: node --check desktop/main.js && node --check desktop/ui/ui.js
+      - run: pnpm -C desktop audit --prod --audit-level high

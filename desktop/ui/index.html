@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta
+			http-equiv="Content-Security-Policy"
+			content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'none'"
+		/>
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<title>Badger</title>
+		<link rel="icon" href="shared/favicon.ico" />
+		<link rel="stylesheet" href="shared/index.css" />
+		<link rel="stylesheet" href="desktop.css" />
+	</head>
+
+	<body class="shell">
+		<header id="chrome">
+			<div id="tabstrip">
+				<div id="tabs" role="tablist" aria-label="Tabs"></div>
+				<button id="new-tab" class="icon-btn" type="button" aria-label="New tab" title="New tab">
+					<svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" /></svg>
+				</button>
+			</div>
+
+			<div id="toolbar">
+				<button id="back" class="icon-btn" type="button" aria-label="Back" title="Back" disabled>
+					<svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7" /></svg>
+				</button>
+				<button id="forward" class="icon-btn" type="button" aria-label="Forward" title="Forward" disabled>
+					<svg viewBox="0 0 24 24"><path d="M9 5l7 7-7 7" /></svg>
+				</button>
+				<button id="reload" class="icon-btn" type="button" aria-label="Reload" title="Reload">
+					<svg viewBox="0 0 24 24" class="icon-reload">
+						<path d="M20 12a8 8 0 1 1-2.34-5.66" />
+						<path d="M20 4v5h-5" />
+					</svg>
+					<svg viewBox="0 0 24 24" class="icon-stop"><path d="M6 6l12 12M18 6L6 18" /></svg>
+				</button>
+
+				<form id="bar-form" role="search" autocomplete="off">
+					<button id="site-btn" type="button" aria-label="Site settings" title="Site settings">
+						<img class="icon-badger" src="shared/icons/badger.png" alt="" />
+						<svg viewBox="0 0 24 24" class="icon-lock">
+							<rect x="5" y="11" width="14" height="10" rx="2" />
+							<path d="M8 11V8a4 4 0 0 1 8 0v3" />
+						</svg>
+						<svg viewBox="0 0 24 24" class="icon-warn">
+							<path d="M12 4l9 16H3l9-16z" />
+							<path d="M12 10v4M12 17.5v.01" />
+						</svg>
+					</button>
+					<input
+						id="bar-input"
+						type="text"
+						autocapitalize="off"
+						autocorrect="off"
+						spellcheck="false"
+						aria-label="Address"
+						placeholder="Search or type a URL"
+					/>
+					<button id="star" type="button" aria-label="Bookmark this page" aria-pressed="false" hidden>
+						<svg viewBox="0 0 24 24">
+							<path d="M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.3-4.1 5.9-.9z" />
+						</svg>
+					</button>
+					<kbd class="kbd">Ctrl K</kbd>
+				</form>
+
+				<button id="split-btn" class="icon-btn" type="button" aria-label="Split view" aria-pressed="false" disabled>
+					<svg viewBox="0 0 24 24">
+						<rect x="3.5" y="5" width="17" height="14" rx="2" />
+						<path d="M12 5v14" />
+					</svg>
+				</button>
+				<button id="menu-btn" class="icon-btn" type="button" aria-label="Settings and history" title="Settings and history">
+					<svg viewBox="0 0 24 24" class="filled">
+						<circle cx="5" cy="12" r="1.6" />
+						<circle cx="12" cy="12" r="1.6" />
+						<circle cx="19" cy="12" r="1.6" />
+					</svg>
+				</button>
+			</div>
+
+			<nav id="bookmarks-bar" aria-label="Bookmarks" hidden></nav>
+			<div id="progress"></div>
+		</header>
+
+		<main id="newtab">
+			<img class="wordmark" src="shared/logo.png" alt="Badger" draggable="false" />
+			<form id="home-form" role="search" autocomplete="off">
+				<svg viewBox="0 0 24 24" class="search-icon" aria-hidden="true">
+					<circle cx="11" cy="11" r="6.5" />
+					<path d="M20 20l-4.3-4.3" />
+				</svg>
+				<input
+					id="home-input"
+					type="text"
+					autocapitalize="off"
+					autocorrect="off"
+					spellcheck="false"
+					aria-label="Search, type a URL, or run a command"
+					placeholder="Search, type a URL, or run a command"
+				/>
+				<kbd class="kbd">Ctrl K</kbd>
+			</form>
+			<p id="error" role="alert"></p>
+			<ul id="tiles" aria-label="Shortcuts"></ul>
+			<p id="stats"><span><b id="stat-blocked">0</b> ads and trackers blocked this week</span></p>
+		</main>
+
+		<!-- the pages themselves are native views on top; this only draws split view's frame -->
+		<div id="frames"></div>
+
+		<div id="sheet" class="panel" hidden>
+			<div class="panel-card" role="dialog" aria-modal="true" aria-labelledby="sheet-site">
+				<div class="panel-head">
+					<div>
+						<strong id="sheet-site" class="panel-title">Settings</strong>
+						<p id="sheet-trust" class="note"></p>
+					</div>
+					<button id="sheet-close" class="panel-close" type="button">Done</button>
+				</div>
+
+				<button id="history-open" class="wide" type="button">History</button>
+
+				<label class="row" id="site-row">
+					<span>
+						Blocking on this site
+						<small>Turn off if the site doesn't work right</small>
+					</span>
+					<input type="checkbox" id="site-toggle" role="switch" />
+				</label>
+
+				<h3>Protection</h3>
+				<label class="row">
+					<span>
+						Block ads and trackers
+						<small>Also hides ad boxes and skips video ads</small>
+					</span>
+					<input type="checkbox" data-setting="ads" role="switch" />
+				</label>
+				<label class="row">
+					<span>Warn about malware and phishing sites</span>
+					<input type="checkbox" data-setting="threats" role="switch" />
+				</label>
+
+				<h3>Search</h3>
+				<label class="row">
+					<span>Search engine</span>
+					<select id="search-engine">
+						<option value="brave">Brave Search</option>
+						<option value="duckduckgo">DuckDuckGo</option>
+						<option value="bing">Bing</option>
+						<option value="google">Google</option>
+					</select>
+				</label>
+
+				<h3>Privacy</h3>
+				<label class="row">
+					<span>
+						Clear cookies, site data and history when Badger opens
+						<small>Signs you out of sites each time. Bookmarks stay.</small>
+					</span>
+					<input type="checkbox" data-setting="wipe" role="switch" />
+				</label>
+				<button id="wipe-now" class="wide" type="button">Clear history and site data now</button>
+
+				<p id="filter-status" class="note"></p>
+				<p class="note">Your history, bookmarks and settings stay on this computer.</p>
+				<p class="note">Free software under the AGPL-3.0. Source code: github.com/Script-Java/Browser</p>
+			</div>
+		</div>
+
+		<div id="library" class="panel" hidden>
+			<div class="panel-card" role="dialog" aria-modal="true" aria-labelledby="library-title">
+				<div class="panel-head">
+					<strong id="library-title" class="panel-title">History</strong>
+					<button id="library-close" class="panel-close" type="button">Done</button>
+				</div>
+				<p class="note">Kept only on this computer.</p>
+				<ul id="history-list" class="links"></ul>
+				<p id="history-empty" class="note" hidden>No history yet.</p>
+				<button id="history-clear" class="wide" type="button">Clear history</button>
+			</div>
+		</div>
+
+		<div id="threat" class="panel center" hidden>
+			<div class="panel-card" role="alertdialog" aria-modal="true" aria-labelledby="threat-title" aria-describedby="threat-text">
+				<strong id="threat-title" class="panel-title">Dangerous site blocked</strong>
+				<p id="threat-text" class="note"></p>
+				<button id="threat-back" class="wide primary" type="button">Go back</button>
+				<button id="threat-continue" class="wide" type="button">Continue anyway</button>
+			</div>
+		</div>
+
+		<ul id="suggest" role="listbox" aria-label="Suggestions" hidden></ul>
+
+		<script src="ui.js"></script>
+	</body>
+</html>

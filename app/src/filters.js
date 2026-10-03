@@ -7,6 +7,7 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile, rename } from "node:fs/promises";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
+import https from "node:https";
 import { FiltersEngine } from "@ghostery/adblocker";
 
 // Ghostery mirrors the same lists; used when an upstream host is down.
@@ -61,14 +62,50 @@ const THREAT_LISTS = [
 	],
 ];
 
+const MAX_LIST_BYTES = 64 * 1024 * 1024;
+
+// node:https rather than fetch: fetch (undici) once died here on an internal
+// assertion that no try/catch can stop, taking the whole server down with it.
+function get(url, redirects = 5) {
+	return new Promise((resolve, reject) => {
+		const req = https.get(url, { timeout: 60_000 }, (res) => {
+			const status = res.statusCode || 0;
+			if (status >= 300 && status < 400 && res.headers.location && redirects > 0) {
+				res.resume();
+				let next;
+				try {
+					next = new URL(res.headers.location, url);
+				} catch {
+					return reject(new Error("bad redirect"));
+				}
+				if (next.protocol !== "https:") return reject(new Error("redirect off https"));
+				return resolve(get(next.href, redirects - 1));
+			}
+			if (status !== 200) {
+				res.resume();
+				return reject(new Error(`HTTP ${status}`));
+			}
+			const chunks = [];
+			let size = 0;
+			res.on("data", (chunk) => {
+				size += chunk.length;
+				if (size > MAX_LIST_BYTES) req.destroy(new Error("list too large"));
+				else chunks.push(chunk);
+			});
+			res.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+			res.on("error", reject);
+		});
+		req.on("timeout", () => req.destroy(new Error("timeout")));
+		req.on("error", reject);
+	});
+}
+
 async function download(urls) {
 	let lastError;
 	for (const url of urls) {
 		for (let attempt = 0; attempt < 2; attempt++) {
 			try {
-				const res = await fetch(url, { signal: AbortSignal.timeout(60_000) });
-				if (!res.ok) throw new Error(`HTTP ${res.status}`);
-				return await res.text();
+				return await get(url);
 			} catch (err) {
 				lastError = new Error(`${url}: ${err.message}`);
 			}

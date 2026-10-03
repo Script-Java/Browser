@@ -1,0 +1,64 @@
+/* Desktop-only additions to the shared shell styles (shared/index.css). */
+
+body.shell {
+	user-select: none;
+}
+
+input {
+	user-select: text;
+}
+
+/* the reload button turns into stop while a page loads */
+#reload .icon-stop,
+body.loading #reload .icon-reload {
+	display: none;
+}
+
+body.loading #reload .icon-stop {
+	display: block;
+}
+
+/* split view: the panes are native views; these draw the frame around them */
+#frames {
+	pointer-events: none;
+}
+
+#frames .pane {
+	border-radius: 8px;
+	box-shadow: 0 0 0 1px var(--line);
+}
+
+#frames .pane.focused {
+	box-shadow: 0 0 0 2px var(--ink);
+}
+
+/* the dangerous-site warning sits in the middle of the window */
+.panel.center {
+	align-items: center;
+	justify-content: center;
+	padding: 16px;
+	background: rgba(20, 19, 18, 0.28);
+}
+
+.panel.center .panel-card {
+	width: 100%;
+	max-width: 440px;
+	border-radius: 14px;
+}
+
+#threat-title {
+	color: var(--danger);
+	font-size: 18px;
+	margin-bottom: 6px;
+}
+
+#threat-text {
+	font-size: 14px;
+	color: var(--text);
+}
+
+.panel .wide.primary {
+	background: var(--ink);
+	border-color: var(--ink);
+	color: #fff;
+}
