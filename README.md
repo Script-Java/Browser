@@ -235,7 +235,7 @@ Most of this lives in `app/src/client/page.js` (`noPopups`). It runs inside ever
 | a proxied page escaping to the top level | gets wrapped back into the shell |
 | a page reaching around all of the above through a frame of its own, for the browser's own `window.open`, dialogs and links | refused there too: such a frame gets no windows, no dialogs, and links only to the proxy. On phones and tablets the browser enforces it as well: tabs are sandboxed frames without permission to open windows or replace the app |
 
-The shell itself has no outbound links. It draws its own browser chrome, because standalone mode has none:
+The shell's only outbound link is the desktop app's installer, offered on the new tab page to Windows browsers (it downloads from this repo's GitHub Releases, directly rather than through the proxy). It draws its own browser chrome, because standalone mode has none:
 
 - **Tabs**: open, close (× or middle click), switch (click or arrow keys). Open tabs come back when the app reopens; background ones load when you switch to them.
 - **Address bar**: suggestions from bookmarks and history as you type, and commands (New tab, Close tab, History, Settings, Bookmark this page, Split view, Reload page, Clear history and site data). Arrow keys and Enter pick one; plain Enter always searches or opens what you typed. Ctrl/⌘+K or +L jumps to it.

@@ -56,6 +56,13 @@ const isMac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
 const MOBILE =
 	/iPhone|iPad|iPod|Android/.test(navigator.userAgent) ||
 	(navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+// The desktop app's installer, offered to Windows browsers. Not inside the
+// app itself, which is Chromium with no browser's brand of its own.
+// ponytail: plain Chromium builds look like the app and miss the link.
+const brands = navigator.userAgentData?.brands.map((b) => b.brand) || [];
+const inApp = brands.length > 0 && brands.every((b) => b === "Chromium" || /not.*brand/i.test(b));
+$("get-app").hidden = MOBILE || inApp || !/Windows/.test(navigator.userAgent);
+
 for (const kbd of document.querySelectorAll(".kbd"))
 	kbd.textContent = isMac ? "⌘K" : "Ctrl K";
 
