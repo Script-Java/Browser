@@ -15,7 +15,7 @@ import { CHALLENGE_BITS, createAuth, parseCookies } from "./auth.js";
 import { Filters } from "./filters.js";
 import { serveMedia } from "./media.js";
 import { clientKey, createLimits } from "./limits.js";
-import { DEFAULT_SETTINGS, SEARCH_ENGINES } from "./settings.js";
+import { DEFAULT_SETTINGS, cleanSettings } from "./settings.js";
 
 const publicPath = resolve(import.meta.dirname, "..", "public");
 
@@ -114,17 +114,6 @@ function readSettings(req) {
 		}
 	}
 	return { ...DEFAULT_SETTINGS };
-}
-
-function cleanSettings(input) {
-	const out = {};
-	for (const key of ["ads", "cosmetic", "videoAds", "threats", "wipe"])
-		out[key] = typeof input?.[key] === "boolean" ? input[key] : DEFAULT_SETTINGS[key];
-	out.search = SEARCH_ENGINES.includes(input?.search) ? input.search : DEFAULT_SETTINGS.search;
-	out.allow = Array.isArray(input?.allow)
-		? [...new Set(input.allow.filter((s) => typeof s === "string" && /^[a-z0-9.-]{1,253}$/.test(s)))].slice(0, 200)
-		: [];
-	return out;
 }
 
 function writeSettings(req, res, settings) {
