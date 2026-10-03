@@ -526,6 +526,29 @@ function go(key) {
 		return Response.error();
 	}
 
+	// Scramjet rewrites an empty src="" (and poster) into the page's own
+	// address, so the browser fetched the whole page as an image (a broken
+	// image icon) or a script. An empty attribute loads nothing; so answer a
+	// page asking for itself as one of those with nothing too.
+	// ponytail: frames are left alone: the app's tab is itself a frame, and a
+	// reload or a link to the same page looks just like an empty frame src.
+	const EMPTY = {
+		image: () =>
+			new Response(Uint8Array.from(atob("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"), (c) => c.charCodeAt(0)), {
+				headers: headers("image/gif"),
+			}),
+		script: () => new Response("", { headers: headers("text/javascript") }),
+		video: () => Response.error(),
+		audio: () => Response.error(),
+		track: () => Response.error(),
+	};
+	async function emptyAttribute(event, target, destination) {
+		if (!EMPTY[destination] || !event.clientId) return null;
+		const client = await self.clients.get(event.clientId);
+		const page = client && decode(client.url);
+		return page && page.href === target.href ? EMPTY[destination]() : null;
+	}
+
 	async function handle(event) {
 		const { request } = event;
 		const url = request.url;
@@ -536,7 +559,13 @@ function go(key) {
 				url.slice((location.origin + API).length).split("?")[0]
 			);
 		await ensureConfig();
-		if (!scramjet.route(event)) return fetch(request);
+		if (!scramjet.route(event)) {
+			// A proxied page asking for a real address directly (a preload or
+			// an API Scramjet doesn't cover) would reach the site from the
+			// phone, with its own IP address. Only the app's own files go out.
+			if (new URL(url).origin !== location.origin) return Response.error();
+			return fetch(request);
+		}
 
 		// decodeUrl only returns http(s) pages; data:, blob: and Scramjet's
 		// own files go straight to Scramjet
@@ -549,6 +578,10 @@ function go(key) {
 			destination === "document" ||
 			destination === "iframe" ||
 			destination === "frame";
+
+		const empty = await emptyAttribute(event, target, destination);
+		if (empty) return empty;
+
 		const enginePromise = waitForEngine();
 
 		if (isPage) {
@@ -676,6 +709,9 @@ function go(key) {
 	}
 
 	scramjet.addEventListener("handleResponse", (event) => {
+		// Link headers ask the browser to preload or preconnect to the site's
+		// servers itself, around the proxy (and Scramjet garbles their URLs).
+		delete event.responseHeaders.link;
 		const page = pages.get(event.url.href);
 		if (!page) return;
 		pages.delete(event.url.href);
