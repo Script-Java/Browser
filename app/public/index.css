@@ -229,7 +229,8 @@ body.loading #progress {
 
 /* Protection sheet */
 
-#sheet {
+#sheet,
+#library {
 	position: fixed;
 	inset: 0;
 	z-index: 10;
@@ -239,11 +240,13 @@ body.loading #progress {
 	background: rgba(0, 0, 0, 0.5);
 }
 
-#sheet[hidden] {
+#sheet[hidden],
+#library[hidden] {
 	display: none;
 }
 
-#sheet-card {
+#sheet-card,
+#library-card {
 	width: 100%;
 	max-width: 560px;
 	max-height: calc(100% - var(--safe-top) - 24px);
@@ -254,7 +257,8 @@ body.loading #progress {
 	border-radius: 16px 16px 0 0;
 }
 
-#sheet-head {
+#sheet-head,
+#library-head {
 	display: flex;
 	align-items: flex-start;
 	justify-content: space-between;
@@ -262,13 +266,15 @@ body.loading #progress {
 	margin-bottom: 8px;
 }
 
-#sheet-site {
+#sheet-site,
+#library-title {
 	display: block;
 	font-size: 17px;
 	word-break: break-all;
 }
 
-#sheet-close {
+#sheet-close,
+#library-close {
 	flex: none;
 	border: 0;
 	background: none;
@@ -352,7 +358,8 @@ body.loading #progress {
 	transform: translateX(20px);
 }
 
-#sheet .wide {
+#sheet .wide,
+#library .wide {
 	display: block;
 	width: 100%;
 	margin-top: 12px;
@@ -368,7 +375,8 @@ body.loading #progress {
 	opacity: 0.6;
 }
 
-#sheet .note {
+#sheet .note,
+#library .note {
 	margin: 4px 0 0;
 	color: var(--muted);
 	font-size: 13px;
@@ -408,4 +416,91 @@ body.loading #progress {
 
 #sheet .note a {
 	color: var(--accent);
+}
+
+/* history and bookmarks */
+.links {
+	width: 100%;
+	margin: 0;
+	padding: 0;
+	list-style: none;
+}
+
+.links li {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	border-bottom: 1px solid #2a2a35;
+}
+
+.links .link {
+	flex: 1;
+	min-width: 0;
+	min-height: 52px;
+	padding: 8px 0;
+	border: 0;
+	background: none;
+	color: var(--text);
+	font: inherit;
+	text-align: left;
+}
+
+.links .link span,
+.links .link small {
+	display: block;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.links .link small {
+	color: var(--muted);
+	font-size: 13px;
+}
+
+.links .remove {
+	flex: none;
+	width: 44px;
+	height: 44px;
+	border: 0;
+	background: none;
+	color: var(--muted);
+	font-size: 22px;
+}
+
+#bookmarks {
+	width: 100%;
+	max-width: 560px;
+	max-height: 38vh;
+	overflow-y: auto;
+	-webkit-overflow-scrolling: touch;
+}
+
+#bookmarks[hidden] {
+	display: none;
+}
+
+#bookmarks h2 {
+	margin: 0 0 4px;
+	font-size: 13px;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	color: var(--muted);
+}
+
+#history-btn {
+	padding: 8px 12px;
+	border: 0;
+	background: none;
+	color: var(--accent);
+	font: inherit;
+}
+
+#history-list {
+	margin-top: 8px;
+}
+
+#bookmark-btn[hidden] {
+	display: none;
 }

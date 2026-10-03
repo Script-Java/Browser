@@ -46,6 +46,11 @@
 				/>
 			</form>
 			<p id="error" role="alert"></p>
+			<section id="bookmarks" aria-labelledby="bookmarks-title" hidden>
+				<h2 id="bookmarks-title">Bookmarks</h2>
+				<ul id="bookmark-list" class="links"></ul>
+			</section>
+			<button id="history-btn" type="button">History</button>
 		</main>
 
 		<iframe
@@ -113,6 +118,8 @@
 					<button id="sheet-close" type="button">Done</button>
 				</div>
 
+				<button id="bookmark-btn" class="wide" type="button" hidden>Add bookmark</button>
+
 				<label class="row" id="site-row">
 					<span>
 						Blocking on this site
@@ -156,12 +163,12 @@
 				<h3>Privacy</h3>
 				<label class="row">
 					<span>
-						Clear cookies and site data when the app opens
-						<small>Signs you out of sites each time</small>
+						Clear cookies, site data and history when the app opens
+						<small>Signs you out of sites each time. Bookmarks stay.</small>
 					</span>
 					<input type="checkbox" data-setting="wipe" role="switch" />
 				</label>
-				<button id="wipe-now" class="wide" type="button">Clear all site data now</button>
+				<button id="wipe-now" class="wide" type="button">Clear history and site data now</button>
 				<form id="lock-form" method="post" action="/logout" hidden>
 					<button class="wide" type="submit">Lock</button>
 				</form>
@@ -171,6 +178,19 @@
 				<!-- AGPL section 13: tell users where the source is. Plain text: the shell has no outbound links. -->
 				<p class="note">Free software under the AGPL-3.0. Source code: github.com/Script-Java/Browser</p>
 				<p class="note"><a href="/terms">Terms and privacy</a></p>
+			</div>
+		</div>
+
+		<div id="library" hidden>
+			<div id="library-card" role="dialog" aria-modal="true" aria-labelledby="library-title">
+				<div id="library-head">
+					<strong id="library-title">History</strong>
+					<button id="library-close" type="button">Done</button>
+				</div>
+				<p class="note">Kept only on this device. The server never sees it.</p>
+				<ul id="history-list" class="links"></ul>
+				<p id="history-empty" class="note" hidden>No history yet.</p>
+				<button id="history-clear" class="wide" type="button">Clear history</button>
 			</div>
 		</div>
 

@@ -229,7 +229,10 @@ function showAddress() {
 
 function syncAddress() {
 	const url = frameLocation();
-	if (url && url !== current.url) current = { url, title: current.title };
+	if (url && url !== current.url) {
+		current = { url, title: current.title };
+		recordVisit(current);
+	}
 	showAddress();
 }
 
@@ -276,6 +279,7 @@ async function onFrameMessage(event) {
 	}
 
 	current = { url: url.href, title: String(data.title || "") };
+	recordVisit(current);
 	showAddress();
 }
 
@@ -286,6 +290,7 @@ function goHome() {
 	barInput.value = "";
 	homeInput.value = "";
 	showAddress();
+	renderBookmarks();
 }
 
 window.addEventListener("message", onFrameMessage);
@@ -397,6 +402,7 @@ function currentSite() {
 
 function timeAgo(ms) {
 	const minutes = Math.round((Date.now() - ms) / 60000);
+	if (minutes < 1) return "just now";
 	if (minutes < 60) return `${minutes} min ago`;
 	const hours = Math.round(minutes / 60);
 	if (hours < 48) return `${hours} h ago`;
@@ -425,6 +431,10 @@ function renderSheet() {
 	siteRow.hidden = !site;
 	document.getElementById("site-toggle").checked =
 		!settings.allow.includes(site);
+
+	const bookmarkBtn = document.getElementById("bookmark-btn");
+	bookmarkBtn.hidden = !site;
+	bookmarkBtn.textContent = isBookmarked(current.url) ? "Remove bookmark" : "Add bookmark";
 
 	for (const input of sheet.querySelectorAll("[data-setting]"))
 		input.checked = !!settings[input.dataset.setting];
@@ -564,6 +574,7 @@ function clearOrigin(origin) {
 
 // Deletes every site's cookies, storage and logins.
 async function clearAllSiteData() {
+	localStorage.removeItem(HISTORY);
 	goHome();
 	// let the tab's page close its databases first
 	await new Promise((resolve) => setTimeout(resolve, 50));
@@ -587,9 +598,133 @@ document.getElementById("wipe-now").addEventListener("click", async (event) => {
 	}
 	setTimeout(() => {
 		button.disabled = false;
-		button.textContent = "Clear all site data now";
+		button.textContent = "Clear history and site data now";
 	}, 2000);
 });
+
+// -------------------------------------------------- history and bookmarks
+// Kept only in this device's storage for the app's own address, never sent to
+// the server. With site isolation, sites can't read it: they run on other
+// addresses.
+
+const HISTORY = "bios:history";
+const BOOKMARKS = "bios:bookmarks";
+const MAX_HISTORY = 1000;
+const library = document.getElementById("library");
+
+function readEntries(name) {
+	const list = readList(name);
+	return Array.isArray(list)
+		? list.filter((e) => typeof e?.url === "string" && /^https?:/.test(e.url))
+		: [];
+}
+
+function saveEntries(name, list) {
+	try {
+		localStorage.setItem(name, JSON.stringify(list));
+	} catch {
+		// storage full or blocked: skip rather than break browsing
+	}
+}
+
+function recordVisit({ url, title }) {
+	if (!/^https?:/.test(url)) return;
+	const list = readEntries(HISTORY);
+	title = String(title || "").slice(0, 200);
+	// a page reporting its title after its address: update, don't duplicate
+	if (list[0]?.url === url) list[0].title = title || list[0].title;
+	else list.unshift({ url, title, at: Date.now() });
+	// ponytail: rewrites the whole list per visit; fine at 1000 entries,
+	// move to IndexedDB if it ever needs to hold much more.
+	saveEntries(HISTORY, list.slice(0, MAX_HISTORY));
+}
+
+const isBookmarked = (url) => !!url && readEntries(BOOKMARKS).some((b) => b.url === url);
+
+function linkRow(item, detail, onRemove) {
+	const li = document.createElement("li");
+	const open = document.createElement("button");
+	open.type = "button";
+	open.className = "link";
+	const title = document.createElement("span");
+	title.textContent = item.title || displayHost(item.url);
+	const small = document.createElement("small");
+	small.textContent = detail;
+	open.append(title, small);
+	open.addEventListener("click", () => {
+		library.hidden = true;
+		go(item.url);
+	});
+	li.append(open);
+	if (onRemove) {
+		const remove = document.createElement("button");
+		remove.type = "button";
+		remove.className = "remove";
+		remove.textContent = "×";
+		remove.setAttribute("aria-label", `Remove ${title.textContent}`);
+		remove.addEventListener("click", onRemove);
+		li.append(remove);
+	}
+	return li;
+}
+
+function renderBookmarks() {
+	const list = readEntries(BOOKMARKS);
+	document.getElementById("bookmarks").hidden = !list.length;
+	document.getElementById("bookmark-list").replaceChildren(
+		...list.map((b) =>
+			linkRow(b, displayHost(b.url), () => {
+				saveEntries(
+					BOOKMARKS,
+					readEntries(BOOKMARKS).filter((x) => x.url !== b.url)
+				);
+				renderBookmarks();
+			})
+		)
+	);
+}
+
+document.getElementById("bookmark-btn").addEventListener("click", () => {
+	const list = readEntries(BOOKMARKS);
+	const i = list.findIndex((b) => b.url === current.url);
+	if (i === -1)
+		list.unshift({
+			url: current.url,
+			title: (current.title || displayHost(current.url)).slice(0, 200),
+		});
+	else list.splice(i, 1);
+	saveEntries(BOOKMARKS, list);
+	renderSheet();
+	renderBookmarks();
+});
+
+function renderHistory() {
+	const list = readEntries(HISTORY).slice(0, 300);
+	document.getElementById("history-empty").hidden = list.length > 0;
+	document.getElementById("history-clear").hidden = !list.length;
+	document
+		.getElementById("history-list")
+		.replaceChildren(
+			...list.map((h) => linkRow(h, `${displayHost(h.url)} · ${timeAgo(h.at)}`))
+		);
+}
+
+document.getElementById("history-btn").addEventListener("click", () => {
+	renderHistory();
+	library.hidden = false;
+});
+document.getElementById("library-close").addEventListener("click", () => {
+	library.hidden = true;
+});
+library.addEventListener("click", (event) => {
+	if (event.target === library) library.hidden = true;
+});
+document.getElementById("history-clear").addEventListener("click", () => {
+	localStorage.removeItem(HISTORY);
+	renderHistory();
+});
+
+renderBookmarks();
 
 // ----------------------------------------------------------------- startup
 
