@@ -1,0 +1,36 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /app
+    schedule:
+      interval: weekly
+    # One pull request a week for routine bumps; major versions come separately.
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
+    # The proxy itself (Scramjet, its transport, wisp): new major versions
+    # change their APIs and only show breakage in a real browser, which CI
+    # doesn't run. Upgrade these by hand on a branch.
+    ignore:
+      - dependency-name: "@mercuryworkshop/*"
+        update-types: ["version-update:semver-major"]
+
+  # The desktop app ships its own Chromium inside Electron, so its security
+  # releases need to reach people quickly.
+  - package-ecosystem: npm
+    directory: /desktop
+    schedule:
+      interval: daily
+    allow:
+      - dependency-name: electron
+      - dependency-name: electron-updater
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: monthly

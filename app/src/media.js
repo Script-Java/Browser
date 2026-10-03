@@ -1,6 +1,6 @@
 // Media fallback for requests that reach the server with a proxied URL.
 //
-// Normally the service worker handles every /uv/service/ request on the
+// Normally the service worker handles every /scramjet/ request on the
 // phone. iOS plays video with its own media engine (HLS always, plain video
 // files sometimes), and that engine does not go through service workers: it
 // asks the server for the proxied URL directly. Without this, it got the
@@ -16,83 +16,13 @@ import https from "node:https";
 import dns from "node:dns";
 import net from "node:net";
 import { pipeline } from "node:stream";
+import { decodeUrl, encodeUrl } from "./codec.js";
+import { isBlockedAddress } from "./wisp.js";
 
-const PREFIX = "/uv/service/";
 const MAX_REDIRECTS = 5;
 const MAX_PLAYLIST_BYTES = 4 * 1024 * 1024;
 
-// ------------------------------------------------------------- the codec
-// Same xor codec as Ultraviolet.codec.xor and the decodeUrl in uv.config.js.
-
-function xor(str) {
-	let out = "";
-	for (let i = 0; i < str.length; i++)
-		out += i % 2 ? String.fromCharCode(str.charCodeAt(i) ^ 2) : str[i];
-	return out;
-}
-
-export function encodeUrl(url) {
-	return encodeURIComponent(xor(String(url)));
-}
-
-export function decodeUrl(str) {
-	if (!str) return str;
-	const match = /[?#]/.exec(str);
-	if (!match) return xor(decodeURIComponent(str));
-	const decoded = xor(decodeURIComponent(str.slice(0, match.index)));
-	const rest = str.slice(match.index);
-	try {
-		const url = new URL(decoded);
-		const hashAt = rest.indexOf("#");
-		const search = hashAt === -1 ? rest : rest.slice(0, hashAt);
-		const hash = hashAt === -1 ? "" : rest.slice(hashAt);
-		if (search) url.search = search;
-		if (hash) url.hash = hash;
-		return url.href;
-	} catch {
-		return decoded + rest;
-	}
-}
-
-/** The site URL a proxied URL (path or absolute) points at, or null. */
-export function sourceUrl(proxied) {
-	try {
-		const path = proxied.startsWith("/") ? proxied : new URL(proxied).pathname + new URL(proxied).search;
-		if (!path.startsWith(PREFIX)) return null;
-		const url = new URL(decodeUrl(path.slice(PREFIX.length)));
-		if (url.protocol !== "http:" && url.protocol !== "https:") return null;
-		return url;
-	} catch {
-		return null;
-	}
-}
-
-// --------------------------------------------------- private-address guard
-// Same rules as the wisp patch: never connect to the server's own network.
-
-const blocked = new net.BlockList();
-for (const [range, bits] of [
-	["0.0.0.0", 8], ["10.0.0.0", 8], ["100.64.0.0", 10], ["127.0.0.0", 8],
-	["169.254.0.0", 16], ["172.16.0.0", 12], ["192.0.0.0", 24], ["192.168.0.0", 16],
-	["198.18.0.0", 15], ["224.0.0.0", 4], ["240.0.0.0", 4],
-])
-	blocked.addSubnet(range, bits, "ipv4");
-for (const [range, bits] of [
-	["::", 128], ["::1", 128], ["fc00::", 7], ["fe80::", 10], ["ff00::", 8], ["64:ff9b::", 96],
-])
-	blocked.addSubnet(range, bits, "ipv6");
-
-export function isBlockedAddress(address) {
-	const family = net.isIP(address);
-	if (family === 0) return true;
-	if (family === 6) {
-		const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(address);
-		if (mapped) return blocked.check(mapped[1], "ipv4");
-		return blocked.check(address, "ipv6");
-	}
-	return blocked.check(address, "ipv4");
-}
-
+// Same rules as the wisp server: never connect to the server's own network.
 function safeLookup(hostname, options, callback) {
 	dns.lookup(hostname, { ...options, all: true }, (err, addresses) => {
 		if (err) return callback(err);
@@ -119,7 +49,7 @@ function isPlaylist(url, contentType) {
 
 function proxied(base, ref) {
 	try {
-		return PREFIX + encodeUrl(new URL(ref, base).href);
+		return encodeUrl(new URL(ref, base));
 	} catch {
 		return ref;
 	}
@@ -143,13 +73,15 @@ export function rewritePlaylist(text, baseUrl) {
 
 // -------------------------------------------------------------- the fetch
 
-const HOP_BY_HOP = new Set([
-	"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te",
-	"trailer", "transfer-encoding", "upgrade", "content-encoding", "content-length",
-	"set-cookie", "set-cookie2", "content-security-policy", "content-security-policy-report-only",
-	"cross-origin-resource-policy", "cross-origin-embedder-policy", "cross-origin-opener-policy",
-	"strict-transport-security", "x-frame-options",
-]);
+// The site's headers a player needs. Every other one stays behind: sent from
+// this origin, a site's Clear-Site-Data would sign the person out, and its
+// reporting headers (NEL, Report-To) would have the browser call the site
+// directly, around the proxy.
+const PASS_HEADERS = ["content-type", "content-range", "accept-ranges", "etag", "last-modified"];
+
+// What a media engine asks for. A script or worker fetched through here
+// would run on this origin without the proxy's hooks.
+const MEDIA_DESTS = new Set(["video", "audio", "track", "empty"]);
 
 function upstreamRequest(url, headers, method, redirects = 0) {
 	return new Promise((resolve, reject) => {
@@ -157,6 +89,9 @@ function upstreamRequest(url, headers, method, redirects = 0) {
 		const literal = url.hostname.replace(/^\[|\]$/g, "");
 		if (net.isIP(literal) && isBlockedAddress(literal))
 			return reject(new Error(`Blocked connection to a private address (${literal})`));
+		// same ports as wisp, so this can't be used for port scans either; checked per redirect hop
+		if (url.port && url.port !== "80" && url.port !== "443")
+			return reject(new Error(`Blocked port ${url.port}`));
 		const lib = url.protocol === "https:" ? https : http;
 		const req = lib.request(
 			url,
@@ -208,10 +143,14 @@ function readAll(stream, limit) {
  * engine. Returns false (and sends nothing) when the request isn't one.
  * @param {import("express").Request} req
  * @param {import("express").Response} res
+ * @param {(bytes: number) => void} [countBytes] told about every chunk streamed
  */
-export async function serveMedia(req, res) {
+export async function serveMedia(req, res, countBytes = () => {}) {
 	if (req.method !== "GET" && req.method !== "HEAD") return false;
-	const target = sourceUrl(req.originalUrl);
+	// absent before iOS 16.4, and from the system's HLS player
+	const dest = req.headers["sec-fetch-dest"];
+	if (dest && !MEDIA_DESTS.has(dest)) return false;
+	const target = decodeUrl(req.originalUrl);
 	if (!target) return false;
 
 	const headers = {
@@ -223,7 +162,7 @@ export async function serveMedia(req, res) {
 	if (req.headers.range) headers.range = req.headers.range;
 	// The page the player is on, decoded from the proxied referrer, so sites
 	// that only serve video to their own pages still work.
-	const page = req.headers.referer && sourceUrl(req.headers.referer);
+	const page = req.headers.referer && decodeUrl(req.headers.referer);
 	headers.referer = page ? page.href : target.origin + "/";
 	if (page) headers.origin = page.origin;
 
@@ -231,7 +170,8 @@ export async function serveMedia(req, res) {
 	try {
 		upstream = await upstreamRequest(target, headers, req.method);
 	} catch (err) {
-		console.warn(`media: ${target.hostname}: ${err.message}`);
+		// no hostname: the server doesn't keep a record of where people browse
+		console.warn(`media: ${err.message.replace(target.hostname, "<site>")}`);
 		res.status(502).type("text/plain").send("Couldn't reach the media server.");
 		return true;
 	}
@@ -239,8 +179,10 @@ export async function serveMedia(req, res) {
 	const contentType = up.headers["content-type"] || "";
 
 	res.status(up.statusCode || 502);
-	for (const [name, value] of Object.entries(up.headers))
-		if (!HOP_BY_HOP.has(name) && value !== undefined) res.setHeader(name, value);
+	for (const name of PASS_HEADERS)
+		if (up.headers[name] !== undefined) res.setHeader(name, up.headers[name]);
+	// for requests without Sec-Fetch-Dest: never hand back something a browser would run
+	if (/script/i.test(contentType)) res.setHeader("Content-Type", "text/plain");
 	res.setHeader("Cache-Control", "no-store");
 	res.setHeader("X-Content-Type-Options", "nosniff");
 	res.setHeader("Cross-Origin-Resource-Policy", "same-site");
@@ -261,6 +203,7 @@ export async function serveMedia(req, res) {
 			res.status(502).type("text/plain").send(err.message);
 			return true;
 		}
+		countBytes(body.length);
 		const text = body.toString("utf8");
 		if (!text.trimStart().startsWith("#EXTM3U")) {
 			res.type(contentType || "application/octet-stream").send(body);
@@ -275,6 +218,7 @@ export async function serveMedia(req, res) {
 
 	if (up.headers["content-length"] !== undefined)
 		res.setHeader("Content-Length", up.headers["content-length"]);
+	up.on("data", (chunk) => countBytes(chunk.length));
 	pipeline(up, res, (err) => {
 		if (err && !res.headersSent) res.status(502).end();
 	});

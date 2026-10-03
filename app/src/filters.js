@@ -5,6 +5,7 @@
 
 import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile, rename } from "node:fs/promises";
+import { get } from "node:https";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 import { FiltersEngine } from "@ghostery/adblocker";
@@ -61,14 +62,46 @@ const THREAT_LISTS = [
 	],
 ];
 
+const MAX_LIST_BYTES = 64 * 1024 ** 2;
+
+// node:https rather than fetch(): Node 22's built-in fetch (undici) can crash
+// the whole process with an internal assert, not a catchable error, when a
+// download's connection ends mid-body. These run while people are browsing.
+export function fetchText(url, redirects = 0) {
+	return new Promise((resolve, reject) => {
+		if (!url.startsWith("https://")) return reject(new Error("not https"));
+		const req = get(url, { timeout: 60_000 }, (res) => {
+			const { statusCode, headers } = res;
+			if (statusCode >= 300 && statusCode < 400 && headers.location) {
+				res.resume();
+				if (redirects >= 5) return reject(new Error("too many redirects"));
+				return resolve(fetchText(new URL(headers.location, url).href, redirects + 1));
+			}
+			if (statusCode !== 200) {
+				res.resume();
+				return reject(new Error(`HTTP ${statusCode}`));
+			}
+			const chunks = [];
+			let size = 0;
+			res.on("data", (chunk) => {
+				size += chunk.length;
+				if (size > MAX_LIST_BYTES) req.destroy(new Error("list too large"));
+				else chunks.push(chunk);
+			});
+			res.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+			res.on("error", reject);
+		});
+		req.on("timeout", () => req.destroy(new Error("timed out")));
+		req.on("error", reject);
+	});
+}
+
 async function download(urls) {
 	let lastError;
 	for (const url of urls) {
 		for (let attempt = 0; attempt < 2; attempt++) {
 			try {
-				const res = await fetch(url, { signal: AbortSignal.timeout(60_000) });
-				if (!res.ok) throw new Error(`HTTP ${res.status}`);
-				return await res.text();
+				return await fetchText(url);
 			} catch (err) {
 				lastError = new Error(`${url}: ${err.message}`);
 			}

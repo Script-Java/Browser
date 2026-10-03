@@ -1,0 +1,62 @@
+{
+	"name": "badger-desktop",
+	"productName": "Badger",
+	"version": "1.0.1",
+	"description": "Badger for desktop: the proxy browser, connected to your Badger server",
+	"type": "module",
+	"main": "main.js",
+	"author": "Script-Java",
+	"license": "AGPL-3.0-or-later",
+	"private": true,
+	"packageManager": "pnpm@10.28.0",
+	"scripts": {
+		"start": "electron .",
+		"dist": "electron-builder --win --publish never",
+		"release": "electron-builder --win --publish always"
+	},
+	"devDependencies": {
+		"electron": "44.5.1",
+		"electron-builder": "26.15.3"
+	},
+	"pnpm": {
+		"onlyBuiltDependencies": [
+			"electron"
+		]
+	},
+	"build": {
+		"appId": "app.badger.desktop",
+		"productName": "Badger",
+		"files": [
+			"main.js",
+			"package.json"
+		],
+		"directories": {
+			"output": "dist"
+		},
+		"win": {
+			"target": "nsis"
+		},
+		"electronFuses": {
+			"runAsNode": false,
+			"enableCookieEncryption": true,
+			"enableNodeOptionsEnvironmentVariable": false,
+			"enableNodeCliInspectArguments": false,
+			"enableEmbeddedAsarIntegrityValidation": true,
+			"onlyLoadAppFromAsar": true,
+			"grantFileProtocolExtraPrivileges": false
+		},
+		"publish": [
+			{
+				"provider": "github",
+				"owner": "Script-Java",
+				"repo": "Browser"
+			}
+		],
+		"nsis": {
+			"artifactName": "Badger-Setup.${ext}"
+		}
+	},
+	"dependencies": {
+		"electron-updater": "^6.8.9"
+	}
+}

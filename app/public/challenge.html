@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta
+			name="viewport"
+			content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover"
+		/>
+		<title>Badger</title>
+		<meta name="robots" content="noindex, nofollow" />
+		<link rel="manifest" href="/manifest.webmanifest" />
+		<meta name="apple-mobile-web-app-capable" content="yes" />
+		<meta name="mobile-web-app-capable" content="yes" />
+		<meta name="apple-mobile-web-app-title" content="Badger" />
+		<meta
+			name="apple-mobile-web-app-status-bar-style"
+			content="default"
+		/>
+		<meta name="theme-color" content="#faf9f7" />
+		<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+		<link rel="stylesheet" href="/index.css" />
+	</head>
+	<body>
+		<main id="home">
+			<img class="logo" src="/logo.png" alt="Badger" draggable="false" />
+			<p id="status" class="fine" role="status">Checking your browser…</p>
+			<p id="error" role="alert"></p>
+			<button id="retry" class="wide" type="button" hidden>Try again</button>
+			<p class="fine">
+				By using this app you agree to the
+				<a href="/terms">terms and privacy notice</a>.
+			</p>
+			<form id="check-form" method="post" action="/login" hidden>
+				<input name="challenge" />
+				<input name="solution" />
+			</form>
+		</main>
+		<script>
+			// Solves the server's proof-of-work puzzle (see src/auth.js), which
+			// keeps bots out without accounts or a captcha. Takes about a second.
+			const status = document.getElementById("status");
+			const form = document.getElementById("check-form");
+			const retry = document.getElementById("retry");
+			retry.addEventListener("click", () => location.replace("/login"));
+
+			const zeroBits = (bytes) => {
+				let bits = 0;
+				for (const byte of bytes) {
+					if (byte) return bits + Math.clz32(byte) - 24;
+					bits += 8;
+				}
+				return bits;
+			};
+
+			async function check() {
+				const res = await fetch("/api/challenge", { cache: "no-store" });
+				if (!res.ok) throw new Error(`HTTP ${res.status}`);
+				const { challenge, bits } = await res.json();
+				const encoder = new TextEncoder();
+				for (let start = 0; ; start += 256) {
+					const hashes = await Promise.all(
+						Array.from({ length: 256 }, (_, i) =>
+							crypto.subtle.digest("SHA-256", encoder.encode(`${challenge}:${start + i}`))
+						)
+					);
+					const found = hashes.findIndex((h) => zeroBits(new Uint8Array(h)) >= bits);
+					if (found !== -1) {
+						form.challenge.value = challenge;
+						form.solution.value = String(start + found);
+						form.submit();
+						return;
+					}
+				}
+			}
+
+			// After a failed check, wait for a tap instead of looping.
+			const error = new URLSearchParams(location.search).get("error");
+			if (error) {
+				status.textContent = "";
+				document.getElementById("error").textContent = error;
+				retry.hidden = false;
+			} else {
+				check().catch(() => {
+					status.textContent = "";
+					document.getElementById("error").textContent = "Couldn't check your browser.";
+					retry.hidden = false;
+				});
+			}
+		</script>
+	</body>
+</html>

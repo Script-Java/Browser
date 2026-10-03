@@ -3,6 +3,7 @@
 	<head>
 		<meta charset="utf-8" />
 		<title>Clearing</title>
+		<script src="/register-sw.js"></script>
 	</head>
 	<body>
 		<script>
@@ -16,9 +17,12 @@
 					sessionStorage.clear();
 				} catch {}
 				try {
-					const dbs = indexedDB.databases
-						? (await indexedDB.databases()).map((db) => db.name)
-						: ["__op"];
+					const dbs = (
+						indexedDB.databases
+							? (await indexedDB.databases()).map((db) => db.name)
+							: []
+					).filter((name) => name !== "$scramjet");
+					await clearProxyCookies();
 					await Promise.all(
 						dbs.map(
 							(name) =>

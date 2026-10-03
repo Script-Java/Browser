@@ -1,4 +1,10 @@
 **/node_modules
 **/.git
 **/.git-upstream
-Ultraviolet/dist
+app/assets
+desktop
+app/e2e
+app/playwright.config.js
+app/.e2e
+app/test-results
+app/playwright-report
