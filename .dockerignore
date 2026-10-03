@@ -8,4 +8,3 @@ app/playwright.config.js
 app/.e2e
 app/test-results
 app/playwright-report
-site

@@ -9,7 +9,7 @@ const { autoUpdater } = updater;
 
 // The address the shell runs on: ISOLATION_DOMAIN if the deploy has one,
 // otherwise its *.up.railway.app address.
-const SERVER_URL = "https://browse.badgerbrowser.com";
+const SERVER_URL = "https://badgerbrowser.com";
 const SERVER = new URL(SERVER_URL);
 
 // Only the server and its per-site subdomains, over https or the wisp WebSocket.

@@ -1,9 +1,0 @@
-# Netlify headers. The site runs no scripts, sets no cookies and loads
-# nothing from other sites, and the policy below holds it to that.
-/*
-  Content-Security-Policy: default-src 'none'; img-src 'self'; style-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
-  Strict-Transport-Security: max-age=63072000; includeSubDomains; preload
-  X-Content-Type-Options: nosniff
-  Referrer-Policy: no-referrer
-  Permissions-Policy: camera=(), microphone=(), geolocation=(), interest-cohort=()
-  Cross-Origin-Opener-Policy: same-origin

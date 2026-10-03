@@ -5,10 +5,7 @@
 ```
 app/           server (express + wisp-js) and the PWA shell; Scramjet comes from npm
 desktop/       Windows app (Electron) that opens your server in its own window
-site/          the download page (badgerbrowser.com): static, no scripts or cookies
 ```
-
-The download page is plain files plus Netlify's `_headers`. It runs on its own domain (`badgerbrowser.com`), apart from the proxy (`browse.badgerbrowser.com`), and sets no cookies, so nothing a proxied page does can affect it. Its download button points at `releases/latest/download/Badger-Setup.exe`, so it always serves the newest published release.
 
 ## Deploy to Railway (one command)
 
@@ -95,7 +92,7 @@ By default every site runs in one shared space, the app's own address. A malicio
 
 It needs a domain you own, because Railway's free `*.up.railway.app` address can't have sub-addresses:
 
-1. In the Railway dashboard (`npx @railway/cli open`), open the service, go to **Settings → Networking → Custom Domain**, and add both `browse.example.com` and `*.browse.example.com` (use your own domain).
+1. In the Railway dashboard (`npx @railway/cli open`), open the service, go to **Settings → Networking → Custom Domain**, and add both `browse.example.com` and `*.browse.example.com` (use your own domain). A whole domain works too (`example.com` and `*.example.com`), if your registrar can point the bare domain at Railway (an ALIAS, ANAME or flattened CNAME record). Any other name under it, like `www`, only redirects to the app.
 2. Add the DNS records Railway shows you at your domain registrar. The wildcard needs its `_acme-challenge` record too, so Railway can issue its certificate.
 3. Set the domain and redeploy:
 

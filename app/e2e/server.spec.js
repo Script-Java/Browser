@@ -86,6 +86,16 @@ test("a site's subdomain never serves the app itself", async () => {
 	expect(root.headers.location).toBe(`http://app.localhost:${ISOLATED}/`);
 });
 
+test("other names under the domain (www, typos) only redirect to the app", async () => {
+	const stray = `www.app.localhost:${ISOLATED}`;
+	for (const path of ["/", "/index.js", "/login"]) {
+		const res = await get(stray, path);
+		expect(res.status, path).toBe(302);
+		expect(res.headers.location).toBe(`http://app.localhost:${ISOLATED}/`);
+	}
+	expect((await get(stray, "/api/settings", { origin: `http://${stray}` })).status).not.toBe(200);
+});
+
 test("the proxy connection needs a signed-in browser", async () => {
 	const res = await get(SHELL_HOST, "/wisp/", {
 		connection: "Upgrade",

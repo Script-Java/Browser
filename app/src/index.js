@@ -76,14 +76,15 @@ function hostOf(req) {
 		.replace(/:\d+$/, "");
 }
 
-// "shell": the app itself. "site": an isolated site origin. In shared mode
-// (no ISOLATION_DOMAIN, or reached through another address) everything is "shell".
+// "shell": the app itself. "site": an isolated site origin. "stray": any other
+// name under ISOLATION_DOMAIN (www, typos), which only redirects to the app.
+// In shared mode (no ISOLATION_DOMAIN, or reached through another address)
+// everything is "shell".
 function hostKind(req) {
 	if (!ISOLATION) return "shell";
 	const host = hostOf(req);
-	if (host.endsWith("." + ISOLATION) && /^s[a-z2-7]{25}$/.test(host.slice(0, -ISOLATION.length - 1)))
-		return "site";
-	return "shell";
+	if (!host.endsWith("." + ISOLATION)) return "shell";
+	return /^s[a-z2-7]{25}$/.test(host.slice(0, -ISOLATION.length - 1)) ? "site" : "stray";
 }
 
 function cookieDomain(req) {
@@ -239,8 +240,9 @@ app.use((req, res, next) => {
 // ran on a site origin, that site could reach into it.
 const SITE_PATHS = /^\/(scramjet\/|scram\/|bios\/(shield|page)\.js$|baremux\/|epoxy\/|filters\/|api\/(nav|settings)$|scramjet-sw\.js$|register-sw\.js$|wipe\.html$|anchor\.html$)/;
 app.use((req, res, next) => {
-	if (hostKind(req) === "site" && !SITE_PATHS.test(req.path)) {
-		if (req.path === "/" && req.method === "GET")
+	const kind = hostKind(req);
+	if (kind === "stray" || (kind === "site" && !SITE_PATHS.test(req.path))) {
+		if ((kind === "stray" || req.path === "/") && req.method === "GET")
 			return res.redirect(`${req.protocol}://${ISOLATION}${req.headers.host.match(/:\d+$/)?.[0] || ""}/`);
 		return res.status(404).type("text/plain").send("Not found");
 	}
@@ -401,7 +403,7 @@ app.use((req, res) => {
 const server = createServer(app);
 
 server.on("upgrade", (req, socket, head) => {
-	if (!req.url.endsWith("/wisp/") || !auth.isAuthed(req)) {
+	if (!req.url.endsWith("/wisp/") || !auth.isAuthed(req) || hostKind(req) === "stray") {
 		socket.end("HTTP/1.1 401 Unauthorized\r\n\r\n");
 		return;
 	}
