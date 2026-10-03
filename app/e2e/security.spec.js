@@ -99,26 +99,29 @@ setTimeout(function () {
 	await app.waitForTimeout(4000);
 });
 
-test("on a phone, even a tapped page can't open a window around the proxy", async ({ app, isMobile }) => {
-	test.skip(!isMobile, "the frame sandbox is for phones and tablets");
-	// the browser's own window.open, from a frame without the proxy's hooks
+test("even a tapped page can't open a window or a dialog through a frame of its own", async ({ app }) => {
+	// the browser's own window.open, alert and links, from a frame without
+	// the proxy's hooks (the fixture fails the test on a dialog or a leak)
 	const frame = await open(
 		app,
 		testPage(`<!doctype html><title>pop</title><body><button id="pop">pop</button>
 <script>
 var added = document.createElement("iframe");
+added.style.cssText = "width:200px;height:60px";
 document.body.appendChild(added);
 var raw = window[window.length - 1];
+raw.document.body.innerHTML = '<a id="out" href="https://example.org/direct" target="_blank">out</a>';
 document.getElementById("pop").onclick = function () {
 	var opened = null;
 	try { opened = raw.open("https://example.com/popup"); } catch (e) {}
-	try { raw.top.location = "https://example.net/top"; } catch (e) {}
+	try { raw.alert("hi"); } catch (e) {}
 	document.title = opened ? "OPENED" : "refused";
 };
 </script>`)
 	);
 	await frame.click("#pop");
 	await expect.poll(() => frame.title()).toBe("refused");
+	await frame.frameLocator("iframe").locator("#out").click();
 	await app.waitForTimeout(3000);
 	expect(app.context().pages().length).toBe(1);
 	expect(app.url().startsWith(SHARED_URL)).toBe(true);
@@ -188,6 +191,13 @@ test("a page can't take over the app's window", async ({ app }) => {
 	// still the app's own address, with the app running
 	expect(app.url().startsWith(SHARED_URL)).toBe(true);
 	await app.waitForFunction(() => window.__biosShell === true && typeof go === "function");
+});
+
+test("a page whose stylesheets set cookies still finishes loading", async ({ app }) => {
+	// Scramjet's worker waits for the page to confirm each cookie, and the
+	// page's parser waits for the stylesheet: Wikipedia never finished loading
+	const frame = await open(app, "https://www.wikipedia.org/");
+	await expect.poll(() => frame.evaluate(() => document.readyState)).toBe("complete");
 });
 
 test("HTTPS-Only opens the secure version of a site", async ({ app }) => {

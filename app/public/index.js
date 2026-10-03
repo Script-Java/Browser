@@ -1295,12 +1295,22 @@ async function removePassphrase() {
 
 // A phone keeps a home-screen app alive in the background for days, so "each
 // time the app opens" would almost never come. Away this long counts as
-// closed: the reload forgets the key and asks for the passphrase again.
+// closed. Five minutes: the reload forgets the key and asks for the
+// passphrase again. Fifteen: it's a fresh launch, which clears site data
+// when that setting is on.
 const RELOCK_MS = 5 * 60_000;
+const RELAUNCH_MS = 15 * 60_000;
 let hiddenAt = 0;
 document.addEventListener("visibilitychange", () => {
-	if (document.hidden) hiddenAt = Date.now();
-	else if (vault && hiddenAt && Date.now() - hiddenAt > RELOCK_MS) location.reload();
+	// ponytail: best effort at keeping the page out of the phone's app
+	// switcher preview; the phone may take its picture before this runs.
+	document.body.classList.toggle("away", document.hidden);
+	if (document.hidden) return void (hiddenAt = Date.now());
+	const away = hiddenAt ? Date.now() - hiddenAt : 0;
+	if (settings?.wipe && away > RELAUNCH_MS) {
+		sessionStorage.removeItem("bios:session");
+		location.reload();
+	} else if (vault && away > RELOCK_MS) location.reload();
 });
 
 const vaultPanel = $("vault");

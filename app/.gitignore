@@ -1,4 +1,6 @@
 node_modules
+# design references, kept on this machine only
+assets/
 # end-to-end tests (pnpm e2e)
 .e2e/
 test-results/

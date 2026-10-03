@@ -979,3 +979,8 @@ body.browsing #newtab {
 	color: var(--muted);
 	font-size: 12.5px;
 }
+
+/* in the background: nothing for the phone's app switcher preview to show */
+body.away > * {
+	visibility: hidden;
+}

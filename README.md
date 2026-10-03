@@ -204,7 +204,7 @@ Tap the shield or lock icon at the left of the address bar to see what's on and 
 | No WebRTC | WebRTC talks to servers over UDP straight from the device, around the proxy, and would show sites the device's real IP address. The app's page script takes WebRTC away from every page and every frame a page makes. That is script against script, not a browser rule (browsers have none for WebRTC), so a page built to get around it may find a way; the desktop app also cuts WebRTC's UDP off inside Chromium. Video calls in the browser don't work through the proxy anyway. |
 | Network lock | Every proxied page and worker carries a Content-Security-Policy that only lets it talk to the app's own address, which is the proxy. A page that gets around the proxy's hooks (a fresh frame has the browser's own `fetch` and `WebSocket`) still can't reach a site directly. |
 | Strict policy on the app's own pages | The app's pages run only their own scripts (a Content-Security-Policy with hashes of the few inline ones), may only be framed by the app, and are HTTPS-only for six months once visited over HTTPS (HSTS). |
-| Clear site data on launch | On by default, so a lost or shared device doesn't keep the last session's logins (turn it off in Settings to stay signed in). Each fresh launch deletes every site's cookies, storage and logins, the history and the open tabs (bookmarks are kept). **Clear history and site data now** does it on demand. |
+| Clear site data on launch | On by default, so a lost or shared device doesn't keep the last session's logins (turn it off in Settings to stay signed in). Each fresh launch deletes every site's cookies, storage and logins, the history and the open tabs (bookmarks are kept). A phone rarely closes a home-screen app, so coming back after 15 minutes away counts as a fresh launch too. **Clear history and site data now** does it on demand. |
 | Passphrase lock | Optional (Settings → **Lock history and bookmarks with a passphrase**). History, bookmarks and open tabs are stored on the device encrypted (AES-GCM, with a key made from the passphrase by PBKDF2-SHA256 at 600,000 rounds). The key is only ever in memory, so the passphrase is asked each time the app opens. A phone keeps the app alive in the background, so coming back after five minutes away asks again too. A forgotten passphrase can't be recovered: **Erase and start over** deletes them along with every site's logins. Site logins themselves aren't encrypted; clearing on launch covers them. |
 | Password | See above. It also guards the proxy connection itself, not only the page. |
 | Site isolation | See above. |
@@ -233,7 +233,7 @@ Most of this lives in `app/src/client/page.js` (`noPopups`). It runs inside ever
 | location, camera/mic, notifications, motion sensors, share sheet, passkeys, Apple Pay, clipboard paste, storage-access prompts | denied without showing a prompt |
 | long-press link/image previews | disabled |
 | a proxied page escaping to the top level | gets wrapped back into the shell |
-| a page reaching around all of the above for the browser's own `window.open` | on phones and tablets the browser refuses it: tabs are sandboxed frames without permission to open windows or replace the app |
+| a page reaching around all of the above through a frame of its own, for the browser's own `window.open`, dialogs and links | refused there too: such a frame gets no windows, no dialogs, and links only to the proxy. On phones and tablets the browser enforces it as well: tabs are sandboxed frames without permission to open windows or replace the app |
 
 The shell itself has no outbound links. It draws its own browser chrome, because standalone mode has none:
 
@@ -244,7 +244,7 @@ The shell itself has no outbound links. It draws its own browser chrome, because
 - **Split view** (wide screens): two tabs side by side; click a pane to make it the active tab, or pick a tab from the strip to put it in the focused pane.
 - **⋯ menu**: settings, history, and clearing data.
 
-Not covered: the iOS keyboard and its autofill bar, and file downloads served as attachments (iOS asks before saving them).
+Not covered: the iOS keyboard and its autofill bar, and file downloads served as attachments (iOS asks before saving them). In a desktop browser (not the desktop app), a page that was clicked can still send the whole browser tab to another address; phones and the desktop app refuse that.
 
 ## How it sits on Scramjet
 

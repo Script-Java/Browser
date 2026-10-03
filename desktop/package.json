@@ -1,7 +1,7 @@
 {
 	"name": "badger-desktop",
 	"productName": "Badger",
-	"version": "1.0.0",
+	"version": "1.0.1",
 	"description": "Badger for desktop: the proxy browser, connected to your Badger server",
 	"type": "module",
 	"main": "main.js",

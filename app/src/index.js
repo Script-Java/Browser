@@ -222,6 +222,9 @@ app.use((req, res, next) => {
 	res.setHeader("Cross-Origin-Resource-Policy", "same-site");
 	res.setHeader("Referrer-Policy", "same-origin");
 	res.setHeader("X-Content-Type-Options", "nosniff");
+	// No page, the app's or a site's inside it, gets these. page.js refuses
+	// them too, but this is the browser's own rule.
+	res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=(), display-capture=()");
 	// keeps the proxy out of search results
 	res.setHeader("X-Robots-Tag", "noindex, nofollow");
 	// Only the app frames its own pages (tabs, anchors, wipers), so another

@@ -22,7 +22,7 @@ jobs:
       - run: pnpm -C app install --frozen-lockfile
       - run: pnpm -C app lint
       - run: pnpm -C app test
-      - run: pnpm -C app audit --prod --audit-level high
+      - run: pnpm -C app audit --audit-level high
       - run: docker build -t browser-ios .
 
   # Security behaviour in a real browser through the real proxy (app/e2e).

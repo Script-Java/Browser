@@ -49,6 +49,16 @@ test("passphrase lock encrypts history, bookmarks and tabs", async ({ app: page 
 	await expect(page.locator("#vault")).toBeHidden();
 	await page.waitForFunction(() => active?.url === "https://example.com/");
 
+	// fifteen minutes away is a fresh launch: with "clear on launch" on (the
+	// default), the tabs and history go; bookmarks stay
+	await away(16 * 60_000).catch(() => {});
+	await expect(page.locator("#vault")).toBeVisible();
+	await page.fill("#vault-pass", "correct horse");
+	await page.click("#vault-submit");
+	await page.waitForFunction(() => tabs.length === 1 && !active.url);
+	expect(await page.evaluate(() => readEntries(HISTORY).length)).toBe(0);
+	expect(await page.evaluate(() => isBookmarked("https://example.com/"))).toBe(true);
+
 	// turning it off puts everything back as before
 	await page.evaluate(() => removePassphrase());
 	expect(await stored()).not.toContain("bios:vault");

@@ -18,9 +18,69 @@ function hook(win) {
 	noWebRTC(win);
 	hookFrames(win);
 	const client = win[SCRAMJET];
-	if (!client) return;
+	if (!client) return lockBare(win);
 	noPopups(client, win);
 	pageShield(client, win);
+}
+
+/**
+ * A frame Scramjet hasn't hooked has the browser's own window.open, dialogs,
+ * links and forms, and noPopups can't cover it (it needs Scramjet's client).
+ * Until Scramjet hooks it, it gets the blunt version: no windows, no dialogs,
+ * and links and forms only to the proxy's own address, inside their frame.
+ * @param {Window} win
+ */
+function lockBare(win) {
+	if (win.__biosBare) return;
+	Object.defineProperty(win, "__biosBare", { value: true });
+	const bare = () => !win[SCRAMJET];
+	const here = self.location.origin;
+	const leaves = (url) => {
+		try {
+			return new URL(url, here).origin !== here;
+		} catch {
+			return true;
+		}
+	};
+
+	for (const [name, answer] of [["open", null], ["alert", undefined], ["print", undefined], ["confirm", false], ["prompt", null]]) {
+		const real = win[name];
+		Object.defineProperty(win, name, {
+			value: function () {
+				return bare() ? answer : real.apply(this, arguments);
+			},
+			writable: true,
+			configurable: true,
+		});
+	}
+
+	win.addEventListener(
+		"click",
+		(event) => {
+			if (!bare()) return;
+			const link = event.composedPath().find((el) => el && (el.localName === "a" || el.localName === "area") && el.href);
+			if (!link) return;
+			if (leaves(link.href)) event.preventDefault();
+			else link.removeAttribute("target");
+		},
+		true
+	);
+	const stays = (form) => {
+		if (!bare()) return true;
+		form.removeAttribute("target");
+		return !leaves(form.action);
+	};
+	win.addEventListener(
+		"submit",
+		(event) => {
+			if (event.target?.localName === "form" && !stays(event.target)) event.preventDefault();
+		},
+		true
+	);
+	const realSubmit = win.HTMLFormElement.prototype.submit;
+	win.HTMLFormElement.prototype.submit = function () {
+		if (stays(this)) return realSubmit.call(this);
+	};
 }
 
 /**
@@ -697,6 +757,18 @@ function noPopups(client, win) {
 function pageShield(client, win) {
 	if (win.__biosShield) return;
 	Object.defineProperty(win, "__biosShield", { value: true });
+
+	// Scramjet's worker waits for the page to confirm every cookie a response
+	// sets. Browsers hold a worker's messages until the page has finished
+	// parsing, and the parser may be waiting for that very response (a
+	// stylesheet that sets a cookie, as Wikipedia's do): the page never
+	// finishes loading. This lets the messages through at once.
+	try {
+		// Scramjet hides navigator.serviceWorker from pages and keeps the real one
+		client.serviceWorker.startMessages();
+	} catch {
+		// no service worker here
+	}
 
 	let flags = win.__biosPage;
 	if (!flags) {
