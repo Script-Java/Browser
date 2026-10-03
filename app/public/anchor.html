@@ -13,6 +13,14 @@
 			// site's proxy connection (bare-mux worker + transport), so the
 			// connection survives the site's own pages navigating and the
 			// service worker always has a page to ask for it.
+			// Pass the service worker's blocked-request counts on to the shell
+			// (new tab stats).
+			navigator.serviceWorker.addEventListener("message", (event) => {
+				if (event.data?.bios === "blocked")
+					parent.postMessage({ bios: "blocked", count: event.data.count }, "*");
+			});
+			navigator.serviceWorker.startMessages();
+
 			registerSW()
 				.then(setupTransport)
 				.then(

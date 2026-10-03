@@ -28,7 +28,7 @@ const PUBLIC_PATHS = new Set([
 	"/index.css",
 	"/manifest.webmanifest",
 	"/favicon.ico",
-	"/uv.png",
+	"/logo.png",
 	"/terms",
 	"/api/challenge",
 ]);

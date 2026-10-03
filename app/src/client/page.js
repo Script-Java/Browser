@@ -113,7 +113,6 @@ function noPopups(client, win) {
 	win.__noPopups = true;
 
 	const doc = win.document;
-	const SHELL_FRAME = "uvframe";
 	const SAFE_SCHEMES = ["http:", "https:", "javascript:", "about:", "blob:"];
 
 	// Scramjet leaves mailto: URLs unproxied, so `location.href = "mailto:..."`
@@ -158,8 +157,57 @@ function noPopups(client, win) {
 		return w;
 	}
 
+	// Each shell tab's frame has its own name (uvframe-<n>), so a link aimed
+	// at it lands in this tab, never another one.
 	function tabTargetName() {
-		return hasShell() ? SHELL_FRAME : "_top";
+		return hasShell() ? tabWindow().name || "_self" : "_top";
+	}
+
+	// Real address for a link: Scramjet may hand back its own proxied form.
+	function realUrl(href) {
+		const proxied = win.location.origin + "/scramjet/";
+		href = String(href);
+		if (href.startsWith(proxied)) {
+			const [path, hash] = href.slice(proxied.length).split("#");
+			try {
+				return decodeURIComponent(path) + (hash ? "#" + decodeURIComponent(hash) : "");
+			} catch {
+				return href;
+			}
+		}
+		try {
+			return new URL(href, client.url).href;
+		} catch {
+			return "";
+		}
+	}
+
+	// In the shell, a new window becomes a new tab. The shell checks the
+	// click or tap itself too, so a page can't open tabs on its own.
+	function openTab(url, background = false) {
+		if (!hasShell()) return false;
+		let target;
+		try {
+			target = new URL(realUrl(url));
+		} catch {
+			return false;
+		}
+		if (target.protocol !== "http:" && target.protocol !== "https:") return false;
+		try {
+			win.top.postMessage({ bios: "open", url: target.href, background }, shellOrigin(win));
+			return true;
+		} catch {
+			return false;
+		}
+	}
+
+	// Targets that would open a new window: _blank, _new, or a name no frame has.
+	function opensNewWindow(target) {
+		const name = String(target ?? "").trim();
+		const lower = name.toLowerCase();
+		if (lower === "_blank" || lower === "_new") return true;
+		if (!name || lower.startsWith("_")) return false;
+		return !findFrame(name);
 	}
 
 	function findFrame(name, root = tabWindow()) {
@@ -205,7 +253,7 @@ function noPopups(client, win) {
 		}
 		if (lower === "_top" || lower === "_blank" || lower === "_new")
 			return tabTargetName();
-		if (target === SHELL_FRAME) return null;
+		if (hasShell() && target === tabWindow().name) return null;
 		return findFrame(target) ? null : tabTargetName();
 	}
 
@@ -246,8 +294,27 @@ function noPopups(client, win) {
 			const target = link.hasAttribute("target")
 				? link.getAttribute("target")
 				: baseTarget();
+			const modified = event.ctrlKey || event.metaKey || event.shiftKey;
+			if ((modified || opensNewWindow(target)) && openTab(link.href, modified)) {
+				event.preventDefault();
+				return;
+			}
 			const fixed = fixTarget(target);
 			if (fixed) link.setAttribute("target", fixed);
+		},
+		true
+	);
+
+	// Middle click: open the link in a background tab.
+	win.addEventListener(
+		"auxclick",
+		(event) => {
+			if (event.button !== 1) return;
+			const path = event.composedPath ? event.composedPath() : [event.target];
+			const link = path.find(
+				(el) => el && (el.localName === "a" || el.localName === "area") && typeof el.href === "string"
+			);
+			if (link && isSafeScheme(link.href) && openTab(link.href, true)) event.preventDefault();
 		},
 		true
 	);
@@ -315,16 +382,16 @@ function noPopups(client, win) {
 		return tabWindow();
 	}
 
-	function fakeWindow(targetWin) {
+	function fakeWindow(targetWin, navigate = (url) => navigateTo(targetWin, url)) {
 		const location = {
-			assign: (url) => navigateTo(targetWin, url),
-			replace: (url) => navigateTo(targetWin, url),
+			assign: navigate,
+			replace: navigate,
 			reload: () => {},
 			toString: () => "about:blank",
 		};
 		Object.defineProperty(location, "href", {
 			get: () => "about:blank",
-			set: (url) => navigateTo(targetWin, url),
+			set: navigate,
 		});
 		const fake = {
 			closed: false,
@@ -347,7 +414,7 @@ function noPopups(client, win) {
 		};
 		Object.defineProperty(fake, "location", {
 			get: () => location,
-			set: (url) => navigateTo(targetWin, url),
+			set: navigate,
 		});
 		fake.window = fake.self = fake;
 		return fake;
@@ -360,6 +427,13 @@ function noPopups(client, win) {
 
 	const open = function (url, target) {
 		if (!userGesture()) return null;
+		// a new window: a new tab in the shell (or later, when the page sets
+		// the blank window's location)
+		if (hasShell() && opensNewWindow(target == null ? "_blank" : target)) {
+			const blank = url == null || String(url).trim() === "" || url === "about:blank";
+			if (!blank && (!isSafeScheme(String(url)) || !openTab(url))) return null;
+			return fakeWindow(null, (next) => openTab(next));
+		}
 		const targetWin = resolveTargetWindow(target);
 		if (url == null || String(url).trim() === "" || url === "about:blank")
 			return fakeWindow(targetWin);
@@ -709,9 +783,14 @@ function reportToShell(client, win, setRepeat, whenReady) {
 	setRepeat(send, 500);
 
 	win.addEventListener("message", (event) => {
-		if (event.source !== win.parent || event.origin !== target) return;
+		// Scramjet reports this page's own site as every message's origin, so
+		// check the sender instead: only the shell is the tab's parent, and
+		// the browser sets event.source.
+		if (event.source !== win.parent) return;
 		const data = event.data;
 		if (!data || data.bios !== "cmd") return;
 		if (data.cmd === "reload") win.location.reload();
+		else if (data.cmd === "back") win.history.back();
+		else if (data.cmd === "forward") win.history.forward();
 	});
 }

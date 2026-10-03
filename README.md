@@ -61,7 +61,8 @@ Limits are per IP address (IPv6: per /64), so people behind one home router shar
 
 The server has no database and keeps no accounts, history or site data. The only thing it saves to disk is the downloaded block lists.
 
-- **Logins and cookies stay on the phone.** Sites' cookies, logins and storage live in the app's own browser storage on each device, not on the server. They stay until the person clears them (shield menu → **Clear all site data now**, or the "clear when the app opens" switch).
+- **Logins and cookies stay on the phone.** Sites' cookies, logins and storage live in the app's own browser storage on each device, not on the server. They stay until the person clears them (shield menu → **Clear history and site data now**, or the "clear when the app opens" switch).
+- **History and bookmarks stay on the phone too.** They're kept in the app's own storage on the device and never sent to the server. Star a page in the address bar to bookmark it; bookmarks show in the bookmarks bar and as shortcuts on the new tab page, and **History** is in the ⋯ menu. The new tab's "trackers blocked this week" count is kept on the device too. Clearing site data also clears history but keeps bookmarks. With site isolation, sites can't read either, because they run on other addresses.
 - **HTTPS is encrypted on the phone.** The encryption (TLS) runs inside the app on the phone, and the server only relays encrypted bytes. It can't read passwords, cookies or pages of `https://` sites.
 - **What the server does learn:** the name of each site opened (for example `example.com`), so it can check it against the malware and phishing lists. It's used for that check and not logged. Videos that iOS plays with its own player are fetched by the server itself, so for those the server sees the video's address, and the host's request logs (Railway's HTTP logs) record it.
 - **Cookies the app sets:** a pass from the bot check (30 days) or the password sign-in, and the person's settings. Neither identifies anyone.
@@ -146,15 +147,22 @@ Most of this lives in `app/src/client/page.js` (`noPopups`). It runs inside ever
 
 | Would normally… | Now |
 | --- | --- |
-| `target="_blank"` / `_top` / unknown named target links and forms open a Safari sheet or replace the app | open in the app's tab |
-| `window.open(url)` opens a new window | navigates the tab; calls without a user gesture (pop-unders) are dropped |
+| `target="_blank"` / unknown named target links open a Safari sheet | open in a new Badger tab next to the page (Ctrl/⌘-click or middle click: in the background) |
+| `_top` links and forms replace the app | stay in the page's tab |
+| `window.open(url)` opens a new window | opens a new Badger tab after a click or tap; calls without one (pop-ups, pop-unders) are dropped |
 | `mailto:`, `tel:`, `sms:`, `maps:`, app-store links hand off to another app | blocked |
 | `alert` / `confirm` / `prompt` / `print` | silenced (`confirm` → true, `prompt` → null) |
 | location, camera/mic, notifications, motion sensors, share sheet, passkeys, Apple Pay, clipboard paste, storage-access prompts | denied without showing a prompt |
 | long-press link/image previews | disabled |
 | a proxied page escaping to the top level | gets wrapped back into the shell |
 
-The shell itself has no outbound links. Back, forward, address, reload, and home are in the bottom bar, because standalone mode has no browser chrome.
+The shell itself has no outbound links. It draws its own browser chrome, because standalone mode has none:
+
+- **Tabs**: open, close (× or middle click), switch (click or arrow keys). Open tabs come back when the app reopens; background ones load when you switch to them.
+- **Address bar**: suggestions from bookmarks and history as you type, and commands (New tab, Close tab, History, Settings, Bookmark this page, Split view, Reload page, Clear history and site data). Arrow keys and Enter pick one; plain Enter always searches or opens what you typed. Ctrl/⌘+K or +L jumps to it.
+- **Bookmarks**: the star in the address bar, the bookmarks bar, and shortcuts on the new tab page.
+- **Split view** (wide screens): two tabs side by side; click a pane to make it the active tab, or pick a tab from the strip to put it in the focused pane.
+- **⋯ menu**: settings, history, and clearing data.
 
 Not covered: the iOS keyboard and its autofill bar, and file downloads served as attachments (iOS asks before saving them).
 

@@ -1,13 +1,13 @@
 {
-	"name": "Browser",
-	"short_name": "Browser",
+	"name": "Badger",
+	"short_name": "Badger",
 	"id": "/",
 	"start_url": "/",
 	"scope": "/",
 	"display": "standalone",
 	"orientation": "any",
-	"background_color": "#0e0e14",
-	"theme_color": "#0e0e14",
+	"background_color": "#faf9f7",
+	"theme_color": "#ecebe8",
 	"icons": [
 		{
 			"src": "/icons/icon-192.png",
