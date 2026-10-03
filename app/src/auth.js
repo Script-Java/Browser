@@ -94,6 +94,19 @@ export function parseCookies(header = "") {
 	return cookies;
 }
 
+/**
+ * Every value a cookie name has in the header. A site on a subdomain can set
+ * a cookie of the same name for the whole domain, and which copy comes first
+ * is up to the browser, so callers look for a good one among them all.
+ */
+export function cookieValues(header = "", name) {
+	return header
+		.split(";")
+		.map((part) => part.trim())
+		.filter((part) => part.startsWith(name + "="))
+		.map((part) => part.slice(name.length + 1));
+}
+
 function leadingZeroBits(bytes) {
 	let bits = 0;
 	for (const byte of bytes) {
@@ -122,13 +135,14 @@ export function createAuth({ password, secret, cookieDomain }) {
 
 	function isAuthed(req) {
 		if (!enabled) return true;
-		const token = parseCookies(req.headers.cookie)[COOKIE];
-		if (!token) return false;
-		const [expires, mac] = token.split(".");
-		if (!mac || Number(expires) < Date.now()) return false;
-		const expected = Buffer.from(sign(expires));
-		const given = Buffer.from(mac);
-		return expected.length === given.length && timingSafeEqual(expected, given);
+		// any good copy counts, so a planted bad one can't sign people out
+		return cookieValues(req.headers.cookie, COOKIE).some((token) => {
+			const [expires, mac] = token.split(".");
+			if (!mac || Number(expires) < Date.now()) return false;
+			const expected = Buffer.from(sign(expires));
+			const given = Buffer.from(mac);
+			return expected.length === given.length && timingSafeEqual(expected, given);
+		});
 	}
 
 	/** A fresh puzzle: a signed timestamp and nonce, so the server keeps nothing. */

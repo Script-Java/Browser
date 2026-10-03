@@ -3,7 +3,7 @@
 // origins here, which shared mode never exercises.
 
 import { expect, test } from "@playwright/test";
-import { leaks, open, proxied } from "./fixtures.js";
+import { SCRIPTED_PAGE, leaks, open, proxied, setSettings, testPage } from "./fixtures.js";
 import { CATCHER, ISOLATED_URL } from "./env.js";
 
 test("browser check, site isolation, verified address and tab commands", async ({ page }) => {
@@ -36,4 +36,12 @@ test("browser check, site isolation, verified address and tab commands", async (
 
 	expect(violations, "the app's pages broke their own policy").toEqual([]);
 	expect(await leaks(), "requests went around the proxy").toEqual([]);
+
+	// a site's own service worker gets the settings from the app
+	await setSettings(page, { level: "safest" });
+	frame = await open(page, testPage(SCRIPTED_PAGE));
+	await expect.poll(() => frame.locator("#t").textContent()).toBe("test");
+	await page.waitForTimeout(2000);
+	expect(await frame.title()).toBe("ORIGINAL");
+	await setSettings(page, { level: "standard" });
 });

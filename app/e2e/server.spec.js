@@ -62,6 +62,18 @@ test("only the app itself can change settings", async ({ request }) => {
 	expect(res.status()).toBe(403);
 });
 
+test("settings stay with the app; only site subdomains may read them across origins", async () => {
+	// a site's subdomain has no settings of its own for a page there to plant
+	expect((await get(SITE_HOST, "/api/settings")).status).toBe(404);
+	expect((await get(SITE_HOST, "/api/nav")).status).toBe(404);
+	const site = await get(SHELL_HOST, "/api/nav", { origin: `http://${SITE_HOST}` });
+	expect(site.headers["access-control-allow-origin"]).toBe(`http://${SITE_HOST}`);
+	for (const origin of ["https://evil.example", `http://www.app.localhost:${ISOLATED}`]) {
+		const other = await get(SHELL_HOST, "/api/nav", { origin });
+		expect(other.headers["access-control-allow-origin"], origin).toBeUndefined();
+	}
+});
+
 test("the health check proves which server answers", async ({ request }) => {
 	expect(await (await request.get(`${ISOLATED_LOCAL}/healthz`)).text()).toBe("ok");
 	const nonce = "e2e-nonce";

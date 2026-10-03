@@ -124,8 +124,15 @@ export function createShield(scramjet, configStored) {
 		? shellOrigin + "/filters/engine.bin"
 		: "/filters/engine.bin";
 
+	// Only pages this worker made (a warning's button, a trampoline) know the
+	// token, so a link from elsewhere can't click "Continue anyway" for someone.
+	const goToken = crypto.randomUUID();
 	const goUrl = (action, to) =>
-		`${location.origin}${API}go?do=${action}&u=${encodeURIComponent(to)}`;
+		`${location.origin}${API}go?do=${action}&t=${goToken}&u=${encodeURIComponent(to)}`;
+
+	// The settings live with the shell (see index.js).
+	const shellFetch = (path, init = {}) =>
+		isolated ? fetch(shellOrigin + path, { ...init, credentials: "include" }) : fetch(path, init);
 
 	let configLoad = null;
 	function ensureConfig() {
@@ -280,7 +287,7 @@ export function createShield(scramjet, configStored) {
 
 	async function getSettings() {
 		if (!settings || Date.now() - settingsAt > SETTINGS_TTL_MS) {
-			settingsLoad ||= fetch("/api/settings", { cache: "no-store" })
+			settingsLoad ||= shellFetch("/api/settings", { cache: "no-store" })
 				.then((res) => (res.ok ? res.json() : null))
 				.then(applySettings, () => settings || applySettings(null))
 				.finally(() => (settingsLoad = null));
@@ -294,7 +301,7 @@ export function createShield(scramjet, configStored) {
 	// (on every site origin in isolation mode, too).
 	async function checkNavigation(hostname) {
 		try {
-			const res = await fetch("/api/nav", {
+			const res = await shellFetch("/api/nav", {
 				cache: "no-store",
 				headers: { "x-bios-host": hostname },
 			});
@@ -493,14 +500,17 @@ function go(key) {
 	// ------------------------------------------------------------ internal API
 
 	async function api(request, path) {
-		// /scramjet/__bios/go?do=<inline|allow|bypass>&u=<proxied URL>: remember the
-		// choice, then continue to the page (307 keeps a form POST intact).
+		// /scramjet/__bios/go?do=<inline|allow|bypass|http>&t=<token>&u=<proxied URL>:
+		// remember the choice, then continue to the page (307 keeps a form POST
+		// intact). Without the token (a made-up link, or this worker restarted
+		// since the page was made) nothing is remembered, and the page's
+		// warning comes up again.
 		if (path === "go") {
 			const params = new URL(request.url).searchParams;
 			const to = params.get("u") || "";
 			const target = decode(to);
 			if (!target) return new Response(null, { status: 400 });
-			const action = params.get("do");
+			const action = params.get("t") === goToken ? params.get("do") : null;
 			if (action === "inline") inlineOnce.add(to);
 			else if (action === "allow") allowOnce.add(to);
 			else if (action === "bypass") bypassed.add(target.hostname.toLowerCase());
@@ -561,7 +571,7 @@ function go(key) {
 	}
 
 	function blocked(destination) {
-		if (destination === "script" || destination === "worker")
+		if (SCRIPTED.has(destination))
 			return new Response("", { headers: headers("text/javascript") });
 		if (destination === "style")
 			return new Response("", { headers: headers("text/css") });
@@ -639,13 +649,38 @@ function go(key) {
 	const noSiteScripts = (url) =>
 		settings.level === "safest" || (settings.level === "safer" && url?.protocol === "http:");
 
+	const SCRIPTED = new Set(["script", "worker", "sharedworker", "serviceworker"]);
+
 	function saferBlock(destination, source) {
 		if (!hardened()) return null;
 		if (destination === "font") return blocked(destination);
-		const scripted =
-			destination === "script" || destination === "worker" || destination === "sharedworker";
-		if (scripted && noSiteScripts(source)) return blocked(destination);
+		if (SCRIPTED.has(destination) && noSiteScripts(source)) return blocked(destination);
 		return null;
+	}
+
+	// A data: or blob: URL carries the page's own code, so it gets the same
+	// rules as the page that used it. Scramjet answers these without its
+	// handleResponse event, so the policy and our page script go on here.
+	async function inline(event, destination, isPage) {
+		await getSettings();
+		const noScripts = noSiteScripts(decode(event.request.referrer));
+		if (noScripts && SCRIPTED.has(destination)) return blocked(destination);
+		const res = await scramjet.fetch(event);
+		const page = isPage && { cosmetic: false, videoAds: false, safer: hardened(), noScripts };
+		const resHeaders = new Headers(res.headers);
+		resHeaders.set("content-security-policy", policyFor(page));
+		const html = page && /^text\/html/i.test(resHeaders.get("content-type") || "");
+		return new Response(html ? injectHtml(await res.text(), page) : res.body, {
+			status: res.status,
+			statusText: res.statusText,
+			headers: resHeaders,
+		});
+	}
+
+	function rememberPage(page) {
+		// ponytail: entries for pages that never answer stay until this clears
+		if (pages.size > 200) pages.clear();
+		pages.set(page.url, page);
 	}
 
 	async function handle(event) {
@@ -666,17 +701,20 @@ function go(key) {
 			return fetch(request);
 		}
 
-		// decodeUrl only returns http(s) pages; data:, blob: and Scramjet's
-		// own files go straight to Scramjet
-		const target = decode(url);
-		if (!target) return scramjet.fetch(event);
-
 		const destination = request.destination;
 		const isPage =
 			request.mode === "navigate" ||
 			destination === "document" ||
 			destination === "iframe" ||
 			destination === "frame";
+
+		// decodeUrl only returns http(s) pages; Scramjet's own files go
+		// straight to Scramjet
+		const target = decode(url);
+		if (!target) {
+			if (!/^(data|blob):/i.test(url.slice(prefix.length))) return scramjet.fetch(event);
+			return inline(event, destination, isPage);
+		}
 
 		const empty = await emptyAttribute(event, target, destination);
 		if (empty) return empty;
@@ -756,9 +794,7 @@ function go(key) {
 		}
 
 		if (isPage) {
-			// ponytail: entries for pages that never answer stay until this clears
-			if (pages.size > 200) pages.clear();
-			pages.set(target.href, {
+			rememberPage({
 				url: target.href,
 				hostname: target.hostname,
 				cosmetic: blocking && settings.cosmetic,
@@ -793,7 +829,7 @@ function go(key) {
 		}
 
 		const flags = { cosmetic: page.cosmetic, videoAds: page.videoAds, safer: page.safer };
-		// With a CSP on the page (see handleResponse), only our scripts carry the nonce.
+		// On a no-scripts page (see policyFor), only scripts with the nonce run.
 		const nonce = page.nonce ? ` nonce="${page.nonce}"` : "";
 		let after =
 			`<script${nonce}>self.__biosPage=${scriptJson(flags)};document.currentScript.remove();</script>` +
@@ -817,7 +853,29 @@ function go(key) {
 		const bootEnd = boot === -1 ? -1 : html.indexOf("</script>", boot);
 		if (bootEnd === -1) return html;
 		const end = bootEnd + "</script>".length;
-		return html.slice(0, end) + after + html.slice(end);
+		return html.slice(0, boot) + `<script${nonce}` + html.slice(boot + "<script".length, end) + after + html.slice(end);
+	}
+
+	// Every proxied page and worker may only talk to this origin, which is
+	// the proxy. Scramjet's hooks already send a page's requests there, but a
+	// page can reach around them (a fresh frame has the browser's own fetch,
+	// WebSocket and WebRTC). This rule is the browser's, so it holds there
+	// too, and frames a page writes itself inherit it.
+	// ponytail: no browser has a rule like this for WebRTC; page.js is the only block.
+	const socket = (location.protocol === "https:" ? "wss://" : "ws://") + location.host;
+	const NETWORK_LOCK = `default-src 'self' ${socket} data: blob: 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'; frame-src 'self'`;
+
+	// The policy for a proxied response; `page` is set for the pages we inject.
+	function policyFor(page) {
+		if (!page?.noScripts) return NETWORK_LOCK;
+		// Its inline scripts and handlers don't run; Scramjet's own scripts
+		// (this origin, and its data: one, which injectHtml gives the nonce)
+		// and ours (the nonce) still do. The page's external, data: and blob:
+		// scripts are refused in handle(). Scramjet builds functions from
+		// strings and runs WebAssembly as it starts, hence the evals; with
+		// none of the page's code running, nothing else can call them.
+		page.nonce = crypto.randomUUID().replace(/-/g, "");
+		return `script-src 'self' 'nonce-${page.nonce}' 'unsafe-eval' 'wasm-unsafe-eval'; object-src 'none'; ${NETWORK_LOCK}`;
 	}
 
 	scramjet.addEventListener("handleResponse", (event) => {
@@ -825,20 +883,11 @@ function go(key) {
 		// servers itself, around the proxy (and Scramjet garbles their URLs).
 		delete event.responseHeaders.link;
 		const page = pages.get(event.url.href);
+		event.responseHeaders["content-security-policy"] = policyFor(page);
 		if (!page) return;
 		pages.delete(event.url.href);
 		// lets the page load in the app's frame across subdomains
 		event.responseHeaders["cross-origin-resource-policy"] = "same-site";
-		if (page.noScripts) {
-			// Its inline scripts and handlers don't run; Scramjet's own scripts
-			// (data: and this origin) and ours (the nonce) still do. The page's
-			// external scripts are refused in handle(). Scramjet builds functions
-			// from strings and runs WebAssembly as it starts, hence the evals;
-			// with none of the page's code running, nothing else can call them.
-			page.nonce = crypto.randomUUID().replace(/-/g, "");
-			event.responseHeaders["content-security-policy"] =
-				`script-src 'self' data: 'nonce-${page.nonce}' 'unsafe-eval' 'wasm-unsafe-eval'; object-src 'none'`;
-		}
 		const type = event.responseHeaders["content-type"] || "";
 		if (typeof event.responseBody === "string" && /^text\/html/i.test(type))
 			event.responseBody = injectHtml(event.responseBody, page);
@@ -848,9 +897,15 @@ function go(key) {
 
 	return {
 		handle(event) {
+			// A check that broke must not wave the request through unchecked.
 			return handle(event).catch((err) => {
 				console.error("bios:", err);
-				return scramjet.fetch(event);
+				return event.request.mode === "navigate"
+					? new Response("Badger couldn't check this page, so it wasn't loaded. Try reloading.", {
+							status: 500,
+							headers: headers("text/plain"),
+						})
+					: Response.error();
 			});
 		},
 	};

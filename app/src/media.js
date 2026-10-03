@@ -73,13 +73,15 @@ export function rewritePlaylist(text, baseUrl) {
 
 // -------------------------------------------------------------- the fetch
 
-const HOP_BY_HOP = new Set([
-	"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te",
-	"trailer", "transfer-encoding", "upgrade", "content-encoding", "content-length",
-	"set-cookie", "set-cookie2", "content-security-policy", "content-security-policy-report-only",
-	"cross-origin-resource-policy", "cross-origin-embedder-policy", "cross-origin-opener-policy",
-	"strict-transport-security", "x-frame-options",
-]);
+// The site's headers a player needs. Every other one stays behind: sent from
+// this origin, a site's Clear-Site-Data would sign the person out, and its
+// reporting headers (NEL, Report-To) would have the browser call the site
+// directly, around the proxy.
+const PASS_HEADERS = ["content-type", "content-range", "accept-ranges", "etag", "last-modified"];
+
+// What a media engine asks for. A script or worker fetched through here
+// would run on this origin without the proxy's hooks.
+const MEDIA_DESTS = new Set(["video", "audio", "track", "empty"]);
 
 function upstreamRequest(url, headers, method, redirects = 0) {
 	return new Promise((resolve, reject) => {
@@ -145,6 +147,9 @@ function readAll(stream, limit) {
  */
 export async function serveMedia(req, res, countBytes = () => {}) {
 	if (req.method !== "GET" && req.method !== "HEAD") return false;
+	// absent before iOS 16.4, and from the system's HLS player
+	const dest = req.headers["sec-fetch-dest"];
+	if (dest && !MEDIA_DESTS.has(dest)) return false;
 	const target = decodeUrl(req.originalUrl);
 	if (!target) return false;
 
@@ -174,8 +179,10 @@ export async function serveMedia(req, res, countBytes = () => {}) {
 	const contentType = up.headers["content-type"] || "";
 
 	res.status(up.statusCode || 502);
-	for (const [name, value] of Object.entries(up.headers))
-		if (!HOP_BY_HOP.has(name) && value !== undefined) res.setHeader(name, value);
+	for (const name of PASS_HEADERS)
+		if (up.headers[name] !== undefined) res.setHeader(name, up.headers[name]);
+	// for requests without Sec-Fetch-Dest: never hand back something a browser would run
+	if (/script/i.test(contentType)) res.setHeader("Content-Type", "text/plain");
 	res.setHeader("Cache-Control", "no-store");
 	res.setHeader("X-Content-Type-Options", "nosniff");
 	res.setHeader("Cross-Origin-Resource-Policy", "same-site");
@@ -196,6 +203,7 @@ export async function serveMedia(req, res, countBytes = () => {}) {
 			res.status(502).type("text/plain").send(err.message);
 			return true;
 		}
+		countBytes(body.length);
 		const text = body.toString("utf8");
 		if (!text.trimStart().startsWith("#EXTM3U")) {
 			res.type(contentType || "application/octet-stream").send(body);

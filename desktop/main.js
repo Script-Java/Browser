@@ -30,8 +30,15 @@ function ours(url) {
 // microphone, location, notifications and the rest are refused.
 const ALLOWED_PERMISSIONS = new Set(["fullscreen", "clipboard-sanitized-write", "pointerLock"]);
 
-function lockDown() {
+async function lockDown() {
 	const ses = session.defaultSession;
+	// Whatever isn't the server goes to a proxy that isn't there. The request
+	// filter below can't see WebRTC's connections; this makes its TCP ones
+	// fail too (its UDP is turned off further down).
+	await ses.setProxy({
+		proxyRules: "http://127.0.0.1:9",
+		proxyBypassRules: `${SERVER.hostname},.${SERVER.hostname}`,
+	});
 	// The lock: a page that slips past the proxy still can't reach the network.
 	ses.webRequest.onBeforeRequest((details, callback) => {
 		callback({ cancel: /^(https?|wss?):/.test(details.url) && !ours(details.url) });
@@ -43,7 +50,8 @@ function lockDown() {
 
 	app.on("web-contents-created", (event, contents) => {
 		// WebRTC's UDP goes around the network lock above and would show
-		// sites the real IP address. No proxy is set, so this turns it off.
+		// sites the real IP address. The proxy above carries no UDP, so this
+		// turns it off.
 		contents.setWebRTCIPHandlingPolicy("disable_non_proxied_udp");
 		// Tabs live inside the shell; nothing opens a raw window or the system browser.
 		contents.setWindowOpenHandler(() => ({ action: "deny" }));
@@ -109,7 +117,7 @@ app.on("second-instance", () => {
 });
 app.on("window-all-closed", () => app.quit());
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
 	if (SERVER.hostname === "your-app.up.railway.app") {
 		dialog.showErrorBox(
 			"Badger isn't set up yet",
@@ -117,7 +125,7 @@ app.whenReady().then(() => {
 		);
 		return app.quit();
 	}
-	lockDown();
+	await lockDown();
 	openWindow();
 	keepUpdated();
 });

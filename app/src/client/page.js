@@ -13,12 +13,32 @@ const bios = self.__biosConfig || {};
 
 /** @param {Window} win */
 function hook(win) {
+	// before the Scramjet check: a frame Scramjet hasn't hooked yet has
+	// WebRTC too, and can make frames of its own
+	noWebRTC(win);
+	hookFrames(win);
 	const client = win[SCRAMJET];
 	if (!client) return;
-	noWebRTC(win);
 	noPopups(client, win);
 	pageShield(client, win);
-	hookFrames(win);
+}
+
+/**
+ * Hooks every frame directly inside `win` that isn't hooked yet.
+ * @param {Window} win
+ */
+function sweep(win) {
+	try {
+		for (let i = 0; i < win.length; i++) {
+			try {
+				if (!win[i].__biosFrames) hook(win[i]);
+			} catch {
+				// cross-origin frame
+			}
+		}
+	} catch {
+		// window gone
+	}
 }
 
 /**
@@ -27,7 +47,12 @@ function hook(win) {
  * hooks such a frame when the page first reaches into it, through
  * contentWindow or contentDocument; ours go on at the same moment, before
  * the page can write anything into the frame.
- * ponytail: a frame reached only through window.frames[i] is caught at its load event instead.
+ * A frame is also reachable through window[i] the moment it's in the
+ * document, with no getter to hook. So every call that can put one there is
+ * followed by a sweep, and frames the parser adds are swept as they appear.
+ * ponytail: a page with the patience to find an insertion path not listed
+ * here still gets an unhooked frame; the service worker's network lock
+ * (shield.js) is what holds then, for everything but WebRTC.
  * @param {Window} win
  */
 function hookFrames(win) {
@@ -54,18 +79,47 @@ function hookFrames(win) {
 			});
 		}
 	}
-	win.addEventListener(
-		"load",
-		(event) => {
-			if (event.target?.localName !== "iframe") return;
+	const sweepAfter = (proto, name) => {
+		const desc = proto && Object.getOwnPropertyDescriptor(proto, name);
+		const real = desc && (desc.set || desc.value);
+		if (typeof real !== "function" || !desc.configurable) return;
+		const wrapped = function () {
 			try {
-				hook(event.target.contentWindow);
-			} catch {
-				// cross-origin frame
+				return real.apply(this, arguments);
+			} finally {
+				sweep(win);
+				// called on another window's node (a frame's method, borrowed)
+				const home = (this?.ownerDocument || this)?.defaultView;
+				if (home && home !== win) sweep(home);
 			}
-		},
-		true
-	);
+		};
+		Object.defineProperty(proto, name, desc.set ? { ...desc, set: wrapped } : { ...desc, value: wrapped });
+	};
+	const inserters = {
+		Node: ["appendChild", "insertBefore", "replaceChild"],
+		Element: [
+			"append", "prepend", "before", "after", "replaceWith", "replaceChildren",
+			"insertAdjacentElement", "insertAdjacentHTML", "setHTMLUnsafe", "innerHTML", "outerHTML",
+		],
+		CharacterData: ["before", "after", "replaceWith"],
+		DocumentType: ["before", "after", "replaceWith"],
+		Document: ["append", "prepend", "replaceChildren", "write", "writeln"],
+		DocumentFragment: ["append", "prepend", "replaceChildren"],
+		ShadowRoot: ["innerHTML", "setHTMLUnsafe"],
+		Range: ["insertNode", "surroundContents"],
+	};
+	for (const [type, names] of Object.entries(inserters))
+		for (const name of names) sweepAfter(win[type]?.prototype, name);
+
+	// Frames the parser adds, before the next script in the page runs. Load
+	// events from elements never reach the window, hence the document.
+	try {
+		new win.MutationObserver(() => sweep(win)).observe(win.document, { childList: true, subtree: true });
+		win.document.addEventListener("load", () => sweep(win), true);
+	} catch {
+		// no document yet
+	}
+	sweep(win);
 }
 
 hook(self);
@@ -75,8 +129,9 @@ hook(self);
  * proxy, and hands the page the device's real public IP address, with no
  * prompt. So pages get no WebRTC at all; calls couldn't work through the
  * proxy anyway (it carries TCP only).
- * ponytail: a frame a page reaches only through window.frames[i] before its
- * load event keeps WebRTC; the desktop app also turns it off in Chromium.
+ * ponytail: this is page script against page script (see hookFrames for the
+ * frames it covers), not a browser rule; no browser has one for WebRTC. The
+ * desktop app also cuts WebRTC's UDP off inside Chromium.
  * @param {Window} win
  */
 function noWebRTC(win) {

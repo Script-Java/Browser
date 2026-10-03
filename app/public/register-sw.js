@@ -34,6 +34,10 @@ async function registerSW() {
 		scope: proxyScope,
 	});
 
+	// Take a newer worker now rather than a page load later: fixes to its
+	// checks ship in it. Offline, the one already there carries on.
+	await registration.update().catch(() => {});
+
 	// serviceWorker.ready only settles for pages inside the SW scope,
 	// so wait for this registration to activate directly.
 	const worker =

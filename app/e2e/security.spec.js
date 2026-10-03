@@ -61,6 +61,44 @@ test("pages get no WebRTC, which would reveal the real IP address", async ({ app
 	});
 });
 
+test("a page can't get around the proxy through a frame of its own", async ({ app }) => {
+	// A fresh frame has the browser's own fetch, WebSocket and WebRTC, without
+	// Scramjet's hooks, and window[i] reaches it with no getter to hook. The
+	// fixture checks that none of these requests left the proxy.
+	const frame = await open(
+		app,
+		testPage(`<!doctype html><title>raw</title><body>
+<iframe src="https://example.org/"></iframe>
+<object data="about:blank" type="text/html"></object>
+<iframe srcdoc="<script>parent.inSrcdoc = typeof RTCPeerConnection</script>"></iframe>
+<script>
+var rtc = [];
+for (var i = 0; i < window.length; i++) rtc.push(typeof window[i].RTCPeerConnection);
+var added = document.createElement("iframe");
+document.body.appendChild(added);
+var raw = window[window.length - 1];
+rtc.push(typeof raw.RTCPeerConnection);
+var holder = document.createElement("div");
+document.body.appendChild(holder);
+holder.innerHTML = "<p><iframe></iframe></p>";
+rtc.push(typeof window[window.length - 1].RTCPeerConnection);
+var inner = raw.document.createElement("iframe");
+raw.document.body.appendChild(inner);
+rtc.push(typeof raw[0].RTCPeerConnection);
+try { new raw.WebSocket("wss://example.com/socket"); } catch (e) {}
+try { raw.fetch("https://example.com/fetch").catch(function () {}); } catch (e) {}
+new raw.Image().src = "https://example.net/pixel.gif";
+setTimeout(function () {
+	rtc.push(window.inSrcdoc);
+	document.title = "done " + rtc.filter(function (t) { return t !== "undefined"; }).length + "/" + rtc.length;
+}, 1500);
+</script>`)
+	);
+	await expect.poll(() => frame.title()).toContain("done");
+	expect(await frame.title()).toMatch(/^done 0\/[6-9]$/);
+	await app.waitForTimeout(4000);
+});
+
 test("pages can't open windows, show dialogs or hand off to other apps", async ({ app }) => {
 	// The page tries it all by itself right after it loads, with no click or
 	// tap of its own, and reports the results in its title. (The app's tap
@@ -139,6 +177,14 @@ test("HTTPS-Only warns before a site without https, and continues on request", a
 	await expect.poll(() => frame.title()).toContain("HTTP Forever");
 });
 
+test("a link can't click through a warning for someone", async ({ app }) => {
+	// the warning's own button carries a token; this made-up address doesn't
+	const page = `${SHARED_URL}/scramjet/${encodeURIComponent("http://httpforever.com/")}`;
+	await app.evaluate((src) => (active.frame.src = src), `${SHARED_URL}/scramjet/__bios/go?do=http&u=${encodeURIComponent(page)}`);
+	const frame = app.frame({ name: await app.evaluate(() => active.frame.name) });
+	await expect.poll(() => frame.title()).toBe("This site isn't secure");
+});
+
 test("Standard: a page's own scripts run (control for the next tests)", async ({ app }) => {
 	await setSettings(app, { httpsOnly: false, level: "standard" });
 	const frame = await open(app, testPage(SCRIPTED_PAGE, "http"));
@@ -181,6 +227,22 @@ test("Safest: no site's own scripts, even over https", async ({ app }) => {
 	expect(await frame.title()).toBe("ORIGINAL");
 	expect(await proxied(frame)).toEqual({ scramjet: true, badger: true });
 });
+
+// data: URLs carry the page's own code as much as an inline script does.
+for (const [name, body] of [
+	["script", `<script src="data:text/javascript,document.title='RAN'"></script>`],
+	["module script", `<script type="module" src="data:text/javascript,document.title='RAN'"></script>`],
+	["frame", `<iframe src="data:text/html,<script>parent.document.title='RAN'</script>"></iframe>`],
+	["page", `<meta http-equiv="refresh" content="0;url=data:text/html,<title>ORIGINAL</title><script>document.title='RAN'</script><p id=t>test</p>">`],
+])
+	test(`Safest: no scripts from a data: ${name} either`, async ({ app }) => {
+		await setSettings(app, { level: "safest" });
+		const frame = await open(app, testPage(`<!doctype html><title>ORIGINAL</title>${body}<p id="t">test</p>`));
+		await expect.poll(() => frame.locator("#t").textContent()).toBe("test");
+		await app.waitForTimeout(2000);
+		expect(await frame.title()).toBe("ORIGINAL");
+		expect(await proxied(frame)).toEqual({ scramjet: true, badger: true });
+	});
 
 test("ad and tracker requests are blocked", async ({ app }) => {
 	await expect

@@ -1,7 +1,19 @@
 import assert from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
 import { test } from "node:test";
-import { CHALLENGE_BITS, createAuth, parseCookies, seal, unseal } from "./auth.js";
+import { CHALLENGE_BITS, createAuth, cookieValues, parseCookies, seal, unseal } from "./auth.js";
+
+test("a planted cookie of the same name can't sign someone out", () => {
+	assert.deepEqual(cookieValues("a=1; bios_auth=x; b=2; bios_auth=y.z", "bios_auth"), ["x", "y.z"]);
+	const auth = createAuth({ secret: "s".repeat(32), cookieDomain: () => null });
+	let cookie;
+	const res = { setHeader: (name, value) => (cookie = value.split(";")[0]), redirect() {} };
+	const challenge = auth.newChallenge();
+	auth.login({ headers: {}, body: { challenge, solution: solve(challenge) } }, res);
+	assert.ok(auth.isAuthed({ headers: { cookie } }));
+	assert.ok(auth.isAuthed({ headers: { cookie: `bios_auth=junk; ${cookie}` } }));
+	assert.ok(!auth.isAuthed({ headers: { cookie: "bios_auth=junk" } }));
+});
 
 const zeroBits = (hex) => {
 	const bits = BigInt("0x" + hex).toString(2).padStart(256, "0");

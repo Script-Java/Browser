@@ -96,15 +96,19 @@ function cookieDomain(req) {
 
 const auth = createAuth({ password: PASSWORD, secret: SECRET, cookieDomain });
 
-// Settings live in an encrypted cookie shared by the shell and every site
-// origin: a proxied page can't switch protections off by writing its own
-// cookie, and someone holding the device can't read the allowed-sites list.
-const SETTINGS_COOKIE = "bios_settings";
+// Settings live in an encrypted cookie on the shell's address alone; site
+// origins' service workers ask the shell for them (siteCors below). Over
+// https its name starts with __Host-, which browsers refuse to set for a
+// whole domain: a proxied page on a site subdomain can't plant a copy with
+// protections switched off. Sealed, so someone holding the device can't read
+// the allowed-sites list.
+const LEGACY_SETTINGS_COOKIE = "bios_settings"; // was shared with every subdomain
+const settingsCookie = (req) => (req.secure ? "__Host-" : "") + LEGACY_SETTINGS_COOKIE;
 const settingsKey = createHmac("sha256", SECRET + "\0" + PASSWORD).update("bios-settings-aes").digest();
 
 /** The stored settings, or null when there's no cookie it can open. */
-function storedSettings(req) {
-	const raw = parseCookies(req.headers.cookie)[SETTINGS_COOKIE];
+function storedSettings(req, name = settingsCookie(req)) {
+	const raw = parseCookies(req.headers.cookie)[name];
 	const stored = raw ? unseal(settingsKey, raw) : null;
 	return stored && typeof stored === "object" && !Array.isArray(stored) ? stored : null;
 }
@@ -115,14 +119,12 @@ function readSettings(req) {
 
 function writeSettings(req, res, settings) {
 	const parts = [
-		`${SETTINGS_COOKIE}=${seal(settingsKey, settings)}`,
+		`${settingsCookie(req)}=${seal(settingsKey, settings)}`,
 		"Path=/",
 		"HttpOnly",
 		"SameSite=Lax",
 		`Max-Age=${5 * 365 * 86_400}`,
 	];
-	const domain = cookieDomain(req);
-	if (domain) parts.push(`Domain=${domain}`);
 	if (req.secure) parts.push("Secure");
 	res.append("Set-Cookie", parts.join("; "));
 }
@@ -238,7 +240,7 @@ app.use((req, res, next) => {
 
 // Site origins only serve what the proxy needs, never the shell: if the shell
 // ran on a site origin, that site could reach into it.
-const SITE_PATHS = /^\/(scramjet\/|scram\/|bios\/(shield|page)\.js$|baremux\/|epoxy\/|filters\/|api\/(nav|settings)$|scramjet-sw\.js$|register-sw\.js$|wipe\.html$|anchor\.html$)/;
+const SITE_PATHS = /^\/(scramjet\/|scram\/|bios\/(shield|page)\.js$|baremux\/|epoxy\/|filters\/|scramjet-sw\.js$|register-sw\.js$|wipe\.html$|anchor\.html$)/;
 app.use((req, res, next) => {
 	const kind = hostKind(req);
 	if (kind === "stray" || (kind === "site" && !SITE_PATHS.test(req.path))) {
@@ -277,6 +279,31 @@ app.post("/login", express.urlencoded({ extended: false, limit: "4kb" }), auth.l
 // another site can't sign people out
 app.post("/logout", (req, res, next) => (fromShell(req) ? auth.logout(req, res, next) : res.status(403).end()));
 
+// Isolation mode: site origins' service workers read the block list and the
+// settings from the shell, with the person's cookies. Before the gate,
+// because a preflight carries no cookies.
+function siteCors(req, res, next) {
+	res.vary("Origin");
+	let label = "";
+	try {
+		const { hostname } = new URL(req.headers.origin);
+		if (ISOLATION && hostname.endsWith("." + ISOLATION)) label = hostname.slice(0, -ISOLATION.length - 1);
+	} catch {
+		// no Origin, or a malformed one
+	}
+	if (/^s[a-z2-7]{25}$/.test(label)) {
+		res.setHeader("Access-Control-Allow-Origin", req.headers.origin);
+		res.setHeader("Access-Control-Allow-Credentials", "true");
+		if (req.method === "OPTIONS") {
+			res.setHeader("Access-Control-Allow-Headers", "x-bios-host, if-none-match");
+			res.setHeader("Access-Control-Max-Age", "86400");
+			return res.status(204).end();
+		}
+	}
+	next();
+}
+app.use(["/filters/engine.bin", "/api/nav", "/api/settings"], siteCors);
+
 app.use(auth.gate);
 
 // Server settings for the shell, the service worker and every proxied page.
@@ -299,20 +326,7 @@ app.get("/sitekey.js", async (req, res) => {
 });
 
 app.get("/filters/engine.bin", (req, res) => {
-	// isolation mode: site origins' service workers load the shell's copy
-	const origin = req.headers.origin;
-	if (origin && ISOLATION) {
-		try {
-			const { hostname } = new URL(origin);
-			if (hostname.endsWith("." + ISOLATION)) {
-				res.setHeader("Access-Control-Allow-Origin", origin);
-				res.setHeader("Access-Control-Allow-Credentials", "true");
-			}
-		} catch {
-			// ignore malformed Origin
-		}
-	}
-	res.setHeader("Vary", "Origin, Accept-Encoding");
+	res.vary("Accept-Encoding");
 	const engine = filters.engine;
 	if (!engine) return res.status(503).setHeader("Retry-After", "60").end();
 	res.setHeader("ETag", engine.etag);
@@ -333,11 +347,17 @@ app.get("/filters/status", (req, res) => {
 
 app.get("/api/settings", (req, res) => {
 	res.setHeader("Cache-Control", "no-store");
-	const settings = readSettings(req);
-	// a cookie it can't open (the older readable format, or an old key):
-	// overwrite it rather than leave it on the device
-	if (parseCookies(req.headers.cookie)[SETTINGS_COOKIE] && !storedSettings(req) && fromShell(req))
+	let settings = readSettings(req);
+	// The shell asks at every start. With no cookie it can open, store one
+	// (the settings from the old shared cookie, once), so there is always a
+	// cookie only the shell could have set, and drop the old one.
+	if (!storedSettings(req) && fromShell(req)) {
+		const legacy = req.secure && storedSettings(req, LEGACY_SETTINGS_COOKIE);
+		if (legacy) settings = cleanSettings(legacy);
 		writeSettings(req, res, settings);
+		if (req.secure && ISOLATION)
+			res.append("Set-Cookie", `${LEGACY_SETTINGS_COOKIE}=; Path=/; Domain=${ISOLATION}; Max-Age=0; Secure`);
+	}
 	res.json(settings);
 });
 
@@ -382,7 +402,12 @@ app.all("/scramjet/{*rest}", async (req, res) => {
 		if (limits.overQuota(key))
 			return res.status(429).type("text/plain").send("Daily traffic limit reached.");
 		try {
-			if (await serveMedia(req, res, (n) => limits.addBytes(key, n))) return;
+			// a stream that began under the limit stops when it crosses it
+			const count = (n) => {
+				limits.addBytes(key, n);
+				if (limits.overQuota(key)) res.destroy();
+			};
+			if (await serveMedia(req, res, count)) return;
 		} catch (err) {
 			console.warn("media:", err.message);
 			if (!res.headersSent) return res.status(502).end();

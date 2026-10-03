@@ -17,3 +17,10 @@ test("media fetches only public hosts on ports 80 and 443", async () => {
 	assert.equal(await statusFor("http://127.0.0.1/a.mp4"), 502);
 	assert.equal(await statusFor("http://[::ffff:10.0.0.1]/a.mp4"), 502);
 });
+
+test("media isn't fetched for scripts or workers", async () => {
+	for (const dest of ["script", "serviceworker", "worker", "document"]) {
+		const req = { method: "GET", originalUrl: encodeUrl("https://example.com/a.js"), headers: { "sec-fetch-dest": dest } };
+		assert.equal(await serveMedia(req, {}), false);
+	}
+});
