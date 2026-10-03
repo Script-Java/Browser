@@ -17,25 +17,57 @@ function hook(win) {
 	if (!client) return;
 	noPopups(client, win);
 	pageShield(client, win);
+	hookFrames(win);
+}
+
+/**
+ * Same-origin frames a page writes itself (about:blank, srcdoc) get
+ * Scramjet's hooks from their parent but never load this script. Scramjet
+ * hooks such a frame when the page first reaches into it, through
+ * contentWindow or contentDocument; ours go on at the same moment, before
+ * the page can write anything into the frame.
+ * ponytail: a frame reached only through window.frames[i] is caught at its load event instead.
+ * @param {Window} win
+ */
+function hookFrames(win) {
+	if (win.__biosFrames) return;
+	Object.defineProperty(win, "__biosFrames", { value: true });
+	for (const name of ["HTMLIFrameElement", "HTMLFrameElement"]) {
+		const proto = win[name]?.prototype;
+		if (!proto) continue;
+		for (const prop of ["contentWindow", "contentDocument"]) {
+			const desc = Object.getOwnPropertyDescriptor(proto, prop);
+			if (!desc?.get || !desc.configurable) continue;
+			Object.defineProperty(proto, prop, {
+				...desc,
+				get() {
+					const value = desc.get.call(this);
+					try {
+						const child = prop === "contentWindow" ? value : value?.defaultView;
+						if (child && !child.__noPopups) hook(child);
+					} catch {
+						// cross-origin frame
+					}
+					return value;
+				},
+			});
+		}
+	}
+	win.addEventListener(
+		"load",
+		(event) => {
+			if (event.target?.localName !== "iframe") return;
+			try {
+				hook(event.target.contentWindow);
+			} catch {
+				// cross-origin frame
+			}
+		},
+		true
+	);
 }
 
 hook(self);
-
-// Same-origin frames a page writes itself (about:blank, srcdoc) get
-// Scramjet's hooks from their parent but never load this script.
-// ponytail: catches them once loaded; one that pops up before its load event slips through.
-self.addEventListener(
-	"load",
-	(event) => {
-		if (event.target?.localName !== "iframe") return;
-		try {
-			hook(event.target.contentWindow);
-		} catch {
-			// cross-origin frame
-		}
-	},
-	true
-);
 
 /**
  * Origin of the app shell. In isolation mode proxied pages live on

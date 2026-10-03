@@ -17,7 +17,6 @@ const FILTER_CACHE = "bios-filters";
 const ENGINE_RECHECK_MS = 6 * 3_600_000;
 const ENGINE_WAIT_MS = 4000;
 const SETTINGS_TTL_MS = 30_000;
-const THREAT_TTL_MS = 10 * 60_000;
 const API = PREFIX + "__bios/";
 
 // Scramjet's config. The service worker stores it itself (Scramjet normally
@@ -28,6 +27,12 @@ const SCRAMJET_CONFIG = {
 		wasm: "/scram/scramjet.wasm.wasm",
 		all: "/scram/scramjet.all.js",
 		sync: "/scram/scramjet.sync.js",
+	},
+	flags: {
+		// On, every rewritten script carries its source map as a giant array
+		// literal the page has to parse; YouTube's froze the tab. It only
+		// serves Function.prototype.toString showing the original code.
+		sourcemaps: false,
 	},
 };
 
@@ -163,9 +168,8 @@ export function createShield(scramjet, configStored) {
 	// "Clear all site data" deleted Scramjet's cookie database; forget the
 	// copy this worker keeps in memory too.
 	self.addEventListener("message", (event) => {
+		if (event.origin !== location.origin) return;
 		if (event.data?.bios === "wipe") scramjet.cookieStore.load("{}");
-		// the shell saved new settings: fetch them on the next request
-		if (event.data?.bios === "settings") settingsAt = 0;
 	});
 
 	let engine = null;
@@ -173,7 +177,6 @@ export function createShield(scramjet, configStored) {
 	let settings = null;
 	let settingsAt = 0;
 	let settingsLoad = null;
-	const threatCache = new Map(); // host -> { verdict, at }
 	const bypassed = new Set(); // hosts the user chose to open despite a warning
 	const allowOnce = new Set(); // proxied URLs to load once without ad blocking
 	const inlineOnce = new Set(); // proxied URLs to load in this origin once
@@ -281,14 +284,10 @@ export function createShield(scramjet, configStored) {
 		return settings;
 	}
 
-	// One round trip per page load: fresh settings plus the threat verdict.
+	// One round trip per page load: fresh settings plus the threat verdict,
+	// so a switch flipped in the shield menu applies to the very next page
+	// (on every site origin in isolation mode, too).
 	async function checkNavigation(hostname) {
-		const cached = threatCache.get(hostname);
-		if (cached && settings && Date.now() - cached.at < THREAT_TTL_MS) {
-			// stale settings would undo a switch the person just flipped
-			await getSettings();
-			return cached.verdict;
-		}
 		try {
 			const res = await fetch("/api/nav", {
 				cache: "no-store",
@@ -297,8 +296,6 @@ export function createShield(scramjet, configStored) {
 			if (!res.ok) throw new Error(`HTTP ${res.status}`);
 			const data = await res.json();
 			applySettings(data.settings);
-			threatCache.set(hostname, { verdict: data.threat, at: Date.now() });
-			if (threatCache.size > 2000) threatCache.clear();
 			return data.threat;
 		} catch {
 			await getSettings();

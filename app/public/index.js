@@ -103,6 +103,8 @@ function readList(name) {
 // Scramjet's address for a site URL (src/codec.js encodeUrl).
 function proxyPath(url) {
 	const target = new URL(url);
+	if (target.protocol !== "http:" && target.protocol !== "https:")
+		throw new Error("Only http and https addresses can be opened.");
 	const hash = target.hash.slice(1);
 	target.hash = "";
 	return (
@@ -351,7 +353,8 @@ document.getElementById("reload").addEventListener("click", () => {
 		frame.contentWindow.location.reload();
 	} catch {
 		// cross-origin (isolation mode): ask the page to reload itself
-		frame.contentWindow.postMessage({ bios: "cmd", cmd: "reload" }, "*");
+		if (tabSiteOrigin)
+			frame.contentWindow.postMessage({ bios: "cmd", cmd: "reload" }, tabSiteOrigin);
 	}
 });
 
@@ -377,11 +380,6 @@ async function saveSettings(next) {
 	});
 	if (!res.ok) throw new Error(`Couldn't save settings (${res.status})`);
 	settings = await res.json();
-	// the proxy's service worker keeps a copy for 30s; have it fetch these
-	navigator.serviceWorker
-		?.getRegistration("/scramjet/")
-		.then((reg) => reg?.active?.postMessage({ bios: "settings" }))
-		.catch(() => {});
 	renderSheet();
 }
 
@@ -569,7 +567,7 @@ async function clearAllSiteData() {
 	await new Promise((resolve) => setTimeout(resolve, 50));
 	await clearStorageHere();
 	if (config.isolation) {
-		const keys = readList("bios:origins");
+		const keys = readList("bios:origins").filter((key) => /^s[a-z2-7]{25}$/.test(key));
 		await Promise.all(keys.map((key) => clearOrigin(originFor(key))));
 		localStorage.setItem("bios:origins", "[]");
 	}

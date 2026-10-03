@@ -8,6 +8,12 @@ updates:
     groups:
       minor-and-patch:
         update-types: [minor, patch]
+    # The proxy itself (Scramjet, its transport, wisp): new major versions
+    # change their APIs and only show breakage in a real browser, which CI
+    # doesn't run. Upgrade these by hand on a branch.
+    ignore:
+      - dependency-name: "@mercuryworkshop/*"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: github-actions
     directory: /

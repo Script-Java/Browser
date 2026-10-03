@@ -142,7 +142,7 @@ Limits:
 
 ## What "no popups" covers
 
-Most of this lives in `app/src/client/page.js` (`noPopups`). It runs inside every proxied page and frame. Frames a page writes itself (`about:blank`, `srcdoc`) get it once they finish loading, so one that opens a popup before then isn't caught.
+Most of this lives in `app/src/client/page.js` (`noPopups`). It runs inside every proxied page and frame. Frames a page writes itself (`about:blank`, `srcdoc`) get it the moment the page reaches into them, before anything is written inside.
 
 | Would normally… | Now |
 | --- | --- |
@@ -163,7 +163,7 @@ Not covered: the iOS keyboard and its autofill bar, and file downloads served as
 Scramjet is used unmodified from npm. Everything app-specific is around it:
 
 - `app/public/scramjet-sw.js`: the service worker (scope `/scramjet/`). `shield.js` checks each request before Scramjet fetches it, and after Scramjet rewrites an HTML page it adds `/bios/page.js`, the page's hiding rules and its scriptlets.
-- `app/src/sw/shield.js`: the worker's blocker. It also stores Scramjet's config itself (Scramjet normally expects a page to post it), clears Scramjet's in-memory cookies on "Clear all site data", and when the connection to the server has died (a deploy, a network change) asks an open page to reconnect and retries the request once.
+- `app/src/sw/shield.js`: the worker's blocker. It asks the server for fresh settings on every page load, so a switch in the shield menu applies to the next page. It also stores Scramjet's config itself (Scramjet normally expects a page to post it) with source maps off (with them on, YouTube's scripts froze the tab), clears Scramjet's in-memory cookies on "Clear all site data", and when the connection to the server has died (a deploy, a network change) asks an open page to reconnect and retries the request once.
 - `app/src/client/page.js`: runs in every proxied page after Scramjet has hooked it: the no-popup layer, generic ad hiding, video-ad skipping, and reporting the address to the shell. It isn't rewritten by Scramjet, so it reads the site's address from Scramjet's client. Scramjet lets `mailto:` through unproxied, so this drops those navigations.
 - `app/src/codec.js`: proxied URLs are `/scramjet/<encodeURIComponent(url)>` (Scramjet's default codec); the server's media fallback and the service worker decode them the same way.
 - `app/public/register-sw.js`: registers the worker, waits for it to activate (`serviceWorker.ready` never settles because the shell is outside the worker's scope), removes the old Ultraviolet worker, and answers the worker's reconnect requests.

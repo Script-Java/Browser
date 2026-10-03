@@ -71,7 +71,8 @@ async function setupTransport(fresh = false) {
 // asks one open page of this origin to connect again (see shield.js).
 if (navigator.serviceWorker && typeof BareMux !== "undefined") {
 	navigator.serviceWorker.addEventListener("message", (event) => {
-		if (event.data?.bios !== "reconnect") return;
+		if (event.origin !== location.origin || event.data?.bios !== "reconnect")
+			return;
 		setupTransport(true)
 			.catch((err) => console.warn("reconnect:", err))
 			.finally(() => event.ports[0]?.postMessage("done"));
