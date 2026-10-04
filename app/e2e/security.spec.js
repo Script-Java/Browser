@@ -207,6 +207,15 @@ test("the new tab's search bar takes a click, text and Enter", async ({ app }) =
 	await app.waitForFunction(() => active.url === "https://example.com/" && !active.loading);
 });
 
+test("Windows browsers are offered the desktop app; phones aren't", async ({ app, isMobile }) => {
+	const link = app.locator("#get-app a");
+	if (isMobile) return expect(link).toBeHidden();
+	// Playwright's Chromium is Windows here, Linux in CI
+	test.skip(!/Windows/.test(await app.evaluate(() => navigator.userAgent)), "Windows only");
+	await expect(link).toBeVisible();
+	expect(await link.getAttribute("href")).toMatch(/releases\/latest\/download\/Badger-Setup\.exe$/);
+});
+
 test("HTTPS-Only opens the secure version of a site", async ({ app }) => {
 	await open(app, "http://example.com/");
 	await app.waitForFunction(() => active.url === "https://example.com/");

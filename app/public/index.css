@@ -557,6 +557,23 @@ body:not(.browsing) #frames {
 	text-align: center;
 }
 
+#get-app {
+	margin: 14px 0 0;
+	font-size: 12.5px;
+	text-align: center;
+}
+
+#get-app a {
+	color: var(--ink);
+	font-weight: 500;
+}
+
+#get-app small {
+	display: block;
+	margin-top: 4px;
+	color: var(--muted);
+}
+
 #stats b {
 	color: var(--ink);
 	font: 500 12.5px var(--mono);
