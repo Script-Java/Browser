@@ -40,6 +40,8 @@ test("a phone gets a bottom bar and a tab list instead of the tab strip", async 
 	await expect(app.locator("#tabstrip")).toBeHidden();
 	await open(app, "https://example.com/");
 	await app.click("#dock #dock-new");
+	// the count jumps, so a new tab doesn't open unseen
+	expect(await app.evaluate(() => $("tab-count").getAnimations().length)).toBe(1);
 	await app.click("#dock #tabs-btn");
 	await expect(app.locator("#tab-count")).toHaveText("2");
 	await app.click("#tab-list .link >> nth=0");

@@ -1132,6 +1132,79 @@ body:not(.browsing) #frames {
 	}
 }
 
+/* ------------------------------------------------------------ motion */
+/* Enough to show that a tap did something (index.js adds a few more). */
+
+@media (prefers-reduced-motion: no-preference) {
+	.icon-btn {
+		transition: transform 0.1s, background 0.15s;
+	}
+
+	.icon-btn:not(:disabled):active {
+		transform: scale(0.88);
+	}
+
+	/* reload keeps turning for as long as the page is loading */
+	body.loading #reload svg {
+		animation: spin 0.8s linear infinite;
+	}
+
+	/* a sheet slides up (a dropdown, on wide screens, drops in) as its backdrop fades in */
+	.panel {
+		animation: fade 0.18s ease-out;
+	}
+
+	.panel-card {
+		animation: sheet-up 0.22s ease-out;
+	}
+
+	/* switching tabs: the page that comes forward fades in */
+	#frames iframe {
+		animation: fade 0.15s ease-out;
+	}
+
+	#progress {
+		transition: opacity 0.3s;
+	}
+
+	@media (min-width: 720px) {
+		.panel-card {
+			animation-name: drop-in;
+		}
+	}
+}
+
+/* the passphrase screen covers the app at once: no see-through moment */
+#vault.panel {
+	animation: none;
+}
+
+@keyframes spin {
+	to {
+		transform: rotate(360deg);
+	}
+}
+
+@keyframes fade {
+	from {
+		opacity: 0;
+	}
+}
+
+@keyframes sheet-up {
+	from {
+		transform: translateY(40px);
+		opacity: 0;
+	}
+}
+
+@keyframes drop-in {
+	from {
+		transform: translateY(-8px);
+		opacity: 0;
+	}
+}
+
 /* in the background: nothing for the phone's app switcher preview to show */
 body.away > * {
 	visibility: hidden;

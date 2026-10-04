@@ -53,6 +53,17 @@ new ResizeObserver(() =>
 	document.documentElement.style.setProperty("--chrome-h", chromeEl.offsetHeight + "px")
 ).observe(chromeEl);
 
+// Small motions that show a tap did something. None for people who've asked
+// their device for less motion.
+const calm = matchMedia("(prefers-reduced-motion: reduce)");
+function pulse(el, frames, duration = 250) {
+	if (el && !calm.matches) el.animate(frames, { duration, easing: "ease-out" });
+}
+const RISE = [
+	{ opacity: 0, transform: "translateY(8px)" },
+	{ opacity: 1, transform: "none" },
+];
+
 const isMac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
 // iPadOS calls itself a Mac, but has a touch screen
 const MOBILE =
@@ -322,7 +333,11 @@ function createTab(url = "", { after = null, lazy = false, title = "", select = 
 	if (select) selectTab(tab);
 	else renderTabs();
 	if (url && !lazy) go(url, tab);
-	else if (!url && select) homeInput.focus({ preventScroll: true });
+	else if (!url && select) {
+		homeInput.focus({ preventScroll: true });
+		pulse($("newtab"), RISE);
+	}
+	if (!lazy) pulse($("tabs").children[at], RISE);
 	return tab;
 }
 
@@ -448,7 +463,11 @@ function renderTabs() {
 // Phones have no room for a tab strip: a button in the bottom bar shows how
 // many tabs are open, and lists them.
 function renderSwitcher() {
-	$("tab-count").textContent = String(tabs.length);
+	const count = $("tab-count");
+	if (count.textContent !== String(tabs.length)) {
+		count.textContent = String(tabs.length);
+		pulse(count, [{ transform: "scale(1.5)" }, { transform: "none" }], 350);
+	}
 	$("tabs-btn").setAttribute("aria-label", `Tabs: ${tabs.length} open`);
 	$("tab-list").replaceChildren(
 		...tabs.map((tab) => {
@@ -803,6 +822,9 @@ function tabCommand(cmd, tab = active) {
 function reload(tab = active) {
 	if (!tab?.url) return;
 	setLoading(tab, true);
+	// one full turn, even when the page comes back at once
+	if (tab === active)
+		pulse($("reload").firstElementChild, [{ transform: "rotate(0)" }, { transform: "rotate(360deg)" }], 600);
 	const win = tab.frame.contentWindow;
 	try {
 		win.location.reload();
