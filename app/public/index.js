@@ -636,15 +636,16 @@ async function go(input, tab = active, record = true) {
 	}
 }
 
-// Shared mode only: the frame is same-origin, so read its address directly.
-function frameLocation(tab) {
-	if (isolated) return "";
+// The site address a proxied address stands for (the reverse of proxyPath), or "".
+function siteUrl(href) {
+	const url = BiosSiteKey.decodeUrl(href);
+	if (!url) return "";
 	try {
-		const client = tab.frame.contentWindow[Symbol.for("scramjet client global")];
-		return client ? client.url.href : "";
+		url.hash = decodeURIComponent(new URL(href).hash.slice(1));
 	} catch {
-		return "";
+		// without its #fragment, then
 	}
+	return url.href;
 }
 
 function showAddress() {
@@ -698,11 +699,27 @@ function updateTab(tab, url, title) {
 	if (tab === active) showAddress();
 }
 
+// Shared mode only: the frame is same-origin, so read its address directly.
+// (In isolation mode the site's anchor frame does, see the "docs" message.)
 function syncAddress(tab) {
 	// while a new page loads, the frame still holds the old one
-	if (tab.landing) return;
-	const url = frameLocation(tab);
-	if (url && url !== tab.url) updateTab(tab, url, tab.title);
+	if (isolated || tab.landing) return;
+	let url;
+	let title = tab.title;
+	try {
+		const win = tab.frame.contentWindow;
+		const client = win[Symbol.for("scramjet client global")];
+		if (client) url = client.url.href;
+		else {
+			// no Scramjet in it (a JSON file, an image, a warning page): its
+			// proxied address still says where it is, and it has no title
+			url = siteUrl(win.location.href);
+			title = "";
+		}
+	} catch {
+		return;
+	}
+	if (url && url !== tab.url) updateTab(tab, url, title);
 }
 
 const tabFor = (source) => tabs.find((t) => t.frame.contentWindow === source);
@@ -752,6 +769,26 @@ async function onFrameMessage(event) {
 	}
 
 	if (data?.bios === "open") return openFromPage(event);
+
+	// Isolation mode: a site's anchor frame saying where the pages of its
+	// site are that can't say so themselves (a JSON file, an image, a PDF, a
+	// warning page). Which tab a frame is, the shell looks up itself; the
+	// address must belong to the anchor's site, as a page's own report must.
+	if (data?.bios === "docs") {
+		const key = SITE_ORIGIN?.exec(event.origin)?.[1];
+		if (!isolated || !key || anchors.get(event.origin)?.frame.contentWindow !== event.source) return;
+		for (const doc of Array.isArray(data.docs) ? data.docs.slice(0, MAX_TABS) : []) {
+			const tab = tabFor(window.frames[doc?.index]);
+			// while the shell loads a page into the tab, the old one is still there
+			if (!tab || tab.loading || tab.frame.name !== doc.name) continue;
+			const url = String(doc.href).startsWith(event.origin + "/scramjet/") ? siteUrl(doc.href) : "";
+			if (!url || url === tab.url) continue;
+			if ((await BiosSiteKey.siteKey(new URL(url).hostname)) !== key) continue;
+			tab.siteOrigin = event.origin;
+			updateTab(tab, url, "");
+		}
+		return;
+	}
 
 	const tab = tabFor(event.source);
 	if (!tab) return;

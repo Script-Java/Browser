@@ -4,6 +4,9 @@
 
 import { getDomain } from "tldts";
 
+// for the shell, which reads a tab's address back out of its proxied one
+export { decodeUrl } from "../codec.js";
+
 /**
  * @param {string} hostname
  * @returns {string}

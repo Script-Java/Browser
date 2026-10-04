@@ -382,3 +382,10 @@ function loadFont(frame) {
 		}
 	}, String(Date.now()) + Math.random());
 }
+
+test("the address bar follows a tab to a page that isn't HTML", async ({ app }) => {
+	const frame = await open(app, testPage('<title>links</title><a id="json" href="https://httpbingo.org/get?x=1">data</a>'));
+	await frame.evaluate(() => document.getElementById("json").click());
+	await app.waitForFunction(() => active.url === "https://httpbingo.org/get?x=1" && !active.title);
+	await expect(app.locator("#bar-input")).toHaveValue("httpbingo.org");
+});

@@ -67,3 +67,13 @@ test("a page can read window.top and window.parent on an isolated site", async (
 	);
 	expect(await frame.title()).toBe("TOP");
 });
+
+test("the address bar follows a tab to a page that isn't HTML (isolated)", async ({ page }) => {
+	await page.goto(ISOLATED_URL + "/");
+	await page.waitForFunction(() => typeof go === "function" && !!active, null, { timeout: 60_000 });
+	const frame = await open(page, testPage('<title>links</title><a id="json" href="https://httpbingo.org/get?x=1">data</a>'));
+	// a JSON file has no page script to tell the app where the tab went
+	await frame.evaluate(() => document.getElementById("json").click());
+	await page.waitForFunction(() => active.url === "https://httpbingo.org/get?x=1" && !active.title);
+	await expect(page.locator("#bar-input")).toHaveValue("httpbingo.org");
+});

@@ -21,6 +21,26 @@
 			});
 			navigator.serviceWorker.startMessages();
 
+			// A page of this site without the page script (a JSON file, an
+			// image, a PDF, a warning page) can't tell the shell where its tab
+			// is, and the shell can't read another origin's address. This frame
+			// can: it shares the origin. Reading throws for other sites' frames.
+			// The shell works out which tab a frame is; `name` only lets it
+			// notice that the frames moved in between.
+			setInterval(() => {
+				const docs = [];
+				for (let index = 0; index < parent.length; index++) {
+					try {
+						const win = parent[index];
+						const href = win.location.href;
+						if (win !== window && !win.__biosShield) docs.push({ index, name: win.name, href });
+					} catch {
+						// another site's frame
+					}
+				}
+				if (docs.length) parent.postMessage({ bios: "docs", docs }, "*");
+			}, 500);
+
 			registerSW()
 				.then(setupTransport)
 				.then(
