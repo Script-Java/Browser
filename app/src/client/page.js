@@ -996,8 +996,7 @@ function reportToShell(client, win, setRepeat, whenReady) {
 		if (event.source !== win.parent) return;
 		const data = event.data;
 		if (!data || data.bios !== "cmd") return;
-		if (data.cmd === "reload") win.location.reload();
-		else if (data.cmd === "back") win.history.back();
+		if (data.cmd === "back") win.history.back();
 		else if (data.cmd === "forward") win.history.forward();
 	});
 }

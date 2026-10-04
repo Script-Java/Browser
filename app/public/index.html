@@ -65,7 +65,6 @@
 					<input
 						id="bar-input"
 						type="text"
-						inputmode="url"
 						enterkeyhint="go"
 						autocapitalize="off"
 						autocorrect="off"
@@ -110,7 +109,6 @@
 				<input
 					id="home-input"
 					type="text"
-					inputmode="url"
 					enterkeyhint="go"
 					autocapitalize="off"
 					autocorrect="off"
@@ -130,6 +128,16 @@
 		</main>
 
 		<div id="frames"></div>
+
+		<!-- phones: the controls in reach of a thumb (index.js moves back, forward and the menu in) -->
+		<nav id="dock" aria-label="Browser controls">
+			<button id="dock-new" class="icon-btn" type="button" aria-label="New tab">
+				<svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" /></svg>
+			</button>
+			<button id="tabs-btn" class="icon-btn" type="button" aria-label="Tabs">
+				<span id="tab-count">1</span>
+			</button>
+		</nav>
 
 		<div id="sheet" class="panel" hidden>
 			<div class="panel-card" role="dialog" aria-modal="true" aria-labelledby="sheet-site">
@@ -237,6 +245,17 @@
 				<ul id="history-list" class="links"></ul>
 				<p id="history-empty" class="note" hidden>No history yet.</p>
 				<button id="history-clear" class="wide" type="button">Clear history</button>
+			</div>
+		</div>
+
+		<div id="switcher" class="panel" hidden>
+			<div class="panel-card" role="dialog" aria-modal="true" aria-labelledby="switcher-title">
+				<div class="panel-head">
+					<strong id="switcher-title" class="panel-title">Tabs</strong>
+					<button id="switcher-close" class="panel-close" type="button">Done</button>
+				</div>
+				<ul id="tab-list" class="links"></ul>
+				<button id="switcher-new" class="wide" type="button">New tab</button>
 			</div>
 		</div>
 

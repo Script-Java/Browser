@@ -43,6 +43,7 @@ const star = $("star");
 const error = $("error");
 const sheet = $("sheet");
 const library = $("library");
+const switcher = $("switcher");
 const suggestEl = $("suggest");
 
 // The page area starts below the chrome, whose height changes with the
@@ -55,7 +56,9 @@ const isMac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
 // iPadOS calls itself a Mac, but has a touch screen
 const MOBILE =
 	/iPhone|iPad|iPod|Android/.test(navigator.userAgent) ||
-	(navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+	(navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1) ||
+	// Android tablets ask for desktop sites, with a desktop's user agent
+	matchMedia("(hover: none) and (pointer: coarse)").matches;
 // The desktop app's installer, offered to Windows browsers. Not inside the
 // app itself, which is Chromium with no browser's brand of its own.
 // ponytail: plain Chromium builds look like the app and miss the link.
@@ -427,6 +430,7 @@ function renderTabs() {
 		})
 	);
 	$("tabs").querySelector('[aria-selected="true"]')?.scrollIntoView({ block: "nearest", inline: "nearest" });
+	renderSwitcher();
 	document.title = active?.url ? tabLabel(active) : "Badger";
 
 	const canSplitNow = canSplit();
@@ -439,6 +443,76 @@ function renderTabs() {
 			: "Open another page in a tab to use split view";
 	saveTabs();
 }
+
+// Phones have no room for a tab strip: a button in the bottom bar shows how
+// many tabs are open, and lists them.
+function renderSwitcher() {
+	$("tab-count").textContent = String(tabs.length);
+	$("tabs-btn").setAttribute("aria-label", `Tabs: ${tabs.length} open`);
+	$("tab-list").replaceChildren(
+		...tabs.map((tab) => {
+			const li = document.createElement("li");
+			const open = document.createElement("button");
+			open.type = "button";
+			open.className = "link";
+			if (tab === active) open.setAttribute("aria-current", "true");
+			const text = document.createElement("span");
+			text.className = "text";
+			const title = document.createElement("span");
+			title.textContent = tabLabel(tab);
+			const small = document.createElement("small");
+			small.textContent = tab.url ? displayHost(tab.url) : "";
+			text.append(title, small);
+			open.append(tab.url ? markFor(tab.url) : badgerMark(), text);
+			open.addEventListener("click", () => {
+				switcher.hidden = true;
+				selectTab(tab);
+			});
+			const close = document.createElement("button");
+			close.type = "button";
+			close.className = "tab-close";
+			close.setAttribute("aria-label", `Close ${tabLabel(tab)}`);
+			close.innerHTML = '<svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>';
+			close.addEventListener("click", () => closeTab(tab));
+			li.append(open, close);
+			return li;
+		})
+	);
+}
+
+$("tabs-btn").addEventListener("click", () => {
+	switcher.hidden = false;
+	$("tab-list").querySelector("[aria-current]")?.scrollIntoView({ block: "nearest" });
+});
+$("switcher-close").addEventListener("click", () => {
+	switcher.hidden = true;
+});
+for (const id of ["dock-new", "switcher-new"])
+	$(id).addEventListener("click", () => {
+		switcher.hidden = true;
+		createTab();
+	});
+
+// On a phone, back, forward and the menu move to the bar at the bottom, in
+// reach of a thumb; on a wider screen they go back to the toolbar.
+const phone = matchMedia("(max-width: 719px)");
+const dock = document.getElementById("dock");
+const docked = ["back", "forward", "menu-btn"].map((id) => {
+	const el = document.getElementById(id);
+	return { el, home: el.parentNode, next: el.nextSibling };
+});
+
+function placeControls() {
+	if (phone.matches) {
+		dock.prepend(docked[0].el, docked[1].el);
+		dock.append(docked[2].el);
+	} else {
+		for (const { el, home, next } of docked) home.insertBefore(el, next);
+		switcher.hidden = true;
+	}
+}
+phone.addEventListener("change", placeControls);
+placeControls();
 
 // Open tabs are kept on this device so they come back when the app reopens.
 const TABS = "bios:tabs";
@@ -562,6 +636,7 @@ function showAddress() {
 	star.hidden = !url;
 	$("back").disabled = !active?.back.length;
 	$("forward").disabled = !active?.fwd.length;
+	$("reload").disabled = !url;
 	const marked = isBookmarked(url);
 	star.setAttribute("aria-pressed", String(marked));
 	star.setAttribute("aria-label", marked ? "Remove bookmark" : "Bookmark this page");
@@ -706,19 +781,47 @@ setInterval(() => {
 	if (active) syncAddress(active);
 }, 400);
 
-// Back, forward and reload act on the tab's own page. In isolation mode the
-// frame is cross-origin, so the page does it when the shell asks.
+// Back and forward act on the tab's own page. In isolation mode the frame is
+// cross-origin, so the page does it when the shell asks.
 function tabCommand(cmd, tab = active) {
 	if (!tab?.url) return;
-	if (cmd === "reload") setLoading(tab, true);
 	try {
 		const win = tab.frame.contentWindow;
 		if (cmd === "back") win.history.back();
-		else if (cmd === "forward") win.history.forward();
-		else win.location.reload();
+		else win.history.forward();
 	} catch {
 		if (tab.siteOrigin)
 			tab.frame.contentWindow.postMessage({ bios: "cmd", cmd }, tab.siteOrigin);
+	}
+}
+
+// In isolation mode the frame is cross-origin and can't be told to reload,
+// and a page that is stuck or never loaded wouldn't hear the shell ask. The
+// shell loads the tab's address again instead, in place of the page that's
+// there, so the tab's history gains no step.
+function reload(tab = active) {
+	if (!tab?.url) return;
+	setLoading(tab, true);
+	const win = tab.frame.contentWindow;
+	try {
+		win.location.reload();
+	} catch {
+		frameUrlFor(tab.url, tab)
+			.then((src) => {
+				const load = () => {
+					tab.landing = true;
+					setLoading(tab, true);
+					win.location.replace(src);
+				};
+				if (!tab.url.includes("#")) return load();
+				// the same address with a # would only scroll the page: empty the frame first
+				tab.frame.addEventListener("load", load, { once: true });
+				win.location.replace("about:blank");
+			})
+			.catch((err) => {
+				setLoading(tab, false);
+				error.textContent = err.message || String(err);
+			});
 	}
 }
 
@@ -744,7 +847,7 @@ function step(dir, tab = active) {
 
 $("back").addEventListener("click", () => step(-1));
 $("forward").addEventListener("click", () => step(1));
-$("reload").addEventListener("click", () => tabCommand("reload"));
+$("reload").addEventListener("click", () => reload());
 $("new-tab").addEventListener("click", () => createTab());
 
 homeForm.addEventListener("submit", (event) => {
@@ -771,7 +874,7 @@ barInput.addEventListener("blur", showAddress);
 // Cmd/Ctrl+K or +L: jump to the address bar (or the new tab's search box).
 document.addEventListener("keydown", (event) => {
 	if (event.key === "Escape") {
-		sheet.hidden = library.hidden = true;
+		sheet.hidden = library.hidden = switcher.hidden = true;
 		hideSuggest();
 		return;
 	}
@@ -793,7 +896,7 @@ const COMMANDS = [
 	{ name: "Remove bookmark", when: () => isBookmarked(active?.url), run: toggleBookmark },
 	{ name: "Split view", when: () => !split && canSplit(), run: toggleSplit },
 	{ name: "Close split view", when: () => !!split, run: toggleSplit },
-	{ name: "Reload page", when: () => !!active?.url, run: () => tabCommand("reload") },
+	{ name: "Reload page", when: () => !!active?.url, run: () => reload() },
 	{ name: "New identity", run: () => newIdentity() },
 	// opens Settings on the button rather than wiping from a typo
 	{
@@ -1028,7 +1131,7 @@ $("menu-btn").addEventListener("click", openSheet);
 $("sheet-close").addEventListener("click", () => {
 	sheet.hidden = true;
 });
-for (const panel of [sheet, library])
+for (const panel of [sheet, library, switcher])
 	panel.addEventListener("click", (event) => {
 		if (event.target === panel) panel.hidden = true;
 	});
@@ -1040,7 +1143,7 @@ for (const input of sheet.querySelectorAll("[data-setting]")) {
 				...settings,
 				[input.dataset.setting]: input.checked,
 			});
-			if (input.dataset.setting !== "wipe") tabCommand("reload");
+			if (input.dataset.setting !== "wipe") reload();
 		} catch (err) {
 			input.checked = !input.checked;
 			$("filter-status").textContent = err.message;
@@ -1058,7 +1161,7 @@ const levelSelect = $("security-level");
 levelSelect.addEventListener("change", async () => {
 	try {
 		await saveSettings({ ...settings, level: levelSelect.value });
-		tabCommand("reload");
+		reload();
 	} catch (err) {
 		levelSelect.value = settings.level;
 		$("filter-status").textContent = err.message;
@@ -1083,7 +1186,7 @@ $("site-toggle").addEventListener("change", async (event) => {
 	else allow.add(site);
 	try {
 		await saveSettings({ ...settings, allow: [...allow] });
-		tabCommand("reload");
+		reload();
 	} catch (err) {
 		event.target.checked = !event.target.checked;
 		$("filter-status").textContent = err.message;

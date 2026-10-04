@@ -237,7 +237,7 @@ Most of this lives in `app/src/client/page.js` (`noPopups`). It runs inside ever
 
 The shell's only outbound link is the desktop app's installer, offered on the new tab page to Windows browsers (it downloads from this repo's GitHub Releases, directly rather than through the proxy). It draws its own browser chrome, because standalone mode has none:
 
-- **Tabs**: open, close (× or middle click), switch (click or arrow keys). Open tabs come back when the app reopens; background ones load when you switch to them.
+- **Tabs**: open, close (× or middle click), switch (click or arrow keys). Open tabs come back when the app reopens; background ones load when you switch to them. On a phone there's no tab strip: back, forward, new tab, the tab list and the menu sit in a bar at the bottom.
 - **Address bar**: suggestions from bookmarks and history as you type, and commands (New tab, Close tab, History, Settings, Bookmark this page, Split view, Reload page, Clear history and site data). Arrow keys and Enter pick one; plain Enter always searches or opens what you typed. Ctrl/⌘+K or +L jumps to it.
 - **Back and forward**: with one tab open they use the page's own history, so it comes back where it was scrolled. With more, the shell keeps each tab's history and reloads the address, because tab frames share one session history and the page's own "back" could move a different tab.
 - **Bookmarks**: the star in the address bar, the bookmarks bar, and shortcuts on the new tab page.

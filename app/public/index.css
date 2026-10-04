@@ -38,6 +38,18 @@ body {
 body.shell {
 	overflow: hidden;
 	overscroll-behavior: none;
+	/* an app, not a document: no double-tap zoom, and a long press on a
+	   button doesn't select its label */
+	touch-action: manipulation;
+	-webkit-user-select: none;
+	user-select: none;
+	-webkit-touch-callout: none;
+}
+
+body.shell input,
+body.shell .note {
+	-webkit-user-select: text;
+	user-select: text;
 }
 
 button {
@@ -54,6 +66,7 @@ img {
 /* iOS zooms into inputs below 16px */
 input,
 select {
+	font-family: inherit;
 	font-size: 16px;
 }
 
@@ -1001,6 +1014,122 @@ body:not(.browsing) #frames {
 	text-overflow: ellipsis;
 	color: var(--muted);
 	font-size: 12.5px;
+}
+
+/* ------------------------------------------------------------ phones */
+
+#dock {
+	display: none;
+}
+
+.links .link[aria-current] .text span {
+	font-weight: 600;
+}
+
+/* a touch screen leaves :hover on the last thing tapped */
+@media (hover: none) {
+	.icon-btn:hover,
+	.tab:hover,
+	.tab-close:hover,
+	.tile:hover,
+	.bookmark:hover,
+	#site-btn:hover {
+		background: none;
+	}
+
+	.icon-btn:not(:disabled):active,
+	.tile:active {
+		background: rgba(0, 0, 0, 0.08);
+	}
+}
+
+/* No tab strip or bookmarks bar (bookmarks are the new tab page's shortcuts):
+   the address on top, and the controls in a bar at the bottom. The same width
+   at which the panels turn into bottom sheets. */
+@media (max-width: 719px) {
+	:root {
+		--tab-h: 0px;
+		--dock-h: 48px;
+	}
+
+	#tabstrip,
+	#bookmarks-bar {
+		display: none;
+	}
+
+	#toolbar {
+		padding: 0 max(8px, env(safe-area-inset-right)) 0 max(8px, env(safe-area-inset-left));
+	}
+
+	#reload {
+		order: 1;
+		width: 36px;
+		height: 36px;
+	}
+
+	#bar-form {
+		height: 36px;
+	}
+
+	/* under 16px, iOS zooms in on focus */
+	#bar-input {
+		font-size: 16px;
+	}
+
+	#dock {
+		position: fixed;
+		left: 0;
+		right: 0;
+		bottom: 0;
+		z-index: 5;
+		display: flex;
+		align-items: center;
+		justify-content: space-around;
+		height: calc(var(--dock-h) + var(--safe-bottom));
+		padding: 0 env(safe-area-inset-right, 0px) var(--safe-bottom) env(safe-area-inset-left, 0px);
+		background: var(--toolbar);
+		border-top: 1px solid var(--line);
+	}
+
+	#dock .icon-btn {
+		width: 44px;
+		height: 44px;
+	}
+
+	#dock svg {
+		width: 22px;
+		height: 22px;
+	}
+
+	#tab-count {
+		display: grid;
+		place-items: center;
+		min-width: 22px;
+		height: 22px;
+		padding: 0 3px;
+		border: 2px solid currentColor;
+		border-radius: 6px;
+		font: 700 11px/1 var(--mono);
+	}
+
+	#frames,
+	#newtab {
+		bottom: calc(var(--dock-h) + var(--safe-bottom));
+	}
+
+	#newtab {
+		padding-bottom: 24px;
+	}
+
+	.links .tab-close {
+		width: 44px;
+		height: 44px;
+	}
+
+	.links .tab-close svg {
+		width: 14px;
+		height: 14px;
+	}
 }
 
 /* in the background: nothing for the phone's app switcher preview to show */
