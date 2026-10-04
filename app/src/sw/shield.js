@@ -161,14 +161,24 @@ export function createShield(scramjet, configStored) {
 		})().finally(() => (reconnecting = null));
 		return reconnecting;
 	}
+	// Why the last request for a site address failed (handle() shows a page
+	// that couldn't be fetched what went wrong).
+	const failures = new Map();
 	const transportFetch = scramjet.client.fetch.bind(scramjet.client);
 	scramjet.client.fetch = async (url, init) => {
 		try {
-			return await transportFetch(url, init);
+			try {
+				return await transportFetch(url, init);
+			} catch (err) {
+				if (!DEAD_TRANSPORT.test(String(err?.message || err))) throw err;
+				await reconnect();
+				return await transportFetch(url, init);
+			}
 		} catch (err) {
-			if (!DEAD_TRANSPORT.test(String(err?.message || err))) throw err;
-			await reconnect();
-			return transportFetch(url, init);
+			// ponytail: forgets everything at 50; a page that failed just then gets Scramjet's own error page
+			if (failures.size > 50) failures.clear();
+			failures.set(String(url), String(err?.message || err));
+			throw err;
 		}
 	};
 
@@ -361,6 +371,20 @@ export function createShield(scramjet, configStored) {
 			go: "Open anyway",
 			action: "allow",
 		},
+		// The app's own TLS (epoxy, on the device) refused the site's
+		// certificate. No way past it: nothing can make epoxy accept one, and
+		// whoever sits in between could read and change everything.
+		cert: {
+			danger: true,
+			title: "This connection isn't private",
+			text: "Someone may be pretending to be this site, so it wasn't opened.",
+		},
+		unreachable: {
+			title: "Couldn't open this page",
+			text: "The site didn't answer. It may be down, the address may be wrong, or the connection dropped.",
+			go: "Try again",
+			action: "retry",
+		},
 		http: {
 			title: "This site isn't secure",
 			text: "It doesn't offer a secure (https) connection. What you see and send there passes through the app's server and the internet unencrypted, so others along the way could read or change it. Don't enter passwords or personal details.",
@@ -369,9 +393,21 @@ export function createShield(scramjet, configStored) {
 		},
 	};
 
-	function interstitial({ kind, host, url }) {
-		const { danger, title, text, go, action } = WARNINGS[kind];
-		const proceed = goUrl(action, url);
+	const CERT_PROBLEMS = [
+		// rustls's own names for them, nothing looser: a site's name may say "expired" too
+		[/InvalidCertificate\(Expired/, "Its security certificate has expired."],
+		[/InvalidCertificate\(NotValidYet/, "Its security certificate isn't valid yet."],
+		[/InvalidCertificate\(NotValidForName/, "Its security certificate belongs to a different address."],
+		[/InvalidCertificate\((UnknownIssuer|BadSignature)/, "Its security certificate isn't signed by an authority this app trusts."],
+		[/./, "Its security certificate isn't valid."],
+	];
+
+	// `why`: what the transport said when the page couldn't be fetched.
+	function interstitial({ kind, host, url, why }) {
+		const { danger, title, go, action } = WARNINGS[kind];
+		let { text } = WARNINGS[kind];
+		if (kind === "cert") text = CERT_PROBLEMS.find(([problem]) => problem.test(why))[1] + " " + text;
+		const proceed = action === "retry" ? url : action ? goUrl(action, url) : "";
 		return new Response(
 			`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${htmlEscape(title)}</title>
 <style>
@@ -387,12 +423,13 @@ body.sub{display:none}
 <p>${htmlEscape(text)}</p>
 <p><code>${htmlEscape(host)}</code></p>
 <button id="back" type="button">Go back</button>
-<button id="go" type="button">${htmlEscape(go)}</button>
+${proceed ? `<button id="go" type="button">${htmlEscape(go)}</button>` : ""}
 <script>
 ${WHERE}
 if (where() === "sub") document.body.className = "sub";
 document.getElementById("back").onclick = function () { history.length > 1 ? history.back() : location.replace("about:blank"); };
-document.getElementById("go").onclick = function () { location.replace(${scriptJson(proceed)}); };
+var go = document.getElementById("go");
+if (go) go.onclick = function () { location.replace(${scriptJson(proceed)}); };
 </script></body></html>`,
 			{ status: 200, headers: headers() }
 		);
@@ -855,7 +892,20 @@ function go(key) {
 				noScripts: noSiteScripts(target),
 			});
 		}
-		return scramjet.fetch(event);
+		failures.delete(target.href);
+		const response = await scramjet.fetch(event);
+		// Scramjet answers a page it couldn't fetch with an error page of its
+		// own, which the app's frame can't show (it lacks the header that
+		// allows it): the tab stayed blank. Say what went wrong instead.
+		const why = isPage && response.status === 500 ? failures.get(target.href) : undefined;
+		if (why === undefined) return response;
+		failures.delete(target.href);
+		return interstitial({
+			kind: /InvalidCertificate/.test(why) ? "cert" : "unreachable",
+			host: target.hostname,
+			url,
+			why,
+		});
 	}
 
 	// -------------------------------------------- after Scramjet rewrites HTML

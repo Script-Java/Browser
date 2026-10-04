@@ -389,3 +389,22 @@ test("the address bar follows a tab to a page that isn't HTML", async ({ app }) 
 	await app.waitForFunction(() => active.url === "https://httpbingo.org/get?x=1" && !active.title);
 	await expect(app.locator("#bar-input")).toHaveValue("httpbingo.org");
 });
+
+test("a site whose certificate is bad gets a warning with no way past it", async ({ app }) => {
+	for (const [host, problem] of [
+		["expired.badssl.com", "has expired"],
+		["wrong.host.badssl.com", "belongs to a different address"],
+		["self-signed.badssl.com", "isn't signed by an authority"],
+	]) {
+		const frame = await open(app, `https://${host}/`);
+		await expect(frame.locator("body"), host).toContainText(problem);
+		await expect(frame.locator("body"), host).toContainText("wasn't opened");
+		await expect(frame.locator("#go"), host).toHaveCount(0);
+	}
+});
+
+test("a site that can't be reached says so, and offers to try again", async ({ app }) => {
+	const frame = await open(app, "https://no-such-site.badger-test.invalid/");
+	await expect(frame.locator("h1")).toHaveText("Couldn't open this page");
+	await expect(frame.locator("#go")).toHaveText("Try again");
+});
