@@ -8,6 +8,11 @@
 // real address, and the site's address comes from the Scramjet client.
 
 const SCRAMJET = Symbol.for("scramjet client global");
+// The shell's window, for each tab window that ownParent has changed.
+const shells = new WeakMap();
+function parentOf(win) {
+	return shells.get(win) || win.parent;
+}
 // Server settings: { isolation: "<domain>" | null, auth: boolean }.
 const bios = self.__biosConfig || {};
 
@@ -20,6 +25,7 @@ function hook(win) {
 	const client = win[SCRAMJET];
 	if (!client) return lockBare(win);
 	frameNames(client, win);
+	ownParent(win);
 	noPopups(client, win);
 	pageShield(client, win);
 }
@@ -283,13 +289,35 @@ function frameNames(client, win) {
 }
 
 /**
+ * Scramjet's stand-ins for window.parent and window.top ask each window on
+ * the way up whether Scramjet runs there, which throws for the shell on
+ * another origin (site isolation): a page that read window.top, as embedded
+ * video players do, crashed. The tab's window says it is its own parent, as
+ * a top-level page's is, so the walk up ends at the tab.
+ * @param {Window} win
+ */
+function ownParent(win) {
+	const shell = win.parent;
+	if (shell === win || shells.has(win)) return;
+	try {
+		void shell[SCRAMJET];
+		return;
+	} catch {
+		// cross-origin parent: the shell
+	}
+	shells.set(win, shell);
+	Object.defineProperty(win, "parent", { get: () => win, set() {}, configurable: true });
+}
+
+/**
  * True for the proxied page sitting directly in the shell's frame.
  * @param {Window} win
  */
 function isTab(win) {
-	if (win.parent === win) return false;
+	const parent = parentOf(win);
+	if (parent === win) return false;
 	try {
-		return !!win.parent.__biosShell;
+		return !!parent.__biosShell;
 	} catch {
 		// cross-origin parent: only the shell (isolation mode)
 		return true;
@@ -1011,7 +1039,7 @@ function reportToShell(client, win, setRepeat, whenReady) {
 		if (url + "\n" + title === last) return;
 		last = url + "\n" + title;
 		try {
-			win.parent.postMessage({ bios: "nav", url, title }, target);
+			parentOf(win).postMessage({ bios: "nav", url, title }, target);
 		} catch {
 			// shell gone
 		}
@@ -1025,7 +1053,7 @@ function reportToShell(client, win, setRepeat, whenReady) {
 		// Scramjet reports this page's own site as every message's origin, so
 		// check the sender instead: only the shell is the tab's parent, and
 		// the browser sets event.source.
-		if (event.source !== win.parent) return;
+		if (event.source !== parentOf(win)) return;
 		const data = event.data;
 		if (!data || data.bios !== "cmd") return;
 		if (data.cmd === "back") win.history.back();

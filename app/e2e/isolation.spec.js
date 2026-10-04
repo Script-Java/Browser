@@ -54,3 +54,16 @@ test("a single-page app can change its address (history.pushState) on an isolate
 	await (await tabFrame(page)).evaluate(() => history.pushState(null, "", "/moved"));
 	await page.waitForFunction(() => active.url === "https://example.com/moved");
 });
+
+test("a page can read window.top and window.parent on an isolated site", async ({ page }) => {
+	await page.goto(ISOLATED_URL + "/");
+	await page.waitForFunction(() => typeof go === "function" && !!active, null, { timeout: 60_000 });
+	// Scramjet's stand-ins asked the shell's window, on another origin, and threw
+	const frame = await open(
+		page,
+		testPage(`<!doctype html><title>WAIT</title><script>
+			try { document.title = top === self && parent === self ? "TOP" : "FRAMED"; } catch { document.title = "THREW"; }
+		</script>`)
+	);
+	expect(await frame.title()).toBe("TOP");
+});
