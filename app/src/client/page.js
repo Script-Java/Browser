@@ -26,6 +26,7 @@ function hook(win) {
 	if (!client) return lockBare(win);
 	frameNames(client, win);
 	ownParent(win);
+	blobSources(client, win);
 	noPopups(client, win);
 	pageShield(client, win);
 }
@@ -307,6 +308,44 @@ function ownParent(win) {
 	}
 	shells.set(win, shell);
 	Object.defineProperty(win, "parent", { get: () => win, set() {}, configurable: true });
+}
+
+/**
+ * Scramjet turns a blob: address given to a <video> back into the browser's
+ * own, but sends one given to a <source> through the proxy, where a media
+ * stream can't be fetched. iPhones play streams through a <source>
+ * (ManagedMediaSource), so players there loaded and never started.
+ * @param {object} client The Scramjet client for this window.
+ * @param {Window} win
+ */
+function blobSources(client, win) {
+	const proto = win.HTMLSourceElement?.prototype;
+	if (!proto || proto.__biosBlob) return;
+	Object.defineProperty(proto, "__biosBlob", { value: true });
+	// true when it set the address itself
+	const setBlob = (el, value) => {
+		if (!(el instanceof win.HTMLSourceElement) || !String(value).startsWith("blob:")) return false;
+		try {
+			const real = "blob:" + win.location.origin + new URL(String(value).slice(5)).pathname;
+			client.natives.call("Element.prototype.setAttribute", el, "src", real);
+			return true;
+		} catch {
+			return false;
+		}
+	};
+	const src = Object.getOwnPropertyDescriptor(proto, "src");
+	if (src?.set && src.configurable)
+		Object.defineProperty(proto, "src", {
+			...src,
+			set(value) {
+				if (!setBlob(this, value)) src.set.call(this, value);
+			},
+		});
+	const setAttribute = win.Element.prototype.setAttribute;
+	win.Element.prototype.setAttribute = function (name, value) {
+		if (String(name).toLowerCase() === "src" && setBlob(this, value)) return;
+		return setAttribute.apply(this, arguments);
+	};
 }
 
 /**

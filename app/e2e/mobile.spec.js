@@ -1,7 +1,7 @@
 // The shell as the home-screen app on a phone: reload, and tabs without a tab strip.
 
 import { expect, test } from "./fixtures.js";
-import { open, tabFrame } from "./fixtures.js";
+import { open, tabFrame, testPage } from "./fixtures.js";
 import { ISOLATED_URL } from "./env.js";
 
 // A reloaded page is a new document: a mark left on the old one is gone.
@@ -57,4 +57,23 @@ test("a phone gets a bottom bar and a tab list instead of the tab strip", async 
 	await expect(app.locator("#tab-count")).toHaveText("1");
 	await app.click("#switcher-close");
 	await expect(app.locator("#dock #back")).toBeVisible();
+});
+
+// iPhones play streams through a <source> (ManagedMediaSource), not video.src
+test("a stream given to a <source> element opens", async ({ app, browserName }) => {
+	test.skip(browserName !== "chromium", "this WebKit build has no MediaSource");
+	const frame = await open(
+		app,
+		testPage(`<!doctype html><title>WAIT</title><video id="a"></video><video id="b"></video><script>
+			let opened = 0;
+			for (const [id, set] of [["a", (el, url) => (el.src = url)], ["b", (el, url) => el.setAttribute("src", url)]]) {
+				const stream = new MediaSource();
+				stream.addEventListener("sourceopen", () => (document.title = "OPENED " + ++opened));
+				const source = document.createElement("source");
+				set(source, URL.createObjectURL(stream));
+				document.getElementById(id).append(source);
+			}
+		</script>`)
+	);
+	await expect.poll(() => frame.title()).toBe("OPENED 2");
 });
