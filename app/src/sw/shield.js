@@ -681,10 +681,15 @@ function go(key) {
 		});
 	}
 
+	// Without the #fragment: the response hook doesn't always see it, and a page
+	// it can't match goes out uninjected and without the header that lets the
+	// app frame it (Safari then refuses to show it).
+	const pageKey = (href) => href.split("#")[0];
+
 	function rememberPage(page) {
 		// ponytail: entries for pages that never answer stay until this clears
 		if (pages.size > 200) pages.clear();
-		pages.set(page.url, page);
+		pages.set(pageKey(page.url), page);
 	}
 
 	async function handle(event) {
@@ -886,10 +891,10 @@ function go(key) {
 		// Link headers ask the browser to preload or preconnect to the site's
 		// servers itself, around the proxy (and Scramjet garbles their URLs).
 		delete event.responseHeaders.link;
-		const page = pages.get(event.url.href);
+		const page = pages.get(pageKey(event.url.href));
 		event.responseHeaders["content-security-policy"] = policyFor(page);
 		if (!page) return;
-		pages.delete(event.url.href);
+		pages.delete(pageKey(event.url.href));
 		// lets the page load in the app's frame across subdomains
 		event.responseHeaders["cross-origin-resource-policy"] = "same-site";
 		const type = event.responseHeaders["content-type"] || "";

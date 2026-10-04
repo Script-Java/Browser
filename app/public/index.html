@@ -77,12 +77,6 @@
 							<path d="M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.3-4.1 5.9-.9z" />
 						</svg>
 					</button>
-					<button id="bar-reload" type="button" aria-label="Reload" hidden>
-						<svg viewBox="0 0 24 24">
-							<path d="M20 12a8 8 0 1 1-2.34-5.66" />
-							<path d="M20 4v5h-5" />
-						</svg>
-					</button>
 					<kbd class="kbd">⌘K</kbd>
 				</form>
 
@@ -135,26 +129,13 @@
 
 		<div id="frames"></div>
 
-		<!-- phones: the toolbar lives at the bottom, within a thumb's reach -->
-		<nav id="bottombar" aria-label="Browser controls">
-			<button id="m-back" class="icon-btn" type="button" aria-label="Back">
-				<svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7" /></svg>
-			</button>
-			<button id="m-forward" class="icon-btn" type="button" aria-label="Forward">
-				<svg viewBox="0 0 24 24"><path d="M9 5l7 7-7 7" /></svg>
-			</button>
-			<button id="m-new" class="icon-btn" type="button" aria-label="New tab">
+		<!-- phones: the controls in reach of a thumb (index.js moves back, forward and the menu in) -->
+		<nav id="dock" aria-label="Browser controls">
+			<button id="dock-new" class="icon-btn" type="button" aria-label="New tab">
 				<svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" /></svg>
 			</button>
-			<button id="m-tabs" class="icon-btn" type="button" aria-label="Tabs">
-				<span id="tab-count" aria-hidden="true">1</span>
-			</button>
-			<button id="m-menu" class="icon-btn" type="button" aria-label="Settings and history">
-				<svg viewBox="0 0 24 24" class="filled">
-					<circle cx="5" cy="12" r="1.6" />
-					<circle cx="12" cy="12" r="1.6" />
-					<circle cx="19" cy="12" r="1.6" />
-				</svg>
+			<button id="tabs-btn" class="icon-btn" type="button" aria-label="Tabs">
+				<span id="tab-count">1</span>
 			</button>
 		</nav>
 
@@ -267,14 +248,14 @@
 			</div>
 		</div>
 
-		<div id="tabsheet" class="panel" hidden>
-			<div class="panel-card" role="dialog" aria-modal="true" aria-labelledby="tabsheet-title">
+		<div id="switcher" class="panel" hidden>
+			<div class="panel-card" role="dialog" aria-modal="true" aria-labelledby="switcher-title">
 				<div class="panel-head">
-					<strong id="tabsheet-title" class="panel-title">Tabs</strong>
-					<button id="tabsheet-close" class="panel-close" type="button">Done</button>
+					<strong id="switcher-title" class="panel-title">Tabs</strong>
+					<button id="switcher-close" class="panel-close" type="button">Done</button>
 				</div>
-				<ul id="tab-list" class="links" aria-label="Open tabs"></ul>
-				<button id="tabsheet-new" class="wide" type="button">New tab</button>
+				<ul id="tab-list" class="links"></ul>
+				<button id="switcher-new" class="wide" type="button">New tab</button>
 			</div>
 		</div>
 

@@ -19,6 +19,7 @@ function hook(win) {
 	hookFrames(win);
 	const client = win[SCRAMJET];
 	if (!client) return lockBare(win);
+	frameNames(client, win);
 	noPopups(client, win);
 	pageShield(client, win);
 }
@@ -248,6 +249,37 @@ function shellOrigin(win) {
 	if (domain && loc.hostname.endsWith("." + domain))
 		return `${loc.protocol}//${domain}${loc.port ? ":" + loc.port : ""}`;
 	return loc.origin;
+}
+
+/**
+ * Scramjet finds the name of a tab's frame by reading the window above it,
+ * which throws when that window is the shell on another origin (site
+ * isolation). history.pushState asks for the name on every call, so in Safari
+ * single-page apps crashed on their first navigation.
+ * @param {object} client The Scramjet client for this window.
+ * @param {Window} win
+ */
+function frameNames(client, win) {
+	for (const name of ["topFrameName", "parentFrameName"]) {
+		const real = Object.getOwnPropertyDescriptor(client.meta, name)?.get;
+		if (!real || real.__bios) continue;
+		const get = function () {
+			try {
+				return real.call(this);
+			} catch {
+				// the highest proxied window we can reach is the tab: its name is its frame's
+				let w = win;
+				try {
+					while (w.parent !== w && w.parent[SCRAMJET]) w = w.parent;
+				} catch {
+					// cross-origin parent: the shell
+				}
+				return w.name || null;
+			}
+		};
+		get.__bios = true;
+		Object.defineProperty(client.meta, name, { get, configurable: true });
+	}
 }
 
 /**
@@ -996,8 +1028,7 @@ function reportToShell(client, win, setRepeat, whenReady) {
 		if (event.source !== win.parent) return;
 		const data = event.data;
 		if (!data || data.bios !== "cmd") return;
-		if (data.cmd === "reload") win.location.reload();
-		else if (data.cmd === "back") win.history.back();
+		if (data.cmd === "back") win.history.back();
 		else if (data.cmd === "forward") win.history.forward();
 	});
 }
