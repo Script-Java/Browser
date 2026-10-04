@@ -13,6 +13,8 @@
 	--toolbar-h: 44px;
 	--safe-top: env(safe-area-inset-top, 0px);
 	--safe-bottom: env(safe-area-inset-bottom, 0px);
+	/* phones: the bottom toolbar's height, which the page area stops above */
+	--bottom-h: 0px;
 	--mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
 	color-scheme: light;
 }
@@ -335,6 +337,19 @@ img.mark {
 	fill: currentColor;
 }
 
+#bar-reload {
+	display: none;
+	flex: none;
+	place-items: center;
+	width: 26px;
+	height: 26px;
+	padding: 0;
+	border: 0;
+	border-radius: 6px;
+	background: none;
+	color: var(--text);
+}
+
 #bookmarks-bar {
 	display: flex;
 	gap: 2px;
@@ -414,7 +429,7 @@ body.loading #progress {
 	top: var(--chrome-h, calc(var(--safe-top) + var(--tab-h) + var(--toolbar-h)));
 	left: 0;
 	right: 0;
-	bottom: 0;
+	bottom: var(--bottom-h);
 }
 
 #frames iframe {
@@ -1006,4 +1021,240 @@ body:not(.browsing) #frames {
 /* in the background: nothing for the phone's app switcher preview to show */
 body.away > * {
 	visibility: hidden;
+}
+
+/* ------------------------------------------------------------ phones */
+/* A phone's browser: one address bar at the top, the controls at the
+   bottom within a thumb's reach, and a tab switcher sheet instead of a tab
+   strip. Narrow screens, and phones held sideways (a coarse pointer and
+   little height). Tablets keep the desktop layout. */
+
+#bottombar {
+	display: none;
+}
+
+#tabsheet .links .link {
+	min-height: 54px;
+}
+
+#tabsheet .links li[aria-current="true"] {
+	background: var(--field);
+	border-radius: 10px;
+	border-bottom-color: transparent;
+}
+
+#tabsheet .links li[aria-current="true"] .link {
+	padding-left: 8px;
+}
+
+#tabsheet .links .tab-close {
+	width: 40px;
+	height: 40px;
+	margin-right: 4px;
+}
+
+#tabsheet .links .tab-close svg {
+	width: 16px;
+	height: 16px;
+}
+
+@media (max-width: 719px), ((pointer: coarse) and (max-height: 500px)) {
+	:root {
+		--bottom-h: calc(50px + var(--safe-bottom));
+	}
+
+	#tabstrip,
+	#toolbar > .icon-btn,
+	#split-btn {
+		display: none;
+	}
+
+	/* no page open: the new tab page has its own search box */
+	body:not(.browsing) #chrome {
+		display: none;
+	}
+
+	#toolbar {
+		height: 52px;
+		padding: 0 10px;
+	}
+
+	#bar-form {
+		max-width: none;
+		height: 40px;
+		gap: 4px;
+		padding: 0 6px;
+		border-radius: 12px;
+	}
+
+	#bar-form:focus-within {
+		box-shadow: 0 0 0 1.5px var(--ink);
+	}
+
+	#site-btn,
+	#star,
+	#bar-reload {
+		width: 32px;
+		height: 32px;
+	}
+
+	#site-btn > * {
+		width: 18px;
+		height: 18px;
+	}
+
+	#bar-input {
+		font-size: 16px;
+		text-align: center;
+	}
+
+	#bar-input:focus {
+		text-align: left;
+	}
+
+	#bar-reload {
+		display: grid;
+	}
+
+	/* reload gets in the way of typing */
+	#bar-form:focus-within #bar-reload,
+	#bar-form:focus-within #star {
+		display: none;
+	}
+
+	#bookmarks-bar {
+		height: 36px;
+		padding: 0 10px 6px;
+		gap: 4px;
+	}
+
+	.bookmark {
+		font-size: 13px;
+		padding: 0 10px;
+	}
+
+	#bottombar {
+		position: fixed;
+		left: 0;
+		right: 0;
+		bottom: 0;
+		z-index: 5;
+		display: flex;
+		align-items: center;
+		justify-content: space-around;
+		height: var(--bottom-h);
+		padding: 0 8px var(--safe-bottom);
+		background: var(--toolbar);
+		border-top: 1px solid var(--line);
+	}
+
+	#bottombar .icon-btn {
+		width: 48px;
+		height: 44px;
+		border-radius: 10px;
+	}
+
+	#bottombar svg {
+		width: 22px;
+		height: 22px;
+	}
+
+	#tab-count {
+		display: grid;
+		place-items: center;
+		min-width: 22px;
+		height: 22px;
+		padding: 0 4px;
+		border: 2px solid currentColor;
+		border-radius: 6px;
+		font-size: 12px;
+		font-weight: 700;
+		line-height: 1;
+	}
+
+	/* the keyboard is up: give the page area and suggestions the room */
+	body.typing {
+		--bottom-h: 0px;
+	}
+
+	body.typing #bottombar {
+		display: none;
+	}
+
+	#newtab {
+		padding: calc(var(--safe-top) + 8vh) 20px calc(16px + var(--bottom-h));
+	}
+
+	.wordmark {
+		height: 38px;
+		margin-bottom: 22px;
+	}
+
+	#home-form {
+		height: 50px;
+		border-radius: 14px;
+	}
+
+	#tiles {
+		gap: 16px 8px;
+		margin-top: 24px;
+	}
+
+	.tile .mark {
+		width: 46px;
+		height: 46px;
+		border-radius: 11px;
+		font-size: 18px;
+	}
+
+	#stats {
+		padding-top: 24px;
+	}
+
+	#suggest {
+		left: 10px !important;
+		right: 10px;
+		width: auto !important;
+		max-height: 50vh;
+		overflow-y: auto;
+		padding: 4px;
+	}
+
+	#suggest li {
+		min-height: 46px;
+		padding: 6px 10px;
+	}
+
+	#suggest .detail {
+		max-width: 35%;
+	}
+
+	.panel-card {
+		max-height: calc(100% - var(--safe-top) - 40px);
+		padding: 14px 16px calc(16px + var(--safe-bottom));
+		border-radius: 18px 18px 0 0;
+	}
+
+	.panel-close {
+		min-height: 36px;
+		padding: 0 4px;
+		font-size: 16px;
+	}
+
+	.panel .row {
+		min-height: 52px;
+	}
+
+	.panel .wide {
+		min-height: 46px;
+	}
+
+	.panel select {
+		min-height: 38px;
+	}
+
+	#frames.split {
+		display: block;
+		padding: 0;
+	}
 }

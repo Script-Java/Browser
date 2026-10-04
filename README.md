@@ -19,6 +19,8 @@ The first run opens your browser to sign in to Railway, then creates the project
 
 On the iPhone, open that address in **Safari**, tap Share → **Add to Home Screen**, and open the app from its home screen icon.
 
+On a phone the app lays itself out like a phone browser: the address bar at the top, back, forward, new tab, the tab switcher and the menu in a bar at the bottom. Tablets and desktops get a tab strip and toolbar instead.
+
 To push changes later, run `./railway.sh` again. It deploys to the same project and keeps the same address, so the installed home screen app keeps working.
 
 Useful commands (run from this folder):

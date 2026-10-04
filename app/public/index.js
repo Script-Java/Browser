@@ -31,7 +31,8 @@ const SITE_ORIGIN = config.isolation
 	: null;
 
 const $ = (id) => document.getElementById(id);
-const chrome = $("chrome");
+// not `chrome`: Chromium has a window.chrome that a top-level const can't shadow
+const chromeEl = $("chrome");
 const framesEl = $("frames");
 const homeForm = $("home-form");
 const homeInput = $("home-input");
@@ -44,12 +45,13 @@ const error = $("error");
 const sheet = $("sheet");
 const library = $("library");
 const suggestEl = $("suggest");
+const tabsheet = $("tabsheet");
 
 // The page area starts below the chrome, whose height changes with the
 // bookmarks bar.
 new ResizeObserver(() =>
-	document.documentElement.style.setProperty("--chrome-h", chrome.offsetHeight + "px")
-).observe(chrome);
+	document.documentElement.style.setProperty("--chrome-h", chromeEl.offsetHeight + "px")
+).observe(chromeEl);
 
 const isMac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
 // iPadOS calls itself a Mac, but has a touch screen
@@ -427,6 +429,8 @@ function renderTabs() {
 		})
 	);
 	$("tabs").querySelector('[aria-selected="true"]')?.scrollIntoView({ block: "nearest", inline: "nearest" });
+	$("tab-count").textContent = String(tabs.length);
+	if (!tabsheet.hidden) renderTabSheet();
 	document.title = active?.url ? tabLabel(active) : "Badger";
 
 	const canSplitNow = canSplit();
@@ -560,8 +564,8 @@ function showAddress() {
 	else if (url.startsWith("http:")) state = "warn";
 	siteBtn.dataset.state = state;
 	star.hidden = !url;
-	$("back").disabled = !active?.back.length;
-	$("forward").disabled = !active?.fwd.length;
+	$("back").disabled = $("m-back").disabled = !active?.back.length;
+	$("forward").disabled = $("m-forward").disabled = !active?.fwd.length;
 	const marked = isBookmarked(url);
 	star.setAttribute("aria-pressed", String(marked));
 	star.setAttribute("aria-label", marked ? "Remove bookmark" : "Bookmark this page");
@@ -747,6 +751,75 @@ $("forward").addEventListener("click", () => step(1));
 $("reload").addEventListener("click", () => tabCommand("reload"));
 $("new-tab").addEventListener("click", () => createTab());
 
+// phones: the bottom toolbar, the reload in the address bar, and the tab
+// switcher sheet in place of the tab strip
+$("m-back").addEventListener("click", () => step(-1));
+$("m-forward").addEventListener("click", () => step(1));
+$("m-new").addEventListener("click", () => {
+	closePanels();
+	createTab();
+});
+$("m-tabs").addEventListener("click", openTabSheet);
+$("m-menu").addEventListener("click", openSheet);
+$("bar-reload").addEventListener("click", () => tabCommand("reload"));
+$("tabsheet-close").addEventListener("click", () => {
+	tabsheet.hidden = true;
+});
+$("tabsheet-new").addEventListener("click", () => {
+	tabsheet.hidden = true;
+	createTab();
+});
+
+function closePanels() {
+	sheet.hidden = library.hidden = tabsheet.hidden = true;
+}
+
+function openTabSheet() {
+	closePanels();
+	renderTabSheet();
+	tabsheet.hidden = false;
+	// a long list: the open tab in view
+	$("tab-list").querySelector('[aria-current="true"]')?.scrollIntoView({ block: "nearest" });
+}
+
+function renderTabSheet() {
+	$("tab-list").replaceChildren(
+		...tabs.map((tab) => {
+			const li = document.createElement("li");
+			if (tab === active) li.setAttribute("aria-current", "true");
+			const open = document.createElement("button");
+			open.type = "button";
+			open.className = "link";
+			const text = document.createElement("span");
+			text.className = "text";
+			const title = document.createElement("span");
+			title.textContent = tabLabel(tab);
+			const small = document.createElement("small");
+			small.textContent = tab.url ? displayHost(tab.url) : "Search or type a URL";
+			text.append(title, small);
+			open.append(tab.url ? markFor(tab.url) : badgerMark(), text);
+			open.addEventListener("click", () => {
+				tabsheet.hidden = true;
+				selectTab(tab);
+			});
+			const close = document.createElement("button");
+			close.type = "button";
+			close.className = "tab-close";
+			close.setAttribute("aria-label", `Close ${tabLabel(tab)}`);
+			close.innerHTML = '<svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>';
+			close.addEventListener("click", () => closeTab(tab));
+			li.append(open, close);
+			return li;
+		})
+	);
+}
+
+// While the address bar is being typed in, the bottom toolbar steps aside
+// (see index.css). Not for the new tab's search box: a new tab focuses it
+// without any keyboard showing, and the toolbar must stay reachable.
+barInput.addEventListener("focus", () => document.body.classList.add("typing"));
+barInput.addEventListener("blur", () => document.body.classList.remove("typing"));
+
 homeForm.addEventListener("submit", (event) => {
 	event.preventDefault();
 	const value = homeInput.value;
@@ -771,7 +844,7 @@ barInput.addEventListener("blur", showAddress);
 // Cmd/Ctrl+K or +L: jump to the address bar (or the new tab's search box).
 document.addEventListener("keydown", (event) => {
 	if (event.key === "Escape") {
-		sheet.hidden = library.hidden = true;
+		closePanels();
 		hideSuggest();
 		return;
 	}
@@ -1000,7 +1073,7 @@ function renderSheet() {
 }
 
 async function openSheet() {
-	library.hidden = true;
+	closePanels();
 	sheet.hidden = false;
 	renderSheet();
 	fetch("/filters/status", { cache: "no-store" })
@@ -1028,7 +1101,7 @@ $("menu-btn").addEventListener("click", openSheet);
 $("sheet-close").addEventListener("click", () => {
 	sheet.hidden = true;
 });
-for (const panel of [sheet, library])
+for (const panel of [sheet, library, tabsheet])
 	panel.addEventListener("click", (event) => {
 		if (event.target === panel) panel.hidden = true;
 	});
@@ -1502,7 +1575,7 @@ function renderHistory() {
 }
 
 function openHistory() {
-	sheet.hidden = true;
+	closePanels();
 	renderHistory();
 	library.hidden = false;
 }
