@@ -193,6 +193,7 @@ export function createShield(scramjet, configStored) {
 	const allowOnce = new Set(); // proxied URLs to load once without ad blocking
 	const inlineOnce = new Set(); // proxied URLs to load in this origin once
 	const pages = new Map(); // site URL -> page info for the response hook
+	const framed = new Set(); // proxied URLs of pages shown in a frame inside a page
 
 	// ---------------------------------------------------------------- engine
 
@@ -521,6 +522,41 @@ function go(key) {
 			else if (action === "http") plainHttp.add(siteOf(target.hostname.toLowerCase()));
 			return redirect(to);
 		}
+		// A page in a frame inside another page (an embedded player) says so:
+		// see where a blocked page is answered with nothing, in handle().
+		if (path === "framed") {
+			// ponytail: forgets everything at 500; a frame loaded before that shows the blank warning again
+			if (framed.size > 500) framed.clear();
+			if (decode(request.referrer)) framed.add(pageKey(request.referrer));
+			return new Response(null, { status: 204 });
+		}
+		// Would the ad blocker stop this page? Asked before a page's pop-up
+		// becomes a tab, so an ad's pop-up never does.
+		if (path === "ad") {
+			let target = null;
+			try {
+				target = new URL(new URL(request.url).searchParams.get("u"));
+			} catch {
+				// not an address
+			}
+			const source = decode(request.referrer);
+			await getSettings();
+			await waitForEngine();
+			const blocked =
+				!!target &&
+				!!engine &&
+				settings.ads &&
+				!isAllowed(target.hostname) &&
+				engine.match(
+					FilterRequest.fromRawDetails({
+						url: target.href,
+						sourceUrl: (source || target).href,
+						type: "main_frame",
+					})
+				).match;
+			if (blocked) countBlocked();
+			return json({ blocked });
+		}
 		if (request.method === "POST" && path === "cosmetic") {
 			const { url, classes, ids, hrefs } = await request.json();
 			await getSettings();
@@ -794,6 +830,12 @@ function go(key) {
 					);
 				}
 				if (match) {
+					// An embedded player whose ad script sends its own frame to
+					// an ad: answer with nothing, and the frame stays as it is.
+					if (isPage && framed.has(pageKey(request.referrer))) {
+						countBlocked();
+						return new Response(null, { status: 204 });
+					}
 					if (isPage)
 						return interstitial({ kind: "ads", host: target.hostname, url });
 					countBlocked();

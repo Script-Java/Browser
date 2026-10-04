@@ -314,6 +314,26 @@ test("ad and tracker requests are blocked", async ({ app }) => {
 	await expect.poll(() => app.evaluate(() => blockedThisWeek()), { timeout: 20_000 }).toBeGreaterThan(0);
 });
 
+test("an embedded player's ads get no tab and can't take the player's place", async ({ app }) => {
+	// like a streaming site: the player is another page in a frame, and its ad
+	// script opens a pop-up on a tap, or sends the player's own frame to the ad
+	const player = testPage(`<!doctype html><title>player</title>
+<button id="popup" onclick="window.open('https://ad.doubleclick.net/ddm/pop')">pop-up ad</button>
+<button id="redirect" onclick="location.href='https://ad.doubleclick.net/ddm/redirect'">redirect ad</button>
+<button id="link" onclick="window.open('https://example.org/')">a real link</button>`);
+	await open(app, testPage(`<!doctype html><title>site</title><iframe src="${player}" width="300" height="200"></iframe>`));
+	const frame = app.frameLocator("#frames iframe:visible").frameLocator("iframe");
+	await frame.locator("#popup").click();
+	await frame.locator("#redirect").click();
+	// time for a tab to open or the frame to leave, if either were going to
+	await app.waitForTimeout(3000);
+	expect(await app.evaluate(() => tabs.length)).toBe(1);
+	await expect(frame.locator("#redirect")).toBeVisible();
+	// a pop-up that isn't an ad still opens as a tab
+	await frame.locator("#link").click();
+	await app.waitForFunction(() => tabs.length === 2 && active.url === "https://example.org/");
+});
+
 test("New identity: cookies, history, tabs and exceptions go; bookmarks and settings stay", async ({ app }) => {
 	await setSettings(app, { level: "safer" });
 	let frame = await open(app, "https://example.com/");

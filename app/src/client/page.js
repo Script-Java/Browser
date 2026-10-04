@@ -15,6 +15,8 @@ function parentOf(win) {
 }
 // Server settings: { isolation: "<domain>" | null, auth: boolean }.
 const bios = self.__biosConfig || {};
+// The service worker's own endpoints (shield.js).
+const API = self.location.origin + "/scramjet/__bios/";
 
 /** @param {Window} win */
 function hook(win) {
@@ -460,12 +462,24 @@ function noPopups(client, win) {
 			return false;
 		}
 		if (target.protocol !== "http:" && target.protocol !== "https:") return false;
-		try {
-			win.top.postMessage({ bios: "open", url: target.href, background }, shellOrigin(win));
-			return true;
-		} catch {
-			return false;
-		}
+		const send = () => {
+			try {
+				win.top.postMessage({ bios: "open", url: target.href, background }, shellOrigin(win));
+			} catch {
+				// shell gone
+			}
+		};
+		// An ad's pop-up gets no tab: the ad blocker (in the service worker)
+		// is asked first. The page hears "opened" either way, so its ad script
+		// doesn't fall back to sending the page itself to the ad.
+		const ask = client.natives?.store?.fetch;
+		if (!ask) send();
+		else
+			ask
+				.call(win, API + "ad?u=" + encodeURIComponent(target.href))
+				.then((res) => res.json())
+				.then((answer) => answer.blocked || send(), send);
+		return true;
 	}
 
 	// Targets that would open a new window: _blank, _new, or a name no frame has.
@@ -896,6 +910,10 @@ function pageShield(client, win) {
 	if (flags.cosmetic && nativeFetch) hideGenericAds(client, win, nativeFetch, setTimer);
 	if (flags.videoAds) skipVideoAds(win, setRepeat, whenReady);
 	if (isTab(win)) reportToShell(client, win, setRepeat, whenReady);
+	// a frame inside a page (with an address of its own, not about:blank,
+	// which would speak for its parent): the service worker leaves it in place when its
+	// own scripts send it to an ad
+	else if (win.parent !== win && nativeFetch && /^https?:/.test(win.location.protocol)) nativeFetch.call(win, API + "framed").catch(() => {});
 }
 
 /**
@@ -904,7 +922,7 @@ function pageShield(client, win) {
  */
 function hideGenericAds(client, win, nativeFetch, setTimer) {
 	const doc = win.document;
-	const endpoint = win.location.origin + "/scramjet/__bios/cosmetic";
+	const endpoint = API + "cosmetic";
 	const seenClasses = new Set();
 	const seenIds = new Set();
 	let classes = [];
