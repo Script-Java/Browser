@@ -3,7 +3,7 @@
 // origins here, which shared mode never exercises.
 
 import { expect, test } from "@playwright/test";
-import { SCRIPTED_PAGE, leaks, open, proxied, setSettings, testPage } from "./fixtures.js";
+import { SCRIPTED_PAGE, leaks, open, proxied, setSettings, tabFrame, testPage } from "./fixtures.js";
 import { CATCHER, ISOLATED_URL } from "./env.js";
 
 test("browser check, site isolation, verified address and tab commands", async ({ page }) => {
@@ -44,4 +44,13 @@ test("browser check, site isolation, verified address and tab commands", async (
 	await page.waitForTimeout(2000);
 	expect(await frame.title()).toBe("ORIGINAL");
 	await setSettings(page, { level: "standard" });
+});
+
+test("a single-page app can change its address (history.pushState) on an isolated site", async ({ page }) => {
+	await page.goto(ISOLATED_URL + "/");
+	await page.waitForFunction(() => typeof go === "function" && !!active, null, { timeout: 60_000 });
+	await open(page, "https://example.com/");
+	// Scramjet's hook read the shell's window, on another origin, and threw
+	await (await tabFrame(page)).evaluate(() => history.pushState(null, "", "/moved"));
+	await page.waitForFunction(() => active.url === "https://example.com/moved");
 });
