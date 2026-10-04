@@ -31,7 +31,8 @@ const SITE_ORIGIN = config.isolation
 	: null;
 
 const $ = (id) => document.getElementById(id);
-const chrome = $("chrome");
+// not `chrome`: Chromium browsers have a global of that name
+const chromeEl = $("chrome");
 const framesEl = $("frames");
 const homeForm = $("home-form");
 const homeInput = $("home-input");
@@ -49,8 +50,8 @@ const suggestEl = $("suggest");
 // The page area starts below the chrome, whose height changes with the
 // bookmarks bar.
 new ResizeObserver(() =>
-	document.documentElement.style.setProperty("--chrome-h", chrome.offsetHeight + "px")
-).observe(chrome);
+	document.documentElement.style.setProperty("--chrome-h", chromeEl.offsetHeight + "px")
+).observe(chromeEl);
 
 const isMac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
 // iPadOS calls itself a Mac, but has a touch screen
