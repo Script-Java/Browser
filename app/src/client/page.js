@@ -988,10 +988,21 @@ function pageShield(client, win) {
 	if (flags.cosmetic && nativeFetch) hideGenericAds(client, win, nativeFetch, setTimer);
 	if (flags.videoAds) skipVideoAds(win, setRepeat, whenReady);
 	if (isTab(win)) reportToShell(client, win, setRepeat, whenReady);
-	// a frame inside a page (with an address of its own, not about:blank,
-	// which would speak for its parent): the service worker leaves it in place when its
-	// own scripts send it to an ad
-	else if (win.parent !== win && nativeFetch && /^https?:/.test(win.location.protocol)) nativeFetch.call(win, API + "framed").catch(() => {});
+	// A frame inside a page (with an address of its own, not about:blank,
+	// which would speak for its parent): the service worker leaves it in
+	// place when its own scripts send it to an ad, and counts what it blocks
+	// in the frame for the tab's page.
+	else if (win.parent !== win && nativeFetch && /^https?:/.test(win.location.protocol)) {
+		let tabPage = "";
+		try {
+			let top = win;
+			while (parentOf(top) !== top && !isTab(top)) top = parentOf(top);
+			tabPage = top[SCRAMJET].url.href;
+		} catch {
+			// no page of ours up there
+		}
+		nativeFetch.call(win, API + "framed?top=" + encodeURIComponent(tabPage)).catch(() => {});
+	}
 }
 
 /**

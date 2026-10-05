@@ -763,8 +763,10 @@ async function onFrameMessage(event) {
 	// count of blocked requests.
 	if (data?.bios === "blocked") {
 		for (const [origin, anchor] of anchors)
-			if (anchor.frame.contentWindow === event.source && event.origin === origin)
+			if (anchor.frame.contentWindow === event.source && event.origin === origin) {
 				addBlocked(data.count);
+				noteBlocked(data.hosts);
+			}
 		return;
 	}
 
@@ -1161,6 +1163,7 @@ function renderSheet() {
 	$("site-toggle").checked = !settings.allow.includes(site);
 	$("scripts-toggle").checked = !settings.noScripts.includes(site);
 	$("keep-toggle").checked = settings.keep.includes(site);
+	renderBlocked();
 
 	for (const input of sheet.querySelectorAll("[data-setting]"))
 		input.checked = !!settings[input.dataset.setting];
@@ -1775,6 +1778,36 @@ function addBlocked(count) {
 	if (!active?.url) $("stat-blocked").textContent = blockedThisWeek().toLocaleString();
 }
 
+// What was blocked on each page, for the shield menu: page address (without
+// its #) -> host -> how often. In memory only, for the last pages seen.
+const blockedOn = new Map();
+
+function noteBlocked(hosts) {
+	for (const pair of Array.isArray(hosts) ? hosts.slice(0, 200) : []) {
+		const [page, host] = Array.isArray(pair) ? pair : [];
+		if (typeof page !== "string" || typeof host !== "string") continue;
+		const key = page.split("#")[0].slice(0, 2000);
+		const seen = blockedOn.get(key) || new Map();
+		// most recently blocked last, so the oldest page goes first
+		blockedOn.delete(key);
+		blockedOn.set(key, seen.set(host.slice(0, 100), (seen.get(host.slice(0, 100)) || 0) + 1));
+		if (blockedOn.size > 30) blockedOn.delete(blockedOn.keys().next().value);
+	}
+	if (!sheet.hidden) renderBlocked();
+}
+
+function renderBlocked() {
+	const hosts = active?.url ? blockedOn.get(active.url.split("#")[0]) : null;
+	$("blocked-here").hidden = !hosts;
+	if (!hosts) return;
+	const total = [...hosts.values()].reduce((sum, n) => sum + n, 0);
+	$("blocked-here").firstElementChild.textContent = `${total} request${total === 1 ? "" : "s"} blocked on this page`;
+	$("blocked-hosts").textContent = [...hosts]
+		.sort((a, b) => b[1] - a[1])
+		.map(([host, n]) => (n > 1 ? `${host} (${n})` : host))
+		.join(", ");
+}
+
 function blockedThisWeek() {
 	const week = lastWeek();
 	return Object.entries(blockedByDay()).reduce(
@@ -1784,7 +1817,9 @@ function blockedThisWeek() {
 }
 
 navigator.serviceWorker?.addEventListener("message", (event) => {
-	if (event.data?.bios === "blocked") addBlocked(event.data.count);
+	if (event.data?.bios !== "blocked") return;
+	addBlocked(event.data.count);
+	noteBlocked(event.data.hosts);
 });
 navigator.serviceWorker?.startMessages();
 

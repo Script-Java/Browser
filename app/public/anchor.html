@@ -17,7 +17,7 @@
 			// (new tab stats).
 			navigator.serviceWorker.addEventListener("message", (event) => {
 				if (event.data?.bios === "blocked")
-					parent.postMessage({ bios: "blocked", count: event.data.count }, "*");
+					parent.postMessage({ bios: "blocked", count: event.data.count, hosts: event.data.hosts }, "*");
 			});
 			navigator.serviceWorker.startMessages();
 

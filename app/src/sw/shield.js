@@ -203,7 +203,7 @@ export function createShield(scramjet, configStored) {
 	const allowOnce = new Set(); // proxied URLs to load once without ad blocking
 	const inlineOnce = new Set(); // proxied URLs to load in this origin once
 	const pages = new Map(); // site URL -> page info for the response hook
-	const framed = new Set(); // proxied URLs of pages shown in a frame inside a page
+	const framed = new Map(); // proxied URL of a page shown in a frame inside a page -> its tab's page (a site URL)
 
 	// ---------------------------------------------------------------- engine
 
@@ -628,7 +628,14 @@ function go(key) {
 		if (path === "framed") {
 			// ponytail: forgets everything at 500; a frame loaded before that shows the blank warning again
 			if (framed.size > 500) framed.clear();
-			if (decode(request.referrer)) framed.add(pageKey(request.referrer));
+			// the tab's page, for the list of what was blocked on it
+			let top = "";
+			try {
+				top = new URL(new URL(request.url).searchParams.get("top")).href.slice(0, 2000);
+			} catch {
+				// not said
+			}
+			if (decode(request.referrer)) framed.set(pageKey(request.referrer), top);
 			return new Response(null, { status: 204 });
 		}
 		// Would the ad blocker stop this page? Asked before a page's pop-up
@@ -649,7 +656,7 @@ function go(key) {
 				settings.ads &&
 				!isAllowed(target.hostname) &&
 				listed(target, source, "main_frame").match;
-			if (blocked) countBlocked();
+			if (blocked) countBlocked(pageFor(request.referrer, source), target.hostname);
 			return json({ blocked });
 		}
 		if (request.method === "POST" && path === "cosmetic") {
@@ -914,19 +921,30 @@ function go(key) {
 	// Counts blocked requests for the new tab's "trackers blocked" stat and
 	// tells the app's own pages every few seconds: the shell (shared mode) or
 	// this site's anchor frame (isolation mode), never the proxied pages.
+	// With the page and the host when known, for the shield menu's list of
+	// what was blocked on the page.
 	let blockedCount = 0;
 	let blockedTimer = null;
-	function countBlocked() {
+	let blockedHosts = [];
+	function countBlocked(page, host) {
 		blockedCount++;
+		// ponytail: the first 200 in three seconds; the count stays right
+		if (page && host && blockedHosts.length < 200) blockedHosts.push([page, host]);
 		blockedTimer ||= setTimeout(async () => {
 			const count = blockedCount;
+			const hosts = blockedHosts;
 			blockedCount = 0;
+			blockedHosts = [];
 			blockedTimer = null;
 			const pages = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
 			for (const page of pages)
-				if (!page.url.startsWith(prefix)) page.postMessage({ bios: "blocked", count });
+				if (!page.url.startsWith(prefix)) page.postMessage({ bios: "blocked", count, hosts });
 		}, 3000);
 	}
+
+	// The tab's page a request belongs to: a frame inside a page answers for
+	// the page around it.
+	const pageFor = (referrer, source) => framed.get(pageKey(referrer || "")) || source?.href;
 
 	function blocked(destination) {
 		if (SCRIPTED.has(destination))
@@ -1164,7 +1182,7 @@ function go(key) {
 			if (engine) {
 				const { match, redirect } = listed(target, source, REQUEST_TYPES[destination] || "other");
 				if (redirect && !isPage) {
-					countBlocked();
+					countBlocked(pageFor(request.referrer, source), target.hostname);
 					return new Response(
 						redirect.contentType.includes("base64")
 							? Uint8Array.from(atob(redirect.body), (c) => c.charCodeAt(0))
@@ -1176,12 +1194,12 @@ function go(key) {
 					// An embedded player whose ad script sends its own frame to
 					// an ad: answer with nothing, and the frame stays as it is.
 					if (isPage && framed.has(pageKey(request.referrer))) {
-						countBlocked();
+						countBlocked(pageFor(request.referrer, source), target.hostname);
 						return new Response(null, { status: 204 });
 					}
 					if (isPage)
 						return interstitial({ kind: "ads", host: target.hostname, url });
-					countBlocked();
+					countBlocked(pageFor(request.referrer, source), target.hostname);
 					return blocked(destination);
 				}
 			}

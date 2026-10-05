@@ -473,3 +473,23 @@ test("Safer blocks a web font the browser kept from before", async ({ app }) => 
 	await setSettings(app, { level: "safer" });
 	expect(await load(await open(app, testPage("<!doctype html><title>font two</title>")))).toBe("blocked");
 });
+
+test("the shield menu lists what was blocked on the page", async ({ app }) => {
+	await expect
+		.poll(async () => (await (await app.request.get(`${SHARED_URL}/filters/status`)).json()).updatedAt, {
+			message: "block lists downloaded",
+			timeout: 110_000,
+		})
+		.toBeTruthy();
+	await open(
+		app,
+		testPage(`<!doctype html><title>trackers</title>
+<img src="https://www.google-analytics.com/collect?v=1&t=pageview">
+<img src="https://ad.doubleclick.net/ddm/ad/x"><img src="https://ad.doubleclick.net/ddm/ad/y">`)
+	);
+	// the service worker reports what it blocked every few seconds
+	await app.waitForFunction(() => blockedOn.get(active.url)?.size >= 2, null, { timeout: 20_000 });
+	await app.evaluate(() => openSheet());
+	await expect(app.locator("#blocked-here summary")).toHaveText("3 requests blocked on this page");
+	await expect(app.locator("#blocked-hosts")).toHaveText("ad.doubleclick.net (2), www.google-analytics.com");
+});
