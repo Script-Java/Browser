@@ -14,6 +14,7 @@ Ticked items are fixed, each with a test in `app/e2e/`.
 - [x] **A posted form had no `Origin`,** which some sites need to accept their own forms. Fixed.
 - [x] **Sites' framing rules were dropped** (`X-Frame-Options`, `frame-ancestors`). Fixed in the page script: a page that forbids framing stays out of other pages' frames.
 - [x] **No Global Privacy Control header, and no `Accept-Language` at all.** Fixed: `Sec-GPC: 1`, and one language for everyone.
+- [x] **Tracking parameters were not stripped.** Fixed: an address typed or pasted, or a link from another site, loses `fbclid`, `gclid`, `utm_*` and the like; a site's own links keep theirs.
 - [x] **Third-party cookies are partitioned** (already the case). A site embedded in another site's page sees none of the cookies it has as a tab. On par with Safari, Brave and Tor.
 - [ ] **Sites' script rules are not enforced.** A page sent with `Content-Security-Policy: script-src 'none'` still runs its inline script: the proxy rewrites every script and address, so a site's policy no longer matches what the browser sees. Not planned.
 - [ ] **Revoked certificates are accepted.** `revoked.badssl.com` loads. Expired, wrong-host, self-signed and untrusted-root certificates are refused.
@@ -39,7 +40,7 @@ Ticked items are fixed, each with a test in `app/e2e/`.
 - [ ] **No fingerprint protection at Standard.** Tor makes every user look the same (fixed window sizes, UTC, one language, one font set); Brave randomises canvas, audio and hardware readings per site. Badger only drops web fonts, WebGL and WebGPU at Safer.
 - [ ] **No bounce-tracking protection.** Brave and DuckDuckGo skip redirect hops that exist only to track.
 - [ ] **No CNAME uncloaking.** Trackers hidden behind a site's own subdomain pass the lists; Brave and Firefox with uBlock resolve the name first. The server does the DNS here, so it could.
-- [ ] **Cookie banners aren't handled.** DuckDuckGo and Brave reject or hide them. The cookie-notice and annoyance lists aren't loaded.
+- [x] **Cookie banners weren't handled.** Now a setting, off by default: "Hide cookie notices" loads EasyList Cookie and uBlock's cookie-notice list (1.5 MB more in every site's service worker, next to 7.1 MB for the ad lists). It hides notices; it doesn't answer them, as DuckDuckGo and Brave do.
 - [ ] **No "keep me signed in here".** Wiping is all sites or none; DuckDuckGo's fireproofing and Brave's per-site forgetting pick.
 - [ ] **No per-site report.** Only a weekly blocked count; no list of what was blocked on this page.
 - [ ] **No .onion sites.**
