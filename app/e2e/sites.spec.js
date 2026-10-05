@@ -4,35 +4,12 @@
 // The browser never sees the real requests, so the proxy has to get these right.
 
 import { expect, test } from "./fixtures.js";
-import { open, tabFrame, testPage } from "./fixtures.js";
+import { ECHO, bodyText, follow, open, received, testPage } from "./fixtures.js";
 import { ISOLATED_URL } from "./env.js";
-
-// Echoes requests back, on another site than testPage's httpbin.org.
-const ECHO = "https://httpbingo.org";
-
-// The headers an echo page says it received: lower-case names, one string each.
-function received(text) {
-	const { headers } = JSON.parse(text);
-	return Object.fromEntries(Object.entries(headers).map(([name, value]) => [name.toLowerCase(), [].concat(value).join(",")]));
-}
-
-const bodyText = (frame) => frame.evaluate(() => document.body.innerText);
 
 async function openIsolated(page) {
 	await page.goto(ISOLATED_URL + "/");
 	await page.waitForFunction(() => typeof go === "function" && !!active, null, { timeout: 60_000 });
-}
-
-// Clicks or submits `id` in the tab's page and returns the tab's frame once it shows `url`.
-async function follow(page, id, url) {
-	const frame = await tabFrame(page);
-	await frame.evaluate((i) => {
-		const el = document.getElementById(i);
-		if (el.localName === "form") el.submit();
-		else el.click();
-	}, id);
-	await page.waitForFunction((u) => active.url === u && !active.loading, url);
-	return tabFrame(page);
 }
 
 test("a page's requests to other sites say where they come from, and no more", async ({ app }) => {

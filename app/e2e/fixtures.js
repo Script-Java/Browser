@@ -61,6 +61,31 @@ export const proxied = (frame) =>
 		badger: !!window.__noPopups,
 	}));
 
+// Echoes requests back, on another site than testPage's httpbin.org.
+export const ECHO = "https://httpbingo.org";
+
+/** The headers an echo page says it received: lower-case names, one string each. */
+export function received(text) {
+	const { headers } = JSON.parse(text);
+	return Object.fromEntries(
+		Object.entries(headers).map(([name, value]) => [name.toLowerCase(), [].concat(value).join(",")])
+	);
+}
+
+export const bodyText = (frame) => frame.evaluate(() => document.body.innerText);
+
+/** Clicks or submits `id` in the tab's page and returns the tab's frame once it shows `url`. */
+export async function follow(page, id, url) {
+	const frame = await tabFrame(page);
+	await frame.evaluate((i) => {
+		const el = document.getElementById(i);
+		if (el.localName === "form") el.submit();
+		else el.click();
+	}, id);
+	await page.waitForFunction((u) => active.url === u && !active.loading, url);
+	return tabFrame(page);
+}
+
 export const setSettings = (page, changes) =>
 	page.evaluate(async (c) => {
 		await loadSettings();

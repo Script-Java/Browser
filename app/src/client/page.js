@@ -23,6 +23,7 @@ function hook(win) {
 	// before the Scramjet check: a frame Scramjet hasn't hooked yet has
 	// WebRTC too, and can make frames of its own
 	noWebRTC(win);
+	privacySignal(win);
 	hookFrames(win);
 	const client = win[SCRAMJET];
 	if (!client) return lockBare(win);
@@ -218,6 +219,24 @@ function noWebRTC(win) {
 		} catch {
 			// already locked
 		}
+	}
+}
+
+/**
+ * Global Privacy Control ("don't sell or share my data"), for scripts that
+ * ask the page instead of reading the request; shield.js sends the header.
+ * ponytail: not in workers, which this script doesn't reach.
+ * @param {Window} win
+ */
+function privacySignal(win) {
+	try {
+		Object.defineProperty(win.Navigator.prototype, "globalPrivacyControl", {
+			get: () => true,
+			enumerable: true,
+			configurable: true,
+		});
+	} catch {
+		// no Navigator in this window
 	}
 }
 

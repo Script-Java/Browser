@@ -797,6 +797,40 @@ function go(key) {
 			url
 		);
 
+	// Query parameters that only exist to follow a person from one site to
+	// the next: click ids and campaign tags (Brave's and DuckDuckGo's lists).
+	const TRACKING_PARAMS = new Set(
+		(
+			"fbclid gclid gclsrc dclid gbraid wbraid msclkid twclid ttclid yclid ymclid ysclid igshid " +
+			"srsltid li_fat_id irclickid rb_clickid unicorn_click_id wickedid s_cid mc_eid mkt_tok " +
+			"_hsenc _hsmi __hssc __hstc __hsfp hsctatracking _openstat __s _gl _kx _bhlid " +
+			"oly_anon_id oly_enc_id vero_id vero_conv ml_subscriber ml_subscriber_hash " +
+			"fb_action_ids fb_comment_id guce_referrer guce_referrer_sig bsft_clkid bsft_uid " +
+			"sc_customer sc_eh sc_uid ss_email_id et_rid vgo_ee mtm_cid pk_cid " +
+			"_branch_match_id _branch_referrer at_recipient_id at_recipient_list"
+		).split(" ")
+	);
+
+	// `target` without them, or null when it has none. The rest of the query
+	// is left exactly as written (some sites sign theirs).
+	function withoutTracking(target) {
+		const parts = target.search.slice(1).split("&");
+		const kept = parts.filter((part) => {
+			let name = part.split("=")[0];
+			try {
+				name = decodeURIComponent(name.replace(/\+/g, " "));
+			} catch {
+				// not valid percent-encoding: compare it as written
+			}
+			name = name.toLowerCase();
+			return !TRACKING_PARAMS.has(name) && !name.startsWith("utm_");
+		});
+		if (kept.length === parts.length) return null;
+		const clean = new URL(target.href);
+		clean.search = kept.join("&");
+		return clean;
+	}
+
 	/**
 	 * A site's rule about which pages may show it in a frame: X-Frame-Options,
 	 * or frame-ancestors in a Content-Security-Policy, which wins when both
@@ -1001,6 +1035,20 @@ function go(key) {
 		if (upgraded) return upgraded;
 
 		const who = await whoAsks(event, url, target, isPage);
+
+		// An address typed or pasted, or a link from another site, loses the
+		// parameters that follow people between sites; a site's own links
+		// keep theirs. Off with the rest of the blocking, for one site too.
+		if (isPage && safe(request.method) && who?.site !== "same-origin" && who?.site !== "same-site") {
+			const clean = withoutTracking(target);
+			// fresh settings, so the switch applies to the very next page
+			if (clean) settingsAt = 0;
+			if (clean && (await getSettings()).ads && !isAllowed(target.hostname)) {
+				countBlocked();
+				return redirect(location.origin + encodeUrl(clean.href));
+			}
+		}
+
 		const enginePromise = waitForEngine();
 
 		if (isPage) {
