@@ -27,7 +27,7 @@ Ticked items are fixed, each with a test in `app/e2e/`.
 
 ## Security
 
-- [ ] **Embedded frames share the page's space.** A third-party frame is kept from its parent only by Scramjet's script hooks, not by the browser. Try reading the parent from a hostile frame. Deepest gap, hardest to close.
+- [ ] **Embedded frames share the page's space.** Measured (`app/e2e/isolation.spec.js`, the test marked as a known gap): a frame from another site reads the text, cookies, storage and address of the page around it with ordinary script, and can change the page. A browser refuses all of it. It can't reach the app, other sites' tabs, or its own site's cookies from elsewhere. Closing it means either giving every embedded frame an origin of its own (a redesign of site isolation, and one more service worker, block list and proxy connection per embedded site), or a same-origin policy rebuilt in page script, which code written against this proxy could still get around.
 - [ ] **WebRTC is removed by script only.** A page built to get around it may find a way (the desktop app also blocks it in Chromium).
 - [ ] **Phishing and malware lists refresh daily.** Safe Browsing-style services update within minutes.
 - [ ] **No passkeys or security keys.** They are denied, so sites fall back to passwords and SMS codes.
@@ -39,17 +39,17 @@ Ticked items are fixed, each with a test in `app/e2e/`.
 ## Privacy
 
 - [ ] **One hop, one exit address.** The server sees the person's IP address and every site name; every site sees the same server address for all tabs. Tor uses three hops and a different exit per site.
-- [ ] **No fingerprint protection at Standard.** Tor makes every user look the same (fixed window sizes, UTC, one language, one font set); Brave randomises canvas, audio and hardware readings per site. Badger only drops web fonts, WebGL and WebGPU at Safer.
+- [x] **No fingerprint protection.** Now at Safer: one language, UTC, a common processor count, and noise in canvas and sound readouts that changes from page to page. Still none at Standard, and at Safer the screen's size, the installed fonts and anything read inside a worker are left (page script can't reach those).
 - [ ] **No bounce-tracking protection.** Brave and DuckDuckGo skip redirect hops that exist only to track.
 - [ ] **No CNAME uncloaking.** Trackers hidden behind a site's own subdomain pass the lists; Brave and Firefox with uBlock resolve the name first. The server does the DNS here, so it could.
 - [x] **Cookie banners weren't handled.** Now a setting, off by default: "Hide cookie notices" loads EasyList Cookie and uBlock's cookie-notice list (1.5 MB more in every site's service worker, next to 7.1 MB for the ad lists). It hides notices; it doesn't answer them, as DuckDuckGo and Brave do.
 - [x] **No "keep me signed in here".** Now a switch per site ("Stay signed in to this site"), with site isolation: that site's cookies and storage survive clearing. New identity still clears everything.
-- [ ] **No per-site report.** Only a weekly blocked count; no list of what was blocked on this page.
+- [x] **No per-site report.** The shield menu now lists the hosts blocked on the page.
 - [ ] **No .onion sites.**
 
 ## Everyday features
 
-- [ ] Find in page
+- [x] Find in page (no count of matches)
 - [ ] Zoom, reader mode, translation, printing (print is silenced)
 - [ ] Sync of bookmarks, history and tabs between devices
 - [ ] Camera, microphone and location (always denied: no video calls or maps)
