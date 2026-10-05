@@ -350,11 +350,15 @@ test("New identity: cookies, history, tabs and exceptions go; bookmarks and sett
 	// and this one is the app's own)
 	await app.evaluate(() => {
 		window.confirm = () => true;
+		// gone once the app has reloaded: the cleared app looks the same just before it does
+		window.__before = true;
 		newIdentity();
 	});
-	await app.waitForFunction(() => typeof go === "function" && !!active && tabs.length === 1 && !active.url, null, {
-		timeout: 60_000,
-	});
+	await app.waitForFunction(
+		() => !window.__before && typeof go === "function" && !!active && tabs.length === 1 && !active.url,
+		null,
+		{ timeout: 60_000 }
+	);
 	await app.evaluate(() => startup.then(ensureReady));
 	expect(
 		await app.evaluate(async () => ({
