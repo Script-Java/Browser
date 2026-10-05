@@ -412,3 +412,49 @@ test("a site that can't be reached says so, and offers to try again", async ({ a
 	await expect(frame.locator("h1")).toHaveText("Couldn't open this page");
 	await expect(frame.locator("#go")).toHaveText("Try again");
 });
+
+// Safari keeps what a site says it may keep, and shows it again without asking
+// the service worker: a page, with the policy it came with, or a script, which
+// then can't be refused. So no protection may depend on being asked.
+test("Safest holds for a page and a script the browser kept from before", async ({ app }) => {
+	const lib = "https://cdnjs.cloudflare.com/ajax/libs/jquery/3.7.1/jquery.min.js";
+	const withLib = (title) => testPage(`<!doctype html><title>${title}</title><script src="${lib}"></script><p id="t">test</p>`);
+	// a page its site lets browsers keep for an hour, with a script of its own
+	const kept =
+		"https://httpbin.org/response-headers?Content-Type=text/html&Cache-Control=" +
+		encodeURIComponent("max-age=3600") +
+		"&x=" +
+		encodeURIComponent(`<title>ORIGINAL</title><script>document.title='RAN'</script><p id=t>test</p>`);
+
+	let frame = await open(app, kept);
+	await expect.poll(() => frame.title()).toBe("RAN");
+	frame = await open(app, withLib("one"));
+	await expect.poll(() => frame.evaluate(() => typeof window.jQuery)).toBe("function");
+
+	await setSettings(app, { level: "safest" });
+	frame = await open(app, kept);
+	await expect.poll(() => frame.locator("#t").textContent()).toBe("test");
+	await app.waitForTimeout(2000);
+	expect(await frame.title()).toBe("ORIGINAL");
+	// another page with the script the browser already has
+	frame = await open(app, withLib("two"));
+	await expect.poll(() => frame.locator("#t").textContent()).toBe("test");
+	await app.waitForTimeout(2000);
+	expect(await frame.evaluate(() => typeof window.jQuery)).toBe("undefined");
+});
+
+test("Safer blocks a web font the browser kept from before", async ({ app }) => {
+	const font = "https://fonts.gstatic.com/s/roboto/v30/KFOmCnqEu92Fr1Mu4mxK.woff2";
+	const load = (frame) =>
+		frame.evaluate(
+			(url) =>
+				new FontFace("kept", `url(${url})`).load().then(
+					() => "loaded",
+					() => "blocked"
+				),
+			font
+		);
+	expect(await load(await open(app, testPage("<!doctype html><title>font one</title>")))).toBe("loaded");
+	await setSettings(app, { level: "safer" });
+	expect(await load(await open(app, testPage("<!doctype html><title>font two</title>")))).toBe("blocked");
+});

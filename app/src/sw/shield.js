@@ -1269,15 +1269,20 @@ function go(key) {
 
 	// The policy for a proxied response; `page` is set for the pages we inject.
 	function policyFor(page) {
-		if (!page?.noScripts) return NETWORK_LOCK;
+		// "Safer": no web fonts. handle() refuses them too, but a font the
+		// browser kept from an earlier visit never gets there to be refused.
+		const lock = page?.safer ? `font-src 'none'; ${NETWORK_LOCK}` : NETWORK_LOCK;
+		if (!page?.noScripts) return lock;
 		// Its inline scripts and handlers don't run; Scramjet's own scripts
-		// (this origin, and its data: one, which injectHtml gives the nonce)
-		// and ours (the nonce) still do. The page's external, data: and blob:
-		// scripts are refused in handle(). Scramjet builds functions from
-		// strings and runs WebAssembly as it starts, hence the evals; with
-		// none of the page's code running, nothing else can call them.
+		// (its folder, and its data: one, which injectHtml gives the nonce)
+		// and ours (our folder, the nonce) still do. Not 'self': the page's
+		// own scripts are this origin's as well, and handle() refusing them
+		// isn't enough, since one the browser kept from an earlier visit is
+		// never asked for. Scramjet builds functions from strings and runs
+		// WebAssembly as it starts, hence the evals; with none of the page's
+		// code running, nothing else can call them.
 		page.nonce = crypto.randomUUID().replace(/-/g, "");
-		return `script-src 'self' 'nonce-${page.nonce}' 'unsafe-eval' 'wasm-unsafe-eval'; object-src 'none'; ${NETWORK_LOCK}`;
+		return `script-src ${location.origin}/scram/ ${location.origin}/bios/ 'nonce-${page.nonce}' 'unsafe-eval' 'wasm-unsafe-eval'; object-src 'none'; ${lock}`;
 	}
 
 	scramjet.addEventListener("handleResponse", (event) => {
@@ -1288,6 +1293,12 @@ function go(key) {
 		event.responseHeaders["content-security-policy"] = policyFor(page);
 		if (!page) return;
 		pages.delete(pageKey(event.url.href));
+		// A page carries its protection with it (the policy above, the page
+		// script's settings, its cookies). Safari shows one its site said it
+		// may keep again as it was, without asking: switched to Safest, the
+		// page still ran its scripts. So the browser always asks.
+		event.responseHeaders["cache-control"] = "no-cache";
+		delete event.responseHeaders.expires;
 		// lets the page load in the app's frame across subdomains
 		event.responseHeaders["cross-origin-resource-policy"] = "same-site";
 		const type = event.responseHeaders["content-type"] || "";
