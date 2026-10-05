@@ -305,7 +305,7 @@ function siteCors(req, res, next) {
 	}
 	next();
 }
-app.use(["/filters/engine.bin", "/api/nav", "/api/settings"], siteCors);
+app.use(["/filters/engine.bin", "/filters/notices.bin", "/api/nav", "/api/settings"], siteCors);
 
 app.use(auth.gate);
 
@@ -328,9 +328,9 @@ app.get("/sitekey.js", async (req, res) => {
 	res.send((await bundles).sitekey);
 });
 
-app.get("/filters/engine.bin", (req, res) => {
+const serveEngine = (pick) => (req, res) => {
 	res.vary("Accept-Encoding");
-	const engine = filters.engine;
+	const engine = pick();
 	if (!engine) return res.status(503).setHeader("Retry-After", "60").end();
 	res.setHeader("ETag", engine.etag);
 	res.setHeader("Cache-Control", "no-cache");
@@ -341,7 +341,10 @@ app.get("/filters/engine.bin", (req, res) => {
 		return res.end(engine.gzip);
 	}
 	res.end(engine.raw);
-});
+};
+app.get("/filters/engine.bin", serveEngine(() => filters.engine));
+// the cookie-notice lists, for service workers of people who switched them on
+app.get("/filters/notices.bin", serveEngine(() => filters.notices));
 
 app.get("/filters/status", (req, res) => {
 	res.setHeader("Cache-Control", "no-store");

@@ -3,6 +3,7 @@
 
 import { expect, test } from "./fixtures.js";
 import { ECHO, bodyText, follow, open, received, setSettings, tabFrame, testPage } from "./fixtures.js";
+import { SHARED_URL } from "./env.js";
 
 const args = async (frame) => Object.keys(JSON.parse(await bodyText(frame)).args).sort();
 
@@ -50,4 +51,26 @@ fetch("${ECHO}/headers").then((r) => r.text()).then((t) => (document.getElementB
 		expect(headers["sec-gpc"]).toBe("1");
 		expect(headers["accept-language"]).toBe("en-US,en;q=0.9");
 	}
+});
+
+test("cookie notices are hidden once that is switched on", async ({ app }) => {
+	await expect
+		.poll(async () => (await (await app.request.get(`${SHARED_URL}/filters/status`)).json()).noticeFilters, {
+			message: "cookie-notice lists downloaded",
+			timeout: 110_000,
+		})
+		.toBeGreaterThan(0);
+	// a consent tool's banner, by the id its lists know it by
+	const notice = testPage(`<!doctype html><title>notice</title>
+<div id="onetrust-banner-sdk">We value your privacy</div><p id="text">the article</p>`);
+
+	// not unless asked for: the hiding rules have had time to arrive
+	let frame = await open(app, notice);
+	await app.waitForTimeout(2000);
+	await expect(frame.locator("#onetrust-banner-sdk")).toBeVisible();
+
+	await setSettings(app, { notices: true });
+	frame = await open(app, notice);
+	await expect(frame.locator("#onetrust-banner-sdk")).toBeHidden();
+	await expect(frame.locator("#text")).toBeVisible();
 });

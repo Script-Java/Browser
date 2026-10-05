@@ -46,6 +46,33 @@ const AD_LISTS = [
 	],
 ];
 
+// "Hide cookie notices": an engine of their own, so only people who switch
+// it on carry these lists in every site's service worker.
+const NOTICE_LISTS = [
+	[
+		"https://secure.fanboy.co.nz/fanboy-cookiemonster.txt",
+		`${MIRROR}/easylist/easylist-cookie.txt`,
+	],
+	[
+		`${UASSETS}/annoyances-cookies.txt`,
+		`${MIRROR}/ublock-origin/annoyances-cookies.txt`,
+	],
+];
+
+const ENGINE_OPTIONS = {
+	loadCosmeticFilters: true,
+	loadNetworkFilters: true,
+	enableHtmlFiltering: false,
+	loadCSPFilters: false,
+};
+
+// An engine as the server hands it out.
+const pack = (raw) => ({
+	raw,
+	gzip: gzipSync(raw),
+	etag: `"${createHash("sha256").update(raw).digest("base64url").slice(0, 24)}"`,
+});
+
 // Scriptlets (+js(...) rules) in the format the Ghostery engine expects.
 const RESOURCES = [`${MIRROR}/ublock-origin/resources.json`];
 
@@ -129,6 +156,7 @@ export class Filters {
 		this.cacheDir = cacheDir;
 		this.refreshMs = refreshHours * 3_600_000;
 		this.engine = null; // { raw, gzip, etag }
+		this.notices = null; // the cookie-notice engine, the same way
 		this.threats = new Map(); // host -> "phishing" | "malware"
 		this.updatedAt = 0;
 		this.stats = {};
@@ -152,11 +180,19 @@ export class Filters {
 	}
 
 	async build() {
-		if (Date.now() - this.updatedAt < this.refreshMs) return;
+		// (a cache from before the cookie-notice lists has none: fetch them once)
+		const fresh = Date.now() - this.updatedAt < this.refreshMs;
+		if (fresh && (this.notices || this.noticesTried)) return;
+		this.noticesTried = true;
 		console.log("filters: downloading lists");
 		const started = Date.now();
+		const optional = (urls) =>
+			download(urls).catch((err) => {
+				console.warn("filters: skipping list:", err.message);
+				return "";
+			});
 
-		const [lists, resources, threatTexts] = await Promise.all([
+		const [lists, noticeLists, resources, threatTexts] = await Promise.all([
 			Promise.all(
 				AD_LISTS.map((urls) =>
 					download(urls).catch((err) => {
@@ -165,6 +201,7 @@ export class Filters {
 					})
 				)
 			),
+			Promise.all(NOTICE_LISTS.map(optional)),
 			download(RESOURCES),
 			Promise.all(
 				THREAT_LISTS.map(([kind, ...urls]) =>
@@ -183,14 +220,20 @@ export class Filters {
 		if (loaded.length < AD_LISTS.length / 2)
 			throw new Error("too many ad lists failed to download");
 
-		const engine = FiltersEngine.parse(loaded.join("\n"), {
-			loadCosmeticFilters: true,
-			loadNetworkFilters: true,
-			enableHtmlFiltering: false,
-			loadCSPFilters: false,
-		});
+		const engine = FiltersEngine.parse(loaded.join("\n"), ENGINE_OPTIONS);
 		engine.updateResources(resources, String(resources.length));
 		const raw = Buffer.from(engine.serialize());
+
+		// keeps the previous copy when neither list came down
+		const noticeText = noticeLists.filter(Boolean).join("\n");
+		let noticeFilters = this.stats.noticeFilters || 0;
+		if (noticeText) {
+			const notices = FiltersEngine.parse(noticeText, ENGINE_OPTIONS);
+			notices.updateResources(resources, String(resources.length));
+			this.notices = pack(Buffer.from(notices.serialize()));
+			const found = notices.getFilters();
+			noticeFilters = found.networkFilters.length + found.cosmeticFilters.length;
+		}
 
 		const threats = new Map();
 		const threatStats = {};
@@ -210,6 +253,7 @@ export class Filters {
 			lists: loaded.length,
 			networkFilters: engine.getFilters().networkFilters.length,
 			cosmeticFilters: engine.getFilters().cosmeticFilters.length,
+			noticeFilters,
 			...threatStats,
 		};
 		console.log(
@@ -222,11 +266,7 @@ export class Filters {
 	}
 
 	setEngine(raw) {
-		this.engine = {
-			raw,
-			gzip: gzipSync(raw),
-			etag: `"${createHash("sha256").update(raw).digest("base64url").slice(0, 24)}"`,
-		};
+		this.engine = pack(raw);
 	}
 
 	async saveCache(raw) {
@@ -242,6 +282,7 @@ export class Filters {
 			await rename(path + ".tmp", path);
 		};
 		await write("engine.bin", raw);
+		if (this.notices) await write("notices.bin", this.notices.raw);
 		await write("meta.json", JSON.stringify(meta));
 	}
 
@@ -253,6 +294,13 @@ export class Filters {
 		// Fails if the cache was written by a different engine version.
 		FiltersEngine.deserialize(new Uint8Array(raw));
 		this.setEngine(raw);
+		try {
+			const notices = await readFile(join(this.cacheDir, "notices.bin"));
+			FiltersEngine.deserialize(new Uint8Array(notices));
+			this.notices = pack(notices);
+		} catch {
+			// none cached yet: build() fetches the lists
+		}
 		this.threats = new Map(meta.threats);
 		this.stats = meta.stats;
 		this.updatedAt = meta.updatedAt;

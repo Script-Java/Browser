@@ -289,11 +289,68 @@ export function createShield(scramjet, configStored) {
 		]);
 	}
 
+	// "Hide cookie notices": two more lists in an engine of their own, loaded
+	// only for people who switch it on (every site's worker holds a copy).
+	const NOTICES_URL = ENGINE_URL.replace("engine.bin", "notices.bin");
+	let notices = null;
+	let noticesLoad = null;
+	function loadNotices() {
+		noticesLoad ||= fetch(NOTICES_URL, { credentials: "include", cache: "no-cache" })
+			.then(async (res) => {
+				if (!res.ok) throw new Error(`notices HTTP ${res.status}`);
+				notices = FiltersEngine.deserialize(new Uint8Array(await res.arrayBuffer()));
+				setTimeout(() => (noticesLoad = null), ENGINE_RECHECK_MS);
+			})
+			.catch((err) => {
+				console.warn("bios: cookie-notice lists unavailable:", err);
+				setTimeout(() => (noticesLoad = null), 30_000);
+			});
+		return noticesLoad;
+	}
+
+	// Switched on a moment ago, or this worker just started: the first page waits for them.
+	function waitForNotices() {
+		if (!settings?.notices || notices) return;
+		return Promise.race([
+			loadNotices(),
+			new Promise((resolve) => setTimeout(resolve, ENGINE_WAIT_MS)),
+		]);
+	}
+
+	// What the block lists say about a request for `target` from the page `source`.
+	function listed(target, source, type) {
+		const request = FilterRequest.fromRawDetails({
+			url: target.href,
+			sourceUrl: (source || target).href,
+			type,
+		});
+		let answer = { match: false };
+		for (const list of [engine, settings.notices && notices]) {
+			if (!list) continue;
+			answer = list.match(request);
+			if (answer.match || answer.redirect) break;
+		}
+		return answer;
+	}
+
+	// The rules that hide parts of a page, and its scriptlets, from each of `lists`.
+	function hiding(lists, options) {
+		let styles = "";
+		const scripts = [];
+		for (const list of lists.filter(Boolean)) {
+			const found = list.getCosmeticsFilters(options);
+			styles += found.styles || "";
+			scripts.push(...(found.scripts || []));
+		}
+		return { styles, scripts };
+	}
+
 	// -------------------------------------------------------------- settings
 
 	function applySettings(next) {
 		settings = { ...DEFAULT_SETTINGS, ...(next || {}) };
 		settingsAt = Date.now();
+		if (settings.notices) loadNotices();
 	}
 
 	async function getSettings() {
@@ -581,18 +638,12 @@ function go(key) {
 			const source = decode(request.referrer);
 			await getSettings();
 			await waitForEngine();
+			await waitForNotices();
 			const blocked =
 				!!target &&
-				!!engine &&
 				settings.ads &&
 				!isAllowed(target.hostname) &&
-				engine.match(
-					FilterRequest.fromRawDetails({
-						url: target.href,
-						sourceUrl: (source || target).href,
-						type: "main_frame",
-					})
-				).match;
+				listed(target, source, "main_frame").match;
 			if (blocked) countBlocked();
 			return json({ blocked });
 		}
@@ -600,14 +651,9 @@ function go(key) {
 			const { url, classes, ids, hrefs } = await request.json();
 			await getSettings();
 			const host = parse(url);
-			if (
-				!engine ||
-				!settings.cosmetic ||
-				!host.hostname ||
-				isAllowed(host.hostname)
-			)
-				return json({ styles: "" });
-			const result = engine.getCosmeticsFilters({
+			if (!host.hostname || isAllowed(host.hostname)) return json({ styles: "" });
+			await waitForNotices();
+			const result = hiding([settings.cosmetic && engine, settings.notices && notices], {
 				url,
 				hostname: host.hostname,
 				domain: host.domain || host.hostname,
@@ -620,7 +666,7 @@ function go(key) {
 				getRulesFromHostname: false,
 				getRulesFromDOM: true,
 			});
-			return json({ styles: result.styles || "" });
+			return json({ styles: result.styles });
 		}
 		return new Response(null, { status: 404 });
 	}
@@ -1103,14 +1149,9 @@ function go(key) {
 
 		if (blocking && !allowOnce.delete(url)) {
 			await enginePromise;
+			await waitForNotices();
 			if (engine) {
-				const { match, redirect } = engine.match(
-					FilterRequest.fromRawDetails({
-						url: target.href,
-						sourceUrl: source ? source.href : target.href,
-						type: REQUEST_TYPES[destination] || "other",
-					})
-				);
+				const { match, redirect } = listed(target, source, REQUEST_TYPES[destination] || "other");
 				if (redirect && !isPage) {
 					countBlocked();
 					return new Response(
@@ -1140,6 +1181,7 @@ function go(key) {
 				url: target.href,
 				hostname: target.hostname,
 				cosmetic: blocking && settings.cosmetic,
+				notices: blocking && settings.notices,
 				videoAds: settings.videoAds && !isAllowed(target.hostname),
 				safer: hardened(),
 				// "Safest", or "Safer" on a plain http page: none of the page's own scripts run
@@ -1170,26 +1212,20 @@ function go(key) {
 	// -------------------------------------------- after Scramjet rewrites HTML
 
 	function injectHtml(html, page) {
-		let styles = "";
-		let scripts = [];
-		if (engine && page.cosmetic) {
-			const host = parse(page.url);
-			const result = engine.getCosmeticsFilters({
-				url: page.url,
-				hostname: page.hostname,
-				domain: host.domain || page.hostname,
-				getBaseRules: true,
-				getInjectionRules: true,
-				getExtendedRules: false,
-				getRulesFromHostname: true,
-				getRulesFromDOM: false,
-			});
-			styles = result.styles || "";
-			scripts = result.scripts || [];
-		}
+		const { styles, scripts } = hiding([page.cosmetic && engine, page.notices && notices], {
+			url: page.url,
+			hostname: page.hostname,
+			domain: parse(page.url).domain || page.hostname,
+			getBaseRules: true,
+			getInjectionRules: true,
+			getExtendedRules: false,
+			getRulesFromHostname: true,
+			getRulesFromDOM: false,
+		});
 
 		const flags = {
-			cosmetic: page.cosmetic,
+			// the page script asks for the rules that match what's on the page
+			cosmetic: page.cosmetic || page.notices,
 			videoAds: page.videoAds,
 			safer: page.safer,
 			// left out when the site has no framing rule
