@@ -26,6 +26,7 @@ function hook(win) {
 	hookFrames(win);
 	const client = win[SCRAMJET];
 	if (!client) return lockBare(win);
+	if (refusesFrame(client, win)) return;
 	frameNames(client, win);
 	ownParent(win);
 	blobSources(client, win);
@@ -348,6 +349,64 @@ function blobSources(client, win) {
 		if (String(name).toLowerCase() === "src" && setBlob(this, value)) return;
 		return setAttribute.apply(this, arguments);
 	};
+}
+
+/**
+ * A site's rule about which pages may show it in a frame (X-Frame-Options, or
+ * frame-ancestors in a Content-Security-Policy) keeps other sites from
+ * wrapping it to trick taps. Scramjet drops those headers, so the service
+ * worker hands the rule over (shield.js, framingRule): one list of allowed
+ * sources per policy. Every page above this one, up to the tab's, must match
+ * a source in each list. When one doesn't, nothing of the page shows or
+ * runs, as in a browser. A tab's own page isn't framed by another page.
+ * ponytail: page script, so a framing page that switches scripts off in its
+ * frame (sandbox) still gets the page shown. It gets no signed-in page that
+ * way: an embedded site keeps separate cookies under every site embedding it.
+ * @param {object} client The Scramjet client for this window.
+ * @param {Window} win
+ * @returns {boolean} true when the page was stopped
+ */
+function refusesFrame(client, win) {
+	const policies = win.__biosPage?.ancestors;
+	if (!policies || parentOf(win) === win || isTab(win)) return false;
+	const own = client.url;
+	const allowed = (source, url) => {
+		source = source.toLowerCase();
+		if (source === "'self'") return url.origin === own.origin;
+		if (source === "*") return /^https?:$/.test(url.protocol);
+		// "https:"
+		if (/^[a-z][a-z0-9+.-]*:$/.test(source)) return url.protocol === source;
+		// [scheme://]host[:port], the host maybe "*.example.com"; a path doesn't count here
+		const parts = /^(?:([a-z][a-z0-9+.-]*):\/\/)?(\*\.)?([a-z0-9.-]+|\*)(?::(\d+|\*))?(?:\/.*)?$/.exec(source);
+		if (!parts) return false;
+		const [, scheme, anySub, host, port] = parts;
+		const wanted = scheme ? scheme + ":" : own.protocol;
+		// a rule for http also lets the same host's https page frame it
+		if (url.protocol !== wanted && !(wanted === "http:" && url.protocol === "https:")) return false;
+		if (host !== "*" && (anySub ? !url.hostname.endsWith("." + host) : url.hostname !== host)) return false;
+		// URL.port is "" for the scheme's own port
+		return port === "*" || url.port === (port === (url.protocol === "https:" ? "443" : "80") ? "" : port || "");
+	};
+	let refused = false;
+	for (let w = win; !refused && parentOf(w) !== w && !isTab(w); ) {
+		w = parentOf(w);
+		let url = null;
+		try {
+			url = w[SCRAMJET]?.url;
+		} catch {
+			// not a page of ours
+		}
+		// a frame the page wrote itself (about:blank) answers for the page above it
+		if (url) refused = !policies.every((sources) => sources.some((source) => allowed(source, url)));
+	}
+	if (!refused) return false;
+	// What's parsed from here on lands outside the document, where nothing
+	// shows and no script runs; then the frame goes blank. (Not
+	// window.stop(): in Safari the page around the frame never finished
+	// loading.)
+	win.document.documentElement.replaceChildren();
+	win.location.replace("about:blank");
+	return true;
 }
 
 /**

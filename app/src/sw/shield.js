@@ -522,7 +522,9 @@ function go(key) {
 	go("sub");
 })();
 </script></body></html>`,
-			{ status: 200, headers: headers() }
+			// The site origin the tab goes on to learns from the referrer that
+			// another site sent it (see whoAsks). Safari sends none unless told to.
+			{ status: 200, headers: { ...headers(), "referrer-policy": "origin" } }
 		);
 	}
 
@@ -628,6 +630,200 @@ function go(key) {
 	function decode(url) {
 		if (!url || !url.startsWith(prefix)) return null;
 		return decodeUrl(url);
+	}
+
+	// ------------------------------------------------- what sites are told
+
+	// A site is told where each request comes from (Sec-Fetch-Site, Referer,
+	// Origin) and refuses forged requests by it; its SameSite cookies depend
+	// on the same answer. Scramjet works it out from the browser's referrer
+	// for the proxied address, which goes wrong three ways here: our own
+	// in-between pages (trampolines) make a navigation look like the site's
+	// own, a page that sends no referrer looks like nobody's, and every
+	// request to another site carries the page's whole address.
+	const RANK = { none: 0, "same-origin": 1, "same-site": 2, "cross-site": 3 };
+	const stricter = (a, b) => (RANK[b] > RANK[a] ? b : a);
+	const safe = (method) => method === "GET" || method === "HEAD";
+
+	function relation(from, to) {
+		if (from.origin === to.origin) return "same-origin";
+		return from.protocol === to.protocol && siteOf(from.hostname) === siteOf(to.hostname)
+			? "same-site"
+			: "cross-site";
+	}
+
+	// In isolation mode a tab reaches another site through that site's own
+	// origin. All its worker sees is that the page before was another site's.
+	function fromAnotherSite(referrer) {
+		if (!isolated || !referrer) return false;
+		try {
+			const at = new URL(referrer);
+			return at.origin !== location.origin && at.hostname.endsWith("." + isolationDomain);
+		} catch {
+			return false;
+		}
+	}
+
+	// ponytail: both forget everything when full; a request caught by that
+	// is described by Scramjet alone, as all were before
+	const hops = new Map(); // proxied page URL -> who began the navigation a trampoline or a redirect carries on
+	const asked = new Map(); // site URL -> who is asking, for the request Scramjet sends next
+	function keep(map, key, value) {
+		if (map.size > 200) map.clear();
+		map.set(key, value);
+	}
+
+	/**
+	 * Who is asking for `target`: { site, from, quiet, brief, nav, framed,
+	 * carried, mode, method }, or null when there's no telling (Scramjet's
+	 * own answer stands). `from`: the asking page's site URL, when known.
+	 * `quiet`: the page sends no referrer; `brief`: its origin only.
+	 */
+	async function whoAsks(event, url, target, isPage) {
+		const { request } = event;
+		const ref = decode(request.referrer);
+		const who = {
+			site: "none",
+			from: ref,
+			quiet: !request.referrer,
+			brief: !!request.referrer && !ref,
+			nav: isPage,
+			mode: request.mode,
+			method: request.method,
+		};
+		if (!isPage) {
+			// a page that hides its referrer is still the one asking
+			if (!ref && event.clientId) who.from = decode((await self.clients.get(event.clientId))?.url);
+			if (!who.from) return null;
+			who.site = relation(who.from, target);
+			return who;
+		}
+		const hop = hops.get(pageKey(url));
+		// One of our trampolines carrying a navigation on (it asks for its own
+		// address again), or a redirect: whoever began it is asking. One step
+		// through another site makes the whole chain another site's.
+		if (
+			hop &&
+			Date.now() - hop.at < 60_000 &&
+			(hop.redirect || (ref && pageKey(request.referrer) === pageKey(url)))
+		) {
+			hops.delete(pageKey(url));
+			const began = hop.who;
+			return {
+				...began,
+				method: request.method,
+				carried: true,
+				site: began.from ? stricter(began.site, relation(began.from, target)) : began.site,
+			};
+		}
+		if (ref) who.site = relation(ref, target);
+		else if (fromAnotherSite(request.referrer)) who.site = "cross-site";
+		return who;
+	}
+
+	// One answer for everyone, as in Tor Browser: the device's own list of
+	// languages helps tell its owner apart. (Scramjet sent none, and some
+	// sites then guessed a language from where the server is.)
+	const LANGUAGE = "en-US,en;q=0.9";
+
+	scramjet.addEventListener("request", (event) => {
+		const headers = event.requestHeaders;
+		headers["accept-language"] = LANGUAGE;
+		// Global Privacy Control: "don't sell or share my data", binding under some laws
+		headers["sec-gpc"] = "1";
+		const who = asked.get(event.url.href);
+		if (!who) return;
+		asked.delete(event.url.href);
+		const to = event.url;
+		const { from } = who;
+
+		// Scramjet follows a background request's redirects, so its answer
+		// counts when it's the stricter one. After a trampoline its answer is
+		// about our own page, and ours stands alone.
+		const theirs = headers["sec-fetch-site"];
+		const site = who.carried || !(theirs in RANK) ? who.site : stricter(who.site, theirs);
+		headers["sec-fetch-site"] = site;
+
+		// Referer: the whole address for the page's own origin; for others the
+		// origin only, and nothing from an https page to an http one (what
+		// browsers do by default). Never more than the page itself would send.
+		if (who.quiet || !from || (from.protocol === "https:" && to.protocol === "http:"))
+			delete headers.referer;
+		else
+			headers.referer =
+				from.origin === to.origin && !who.brief ? from.href.split("#")[0] : from.origin + "/";
+
+		if (who.nav) {
+			// A frame inside a page, when we know it is one. (Scramjet says
+			// "iframe" for every address typed into the bar: the tab is a frame.)
+			headers["sec-fetch-dest"] = who.framed ? "iframe" : "document";
+			// A posted form names the origin it was posted from, and sites
+			// tell their own forms from forged ones by it; "null" when the
+			// page won't say or it came from another origin of this app.
+			if (!safe(who.method)) {
+				if (from && !who.quiet) headers.origin = from.origin;
+				else if (who.quiet || site === "cross-site") headers.origin = "null";
+			}
+		} else if (who.quiet && who.mode === "no-cors" && safe(who.method)) {
+			// Scramjet names the page's origin on every request; a browser
+			// doesn't on these, and the page asked not to be named
+			delete headers.origin;
+		}
+
+		// SameSite cookies: Strict ones never go with another site's request,
+		// Lax ones only when a link or the address bar takes the tab there.
+		if (site === "cross-site" && headers.cookie) {
+			const laxToo = who.nav && !who.framed && safe(who.method);
+			const jar = Object.create(scramjet.cookieStore);
+			jar.cookies = Object.fromEntries(
+				Object.entries(scramjet.cookieStore.cookies).filter(([, cookie]) => {
+					const rule = String(cookie.sameSite).toLowerCase();
+					return rule !== "strict" && (rule !== "lax" || laxToo);
+				})
+			);
+			const cookie = jar.getCookies(to, false);
+			if (cookie) headers.cookie = cookie;
+			else delete headers.cookie;
+		}
+	});
+
+	// A cookie that doesn't say goes everywhere, as in Safari. (Scramjet's
+	// jar files it under Lax, which would keep it home with the ones that
+	// asked to stay; Chrome does that, with exceptions sign-ins depend on.)
+	const setCookies = scramjet.cookieStore.setCookies.bind(scramjet.cookieStore);
+	scramjet.cookieStore.setCookies = (cookies, url) =>
+		setCookies(
+			cookies.map((cookie) => (/;\s*samesite\s*=/i.test(cookie) ? cookie : cookie + "; SameSite=None")),
+			url
+		);
+
+	/**
+	 * A site's rule about which pages may show it in a frame: X-Frame-Options,
+	 * or frame-ancestors in a Content-Security-Policy, which wins when both
+	 * are there. Scramjet drops both headers. Returns null, or one list of
+	 * allowed sources per policy for page.js to hold the page's frame to.
+	 */
+	function framingRule(rawHeaders) {
+		let options = "";
+		const policies = [];
+		for (const [name, value] of Object.entries(rawHeaders || {})) {
+			const header = name.toLowerCase();
+			// a header sent twice arrives as a list; a comma also separates policies
+			const text = [].concat(value).join(",");
+			if (header === "x-frame-options") options = text.toLowerCase();
+			else if (header === "content-security-policy")
+				for (const policy of text.split(",")) {
+					const rule = policy
+						.split(";")
+						.map((directive) => directive.trim().split(/\s+/))
+						.find(([directive]) => directive.toLowerCase() === "frame-ancestors");
+					if (rule) policies.push(rule.slice(1));
+				}
+		}
+		if (policies.length) return policies;
+		if (/\bdeny\b/.test(options)) return [[]];
+		if (/\bsameorigin\b/.test(options)) return [["'self'"]];
+		return null;
 	}
 
 	// Counts blocked requests for the new tab's "trackers blocked" stat and
@@ -804,6 +1000,7 @@ function go(key) {
 		const upgraded = await httpsOnly(request, target, isPage, url);
 		if (upgraded) return upgraded;
 
+		const who = await whoAsks(event, url, target, isPage);
 		const enginePromise = waitForEngine();
 
 		if (isPage) {
@@ -818,11 +1015,20 @@ function go(key) {
 						inline: url,
 						shell: shellOrigin + "/#" + encodeURIComponent(target.href),
 					});
+					// Only a frame inside a page carries on in this origin. Its
+					// site isn't this origin's, so unless a page of that site
+					// asked, the request is another site's.
+					if (page && who)
+						keep(hops, pageKey(url), {
+							who: { ...who, framed: true, site: who.from ? who.site : "cross-site" },
+							at: Date.now(),
+						});
 					if (page) return page;
 				} else if (!(await hasProxyClient())) {
 					// First page of this site since the app opened: start the
 					// proxy connection for this origin, then load the page.
 					const page = await trampoline(request, { boot: true, url });
+					if (page && who) keep(hops, pageKey(url), { who, at: Date.now() });
 					if (page) return page;
 				}
 			}
@@ -893,7 +1099,12 @@ function go(key) {
 			});
 		}
 		failures.delete(target.href);
+		if (who) keep(asked, target.href, who);
 		const response = await scramjet.fetch(event);
+		if (isPage && who && response.status >= 300 && response.status < 400) {
+			const to = response.headers.get("location");
+			if (to) keep(hops, pageKey(new URL(to, url).href), { who, redirect: true, at: Date.now() });
+		}
 		// Scramjet answers a page it couldn't fetch with an error page of its
 		// own, which the app's frame can't show (it lacks the header that
 		// allows it): the tab stayed blank. Say what went wrong instead.
@@ -929,7 +1140,13 @@ function go(key) {
 			scripts = result.scripts || [];
 		}
 
-		const flags = { cosmetic: page.cosmetic, videoAds: page.videoAds, safer: page.safer };
+		const flags = {
+			cosmetic: page.cosmetic,
+			videoAds: page.videoAds,
+			safer: page.safer,
+			// left out when the site has no framing rule
+			ancestors: page.ancestors || undefined,
+		};
 		// On a no-scripts page (see policyFor), only scripts with the nonce run.
 		const nonce = page.nonce ? ` nonce="${page.nonce}"` : "";
 		let after =
@@ -990,8 +1207,10 @@ function go(key) {
 		// lets the page load in the app's frame across subdomains
 		event.responseHeaders["cross-origin-resource-policy"] = "same-site";
 		const type = event.responseHeaders["content-type"] || "";
-		if (typeof event.responseBody === "string" && /^text\/html/i.test(type))
+		if (typeof event.responseBody === "string" && /^text\/html/i.test(type)) {
+			page.ancestors = framingRule(event.rawResponse?.rawHeaders);
 			event.responseBody = injectHtml(event.responseBody, page);
+		}
 	});
 
 	loadEngine();
