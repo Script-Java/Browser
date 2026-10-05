@@ -25,6 +25,9 @@ function hook(win) {
 	noWebRTC(win);
 	privacySignal(win);
 	hookFrames(win);
+	// before the Scramjet check, like the rest up here: a frame Scramjet
+	// hasn't hooked yet answers scripts too
+	if (pageFlags(win).safer) safer(win);
 	const client = win[SCRAMJET];
 	if (!client) return lockBare(win);
 	if (refusesFrame(client, win)) return;
@@ -237,6 +240,284 @@ function privacySignal(win) {
 		});
 	} catch {
 		// no Navigator in this window
+	}
+}
+
+/**
+ * The page's settings from the service worker (shield.js, injectHtml). A frame
+ * the page wrote itself (about:blank, srcdoc) has none of its own: the page's
+ * apply to it.
+ * @param {Window} win
+ */
+function pageFlags(win) {
+	try {
+		for (let w = win, depth = 0; depth < 8; depth++) {
+			if (w.__biosPage) return w.__biosPage;
+			if (w.parent === w) break;
+			w = w.parent;
+		}
+	} catch {
+		// the shell, on another origin
+	}
+	return {};
+}
+
+/**
+ * The "Safer" security level in a page: no WebGL or WebGPU, and the answers a
+ * script gets about the device are everyone's.
+ * @param {Window} win
+ */
+function safer(win) {
+	if (win.__biosSafer) return;
+	Object.defineProperty(win, "__biosSafer", { value: true });
+	noGpu(win);
+	lessUnique(win);
+}
+
+// For the noise below: one draw for this page and the frames it writes. What
+// a script reads back stays the same within the page (reading twice doesn't
+// give the noise away) and is different on the next page.
+const NOISE = crypto.getRandomValues(new Uint32Array(1))[0];
+function mix(n) {
+	let h = Math.imul(NOISE ^ n, 0x85ebca6b);
+	h ^= h >>> 13;
+	h = Math.imul(h, 0xc2b2ae35);
+	return (h ^ (h >>> 16)) >>> 0;
+}
+
+/**
+ * "Safer": less for a site to tell this device from others by. Scripts get
+ * one language, a common processor count, and the time in UTC; what they read
+ * back from a canvas or a sound buffer carries a little noise, so it can't
+ * serve as the device's signature.
+ * ponytail: page script against page script, like noWebRTC. Not covered: the
+ * screen's size, the fonts installed, and anything read inside a worker,
+ * which this script doesn't reach. Tor Browser does all of it in the browser.
+ * @param {Window} win
+ */
+function lessUnique(win) {
+	const answer = (object, name, value) => {
+		try {
+			Object.defineProperty(object, name, { get: () => value, enumerable: true, configurable: true });
+		} catch {
+			// not there, or locked
+		}
+	};
+	const nav = win.Navigator.prototype;
+	// the same as the Accept-Language shield.js sends
+	answer(nav, "language", "en-US");
+	answer(nav, "languages", Object.freeze(["en-US", "en"]));
+	answer(nav, "hardwareConcurrency", 4);
+	if ("deviceMemory" in nav) answer(nav, "deviceMemory", 8);
+	utcClock(win);
+	noisyCanvas(win);
+	noisySound(win);
+}
+
+/**
+ * The time zone says where a device is. Every way a page can ask is answered
+ * as in UTC, and in English: Date's local-time methods, its text forms and its
+ * reading of times without a zone, and the defaults of Intl's formatters.
+ * @param {Window} win
+ */
+function utcClock(win) {
+	const RealDate = win.Date;
+	const proto = RealDate.prototype;
+	const realOffset = proto.getTimezoneOffset;
+	const utcText = proto.toUTCString;
+	const ZONE = "GMT+0000 (Coordinated Universal Time)";
+
+	for (const part of ["Date", "Day", "FullYear", "Hours", "Milliseconds", "Minutes", "Month", "Seconds"]) {
+		proto["get" + part] = proto["getUTC" + part];
+		if (proto["setUTC" + part]) proto["set" + part] = proto["setUTC" + part];
+	}
+	// 0, or NaN for an invalid date, as the real one answers
+	proto.getTimezoneOffset = function () {
+		return this.getTime() * 0 + 0;
+	};
+
+	// "Thu, 01 Jan 1970 00:00:00 GMT", taken apart
+	const parts = (date) => /^(\w+), (\d+) (\w+) (-?\d+) (\S+) GMT$/.exec(utcText.call(date));
+	proto.toDateString = function () {
+		const p = parts(this);
+		return p ? `${p[1]} ${p[3]} ${p[2]} ${p[4]}` : "Invalid Date";
+	};
+	proto.toTimeString = function () {
+		const p = parts(this);
+		return p ? `${p[5]} ${ZONE}` : "Invalid Date";
+	};
+	proto.toString = function () {
+		const p = parts(this);
+		return p ? `${p[1]} ${p[3]} ${p[2]} ${p[4]} ${p[5]} ${ZONE}` : "Invalid Date";
+	};
+
+	for (const name of ["toLocaleString", "toLocaleDateString", "toLocaleTimeString"]) {
+		const real = proto[name];
+		proto[name] = function (locales, options) {
+			return real.call(this, locales ?? "en-US", { timeZone: "UTC", ...options });
+		};
+	}
+	const numberText = win.Number.prototype.toLocaleString;
+	win.Number.prototype.toLocaleString = function (locales, options) {
+		return numberText.call(this, locales ?? "en-US", options);
+	};
+	// Intl.DateTimeFormat, NumberFormat and the rest: English unless the page
+	// names a language, and UTC unless it names a zone
+	for (const name of Object.getOwnPropertyNames(win.Intl || {})) {
+		const Real = win.Intl[name];
+		if (typeof Real !== "function" || typeof Real.prototype?.resolvedOptions !== "function") continue;
+		const withDefaults = ([locales, options]) => [
+			locales ?? "en-US",
+			name === "DateTimeFormat" ? { timeZone: "UTC", ...options } : options,
+		];
+		const stand = new win.Proxy(Real, {
+			construct: (target, args, newTarget) =>
+				Reflect.construct(target, withDefaults(args), newTarget === stand ? target : newTarget),
+			apply: (target, self, args) => Reflect.apply(target, self, withDefaults(args)),
+		});
+		Real.prototype.constructor = stand;
+		win.Intl[name] = stand;
+	}
+
+	// A time written without a zone is the device's: read it as UTC's
+	// instead. One with a zone ("…Z", "GMT+2", "10:00+05:30", "EST"), or a
+	// plain ISO date (UTC by the standard), is left as it is.
+	// ponytail: by the text's look; an unusual form with a zone the browser
+	// understands and this doesn't is read an offset out.
+	const ZONED = /Z\s*$|\b(?:GMT|UTC?)\b|:\d{2}(?:\.\d+)?\s*[+-]\d{2}(?::?\d{2})?|\b[ECMP][SD]T\b/i;
+	const DAY_ONLY = /^\s*\d{4}(?:-\d{2}){0,2}\s*$/;
+	const parse = (text) => {
+		text = String(text);
+		const ms = RealDate.parse(text);
+		if (Number.isNaN(ms) || ZONED.test(text) || DAY_ONLY.test(text)) return ms;
+		return ms - realOffset.call(new RealDate(ms)) * 60_000;
+	};
+	const StandDate = new win.Proxy(RealDate, {
+		construct(target, args, newTarget) {
+			// new Date(2026, 0, 1): the device's midnight, read as UTC's
+			if (args.length > 1) args = [RealDate.UTC(...args)];
+			else if (typeof args[0] === "string") args = [parse(args[0])];
+			return Reflect.construct(target, args, newTarget === StandDate ? target : newTarget);
+		},
+		apply: () => new StandDate().toString(),
+		get: (target, key, receiver) => (key === "parse" ? parse : Reflect.get(target, key, receiver)),
+	});
+	proto.constructor = StandDate;
+	win.Date = StandDate;
+	// the newer date API has its own ways to ask for the zone; pages still
+	// check for it before using it
+	try {
+		delete win.Temporal;
+	} catch {
+		// locked
+	}
+}
+
+/**
+ * What a canvas draws differs by device (fonts, graphics chip, smoothing), so
+ * reading it back gives a signature. Two pixels in every row are changed by
+ * the smallest step before a script sees them: invisible, and enough to
+ * change the signature from page to page.
+ * @param {Window} win
+ */
+function noisyCanvas(win) {
+	// by the pixel's place on the canvas, so two readings that overlap agree
+	const speckle = (image, left, top, canvas) => {
+		const { data, width, height } = image;
+		for (let row = 0; row < height; row++) {
+			const y = top + row;
+			if (y < 0 || y >= canvas.height) continue;
+			for (const salt of [0, 1]) {
+				const h = mix(y * 2 + salt);
+				const x = (h % canvas.width) - left;
+				if (x >= 0 && x < width) data[(row * width + x) * 4 + ((h >>> 20) % 3)] ^= 1;
+			}
+		}
+	};
+	const contexts = [win.CanvasRenderingContext2D, win.OffscreenCanvasRenderingContext2D].filter(Boolean);
+	const readers = new Map();
+	for (const Context of contexts) {
+		const real = Context.prototype.getImageData;
+		readers.set(Context, real);
+		Context.prototype.getImageData = function (sx, sy, sw, sh, ...rest) {
+			const image = real.call(this, sx, sy, sw, sh, ...rest);
+			// a negative width or height reads leftwards or upwards
+			speckle(image, Math.trunc(sw < 0 ? sx + sw : sx), Math.trunc(sh < 0 ? sy + sh : sy), this.canvas);
+			return image;
+		};
+	}
+	// The canvas as it is, speckled, on a canvas of its own: the picture a
+	// script takes away (toDataURL, toBlob) is of that one.
+	const twin = (canvas, blank) => {
+		if (!canvas.width || !canvas.height) return canvas;
+		const copy = blank(canvas.width, canvas.height);
+		const context = copy.getContext("2d");
+		const read = readers.get(Object.getPrototypeOf(context).constructor) || context.getImageData;
+		context.drawImage(canvas, 0, 0);
+		const image = read.call(context, 0, 0, copy.width, copy.height);
+		speckle(image, 0, 0, copy);
+		context.putImageData(image, 0, 0);
+		return copy;
+	};
+	const onPage = (width, height) => Object.assign(win.document.createElement("canvas"), { width, height });
+	const offPage = (width, height) => new win.OffscreenCanvas(width, height);
+	for (const [proto, names, blank] of [
+		[win.HTMLCanvasElement?.prototype, ["toDataURL", "toBlob"], onPage],
+		[win.OffscreenCanvas?.prototype, ["convertToBlob"], offPage],
+	])
+		for (const name of names) {
+			const real = proto?.[name];
+			if (typeof real !== "function") continue;
+			proto[name] = function (...args) {
+				return real.apply(twin(this, blank), args);
+			};
+		}
+}
+
+/**
+ * The same for sound: how a device's audio code rounds its sums is a
+ * signature. Samples a script reads back are moved by one part in ten
+ * million, far below hearing.
+ * @param {Window} win
+ */
+function noisySound(win) {
+	const buffer = win.AudioBuffer?.prototype;
+	if (buffer) {
+		const real = buffer.getChannelData;
+		// once for each channel of each buffer: the samples are the buffer's own
+		const shaken = new WeakMap();
+		const shake = (sound, channel) => {
+			const data = real.call(sound, channel);
+			const done = shaken.get(sound) || new Set();
+			shaken.set(sound, done);
+			if (!done.has(channel)) {
+				done.add(channel);
+				for (let i = mix(channel) % 89; i < data.length; i += 89) data[i] += mix(i) & 1 ? 1e-7 : -1e-7;
+			}
+			return data;
+		};
+		buffer.getChannelData = function (channel) {
+			return shake(this, channel);
+		};
+		const copy = buffer.copyFromChannel;
+		if (copy)
+			buffer.copyFromChannel = function (destination, channel, ...rest) {
+				shake(this, channel);
+				return copy.call(this, destination, channel, ...rest);
+			};
+	}
+	const analyser = win.AnalyserNode?.prototype;
+	for (const name of ["getFloatFrequencyData", "getFloatTimeDomainData", "getByteFrequencyData", "getByteTimeDomainData"]) {
+		const real = analyser?.[name];
+		if (typeof real !== "function") continue;
+		const whole = name.includes("Byte");
+		analyser[name] = function (array) {
+			real.call(this, array);
+			for (let i = mix(1) % 13; i < array.length; i += 13) {
+				if (whole) array[i] ^= mix(i) & 1;
+				else array[i] += mix(i) & 1 ? 1e-4 : -1e-4;
+			}
+		};
 	}
 }
 
@@ -961,17 +1242,7 @@ function pageShield(client, win) {
 		// no service worker here
 	}
 
-	let flags = win.__biosPage;
-	if (!flags) {
-		// about:blank / srcdoc frames written by their parent page
-		try {
-			flags = win.parent.__biosPage;
-		} catch {
-			// cross-origin parent
-		}
-	}
-	flags ||= {};
-	if (flags.safer) noGpu(win);
+	const flags = pageFlags(win);
 	// keep the page's own scripts from rewriting our timers
 	const setTimer = win.setTimeout.bind(win);
 	const setRepeat = win.setInterval.bind(win);

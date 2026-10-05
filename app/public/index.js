@@ -1292,7 +1292,7 @@ for (const input of sheet.querySelectorAll("[data-setting]")) {
 
 const LEVEL_NOTES = {
 	standard: "Every site works as usual",
-	safer: "No web fonts, WebGL or WebGPU on any site, and no scripts on sites without https. Some sites look or work worse.",
+	safer: "No web fonts, WebGL or WebGPU on any site, no scripts on sites without https, and sites learn less about this device: they see English, and times in UTC. Some sites look or work worse.",
 	safest: "Everything in Safer, and no site's own scripts at all. Many sites stop working: menus, videos, sign-ins.",
 };
 
