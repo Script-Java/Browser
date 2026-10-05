@@ -25,15 +25,29 @@
 			// image, a PDF, a warning page) can't tell the shell where its tab
 			// is, and the shell can't read another origin's address. This frame
 			// can: it shares the origin. Reading throws for other sites' frames.
-			// The shell works out which tab a frame is; `name` only lets it
-			// notice that the frames moved in between.
+			//
+			// The shell doesn't take this frame's word for it: a page of this
+			// site could reach in here and name any tab. It sends a one-time
+			// word to the tab's own frame, in a message the browser delivers only
+			// if that frame is on this origin, and the word comes back with the
+			// address. So nothing on this origin can speak for another site's tab.
 			setInterval(() => {
 				const docs = [];
 				for (let index = 0; index < parent.length; index++) {
 					try {
 						const win = parent[index];
 						const href = win.location.href;
-						if (win !== window && !win.__biosShield) docs.push({ index, name: win.name, href });
+						if (win === window || win.__biosShield) continue;
+						if (!win.__biosWhere) {
+							// on the page's window, so it goes when the page does
+							win.__biosWhere = true;
+							win.addEventListener("message", (event) => {
+								if (event.source !== parent || event.data?.bios !== "where") return;
+								parent.postMessage({ bios: "docs", word: event.data.word, href: win.location.href }, "*");
+							});
+						}
+						// `name` lets the shell notice that the frames moved in between
+						docs.push({ index, name: win.name, href });
 					} catch {
 						// another site's frame
 					}

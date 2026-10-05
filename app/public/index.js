@@ -772,20 +772,35 @@ async function onFrameMessage(event) {
 
 	// Isolation mode: a site's anchor frame saying where the pages of its
 	// site are that can't say so themselves (a JSON file, an image, a PDF, a
-	// warning page). Which tab a frame is, the shell looks up itself; the
-	// address must belong to the anchor's site, as a page's own report must.
+	// warning page). That is only a hint: a page of that site could reach
+	// into its anchor and name any tab. So the shell sends the tab's own
+	// frame a one-time word, in a message the browser delivers only if the
+	// frame is on the anchor's origin, and believes the address that comes
+	// back with the word. It must belong to the anchor's site, as a page's
+	// own report must.
 	if (data?.bios === "docs") {
 		const key = SITE_ORIGIN?.exec(event.origin)?.[1];
 		if (!isolated || !key || anchors.get(event.origin)?.frame.contentWindow !== event.source) return;
-		for (const doc of Array.isArray(data.docs) ? data.docs.slice(0, MAX_TABS) : []) {
-			const tab = tabFor(window.frames[doc?.index]);
+		const here = (href) => (String(href).startsWith(event.origin + "/scramjet/") ? siteUrl(href) : "");
+		if (typeof data.word === "string") {
+			const tab = tabs.find((t) => t.asked?.word === data.word && t.asked.origin === event.origin);
+			const url = here(data.href);
+			if (!tab || !url) return;
+			tab.asked = null;
 			// while the shell loads a page into the tab, the old one is still there
-			if (!tab || tab.loading || tab.frame.name !== doc.name) continue;
-			const url = String(doc.href).startsWith(event.origin + "/scramjet/") ? siteUrl(doc.href) : "";
-			if (!url || url === tab.url) continue;
-			if ((await BiosSiteKey.siteKey(new URL(url).hostname)) !== key) continue;
+			if (tab.loading || url === tab.url) return;
+			if ((await BiosSiteKey.siteKey(new URL(url).hostname)) !== key) return;
 			tab.siteOrigin = event.origin;
 			updateTab(tab, url, "");
+			return;
+		}
+		for (const doc of Array.isArray(data.docs) ? data.docs.slice(0, MAX_TABS) : []) {
+			const tab = tabFor(window.frames[doc?.index]);
+			if (!tab || tab.loading || tab.frame.name !== doc.name) continue;
+			const url = here(doc.href);
+			if (!url || url === tab.url) continue;
+			tab.asked = { word: crypto.randomUUID(), origin: event.origin };
+			tab.frame.contentWindow.postMessage({ bios: "where", word: tab.asked.word }, event.origin);
 		}
 		return;
 	}

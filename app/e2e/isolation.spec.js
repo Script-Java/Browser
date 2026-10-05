@@ -77,3 +77,27 @@ test("the address bar follows a tab to a page that isn't HTML (isolated)", async
 	await page.waitForFunction(() => active.url === "https://httpbingo.org/get?x=1" && !active.title);
 	await expect(page.locator("#bar-input")).toHaveValue("httpbingo.org");
 });
+
+test("nothing on one site's origin can put its address on another site's tab", async ({ page }) => {
+	await page.goto(ISOLATED_URL + "/");
+	await page.waitForFunction(() => typeof go === "function" && !!active, null, { timeout: 60_000 });
+	await open(page, "https://example.com/");
+	// a second tab on another site: a page there could reach into that site's anchor frame
+	await page.evaluate(() => createTab("https://example.org/"));
+	await page.waitForFunction(() => active.url === "https://example.org/" && !active.loading && !!active.siteOrigin);
+	const victim = await page.evaluate(() => ({
+		origin: active.siteOrigin,
+		name: tabs[0].frame.name,
+		index: [...Array(window.length).keys()].find((i) => window.frames[i] === tabs[0].frame.contentWindow),
+	}));
+	const anchor = page.frames().find((frame) => frame.url() === victim.origin + "/anchor.html");
+	await anchor.evaluate(({ index, name }) => {
+		const href = location.origin + "/scramjet/" + encodeURIComponent("https://example.org/forged");
+		// the anchor's own kind of report, naming the other site's tab
+		parent.postMessage({ bios: "docs", docs: [{ index, name, href }] }, "*");
+		// and an answer as if that tab's frame had been asked, with a made-up word
+		parent.postMessage({ bios: "docs", word: "made-up", href }, "*");
+	}, victim);
+	await page.waitForTimeout(1500);
+	expect(await page.evaluate(() => tabs[0].url)).toBe("https://example.com/");
+});
