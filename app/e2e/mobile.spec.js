@@ -77,3 +77,49 @@ test("a stream given to a <source> element opens", async ({ app, browserName }) 
 	);
 	await expect.poll(() => frame.title()).toBe("OPENED 2");
 });
+
+// A phone's home-screen app has no find of its own, so the app brings one.
+const selected = (frame) =>
+	frame.evaluate(() => ({
+		text: getSelection().toString(),
+		around: getSelection().anchorNode?.textContent ?? "",
+		// (browsers without CSS highlights only get the selection)
+		marked: CSS.highlights ? CSS.highlights.has("bios-find") : true,
+		scrolled: scrollY > 0,
+	}));
+
+test("find in page goes from match to match", async ({ app }) => {
+	const frame = await open(
+		app,
+		testPage(`<!doctype html><title>words</title><p>alpha beta</p><p style="margin-top:3000px">gamma beta</p>`)
+	);
+	await app.evaluate(() => openFind());
+	const input = app.locator("#find-input");
+	await input.fill("beta");
+	await expect.poll(() => selected(frame)).toEqual({ text: "beta", around: "alpha beta", marked: true, scrolled: false });
+	await input.press("Enter");
+	await expect.poll(() => selected(frame)).toEqual({ text: "beta", around: "gamma beta", marked: true, scrolled: true });
+	await input.press("Shift+Enter");
+	await expect.poll(async () => (await selected(frame)).around).toBe("alpha beta");
+
+	await input.fill("zebra");
+	await expect(app.locator("#find-status")).toHaveText("No matches");
+	await input.fill("alpha");
+	await expect.poll(async () => (await selected(frame)).text).toBe("alpha");
+	await app.locator("#find-close").click();
+	await expect(app.locator("#find")).toBeHidden();
+	await expect.poll(() => selected(frame)).toMatchObject({ text: "", marked: false });
+});
+
+test("find in page reaches a tab on its own origin (site isolation)", async ({ page }) => {
+	await page.goto(ISOLATED_URL + "/");
+	await page.waitForFunction(() => typeof go === "function" && !!active, null, { timeout: 60_000 });
+	await open(page, "https://example.com/");
+	await page.waitForFunction(() => active.title === "Example Domain");
+	await page.evaluate(() => openFind());
+	await page.locator("#find-input").fill("example");
+	const frame = await tabFrame(page);
+	await expect.poll(async () => (await selected(frame)).text.toLowerCase()).toBe("example");
+	await page.locator("#find-input").fill("zebra");
+	await expect(page.locator("#find-status")).toHaveText("No matches");
+});

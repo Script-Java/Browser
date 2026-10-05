@@ -810,6 +810,13 @@ async function onFrameMessage(event) {
 	const tab = tabFor(event.source);
 	if (!tab) return;
 
+	// the page's answer to the find bar
+	if (data?.bios === "found") {
+		if (tab === active && !findBar.hidden && data.text === findInput.value)
+			$("find-status").textContent = data.found || !data.text ? "" : "No matches";
+		return;
+	}
+
 	// The tab landed on a site origin with no proxy connection yet.
 	if (isolated && data?.bios === "need-anchor" && SITE_ORIGIN.test(event.origin)) {
 		await ensureAnchor(event.origin);
@@ -922,6 +929,54 @@ function step(dir, tab = active) {
 	go(url, tab, false);
 }
 
+// Find in page. The page does the looking (page.js, with the browser's own
+// text search): the shell can't reach into a tab on another origin, and a
+// phone's home-screen app has no find of its own.
+const findBar = $("find");
+const findInput = $("find-input");
+
+// `again`: the next match (or the one before, with `back`) rather than the first
+function findInPage(text, back = false, again = false) {
+	$("find-status").textContent = "";
+	if (!active?.url) return;
+	// The shell's own postMessage, applied to the frame: without isolation
+	// the frame's is Scramjet's stand-in, which builds a function from a
+	// string in the caller's window, and the shell's policy forbids that here.
+	window.postMessage.call(
+		active.frame.contentWindow,
+		{ bios: "cmd", cmd: "find", text, back, again },
+		active.siteOrigin || location.origin
+	);
+}
+
+function openFind() {
+	sheet.hidden = true;
+	findBar.hidden = false;
+	findInput.focus();
+	findInput.select();
+	if (findInput.value) findInPage(findInput.value);
+}
+
+function closeFind() {
+	if (findBar.hidden) return;
+	findBar.hidden = true;
+	findInPage("");
+}
+
+findInput.addEventListener("input", () => findInPage(findInput.value));
+findInput.addEventListener("keydown", (event) => {
+	if (event.key !== "Enter" || !event.shiftKey) return;
+	event.preventDefault();
+	findInPage(findInput.value, true, true);
+});
+findBar.addEventListener("submit", (event) => {
+	event.preventDefault();
+	findInPage(findInput.value, false, true);
+});
+$("find-prev").addEventListener("click", () => findInPage(findInput.value, true, true));
+$("find-close").addEventListener("click", closeFind);
+$("find-open").addEventListener("click", openFind);
+
 $("back").addEventListener("click", () => step(-1));
 $("forward").addEventListener("click", () => step(1));
 $("reload").addEventListener("click", () => reload());
@@ -953,6 +1008,7 @@ document.addEventListener("keydown", (event) => {
 	if (event.key === "Escape") {
 		sheet.hidden = library.hidden = switcher.hidden = true;
 		hideSuggest();
+		closeFind();
 		return;
 	}
 	if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
@@ -974,6 +1030,7 @@ const COMMANDS = [
 	{ name: "Split view", when: () => !split && canSplit(), run: toggleSplit },
 	{ name: "Close split view", when: () => !!split, run: toggleSplit },
 	{ name: "Reload page", when: () => !!active?.url, run: () => reload() },
+	{ name: "Find in page", when: () => !!active?.url, run: () => openFind() },
 	{ name: "New identity", run: () => newIdentity() },
 	// opens Settings on the button rather than wiping from a typo
 	{
@@ -1157,7 +1214,7 @@ function renderSheet() {
 			"Address verified. This site runs walled off from other sites.";
 	else trust.textContent = "Encrypted connection.";
 
-	$("site-row").hidden = $("scripts-row").hidden = !site;
+	$("site-row").hidden = $("scripts-row").hidden = $("find-open").hidden = !site;
 	// only with isolation does a site have storage of its own to keep
 	$("keep-row").hidden = !site || !isolated;
 	$("site-toggle").checked = !settings.allow.includes(site);

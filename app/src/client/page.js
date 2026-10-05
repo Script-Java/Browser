@@ -1167,6 +1167,43 @@ function skipVideoAds(win, setRepeat, whenReady) {
 }
 
 /**
+ * Find in page, for the app's find bar: the browser's own text search
+ * (window.find), which selects the next match and scrolls to it. The match
+ * also gets a CSS highlight: the selection of a frame that doesn't have the
+ * focus (the find bar has it) is drawn faint, and on phones not at all.
+ * ponytail: no count of matches, and frames inside the page aren't searched;
+ * window.find offers neither.
+ * @param {Window} win
+ * @param {string} text Empty to clear the last match.
+ * @param {boolean} back The match before instead of the next one.
+ * @param {boolean} again Past the current match, rather than from where it began.
+ * @returns {boolean} whether a match was found
+ */
+function findInPage(win, text, back, again) {
+	const selection = win.getSelection();
+	const marks = win.CSS?.highlights;
+	marks?.delete("bios-find");
+	if (!text) {
+		selection?.removeAllRanges();
+		return false;
+	}
+	// a word still being typed matches where the shorter one did, if it can
+	if (!again && selection?.rangeCount) selection.collapseToStart();
+	const found = win.find(text, false, back, true);
+	if (found && marks && selection?.rangeCount) {
+		const doc = win.document;
+		if (!doc.getElementById("bios-find")) {
+			const style = doc.createElement("style");
+			style.id = "bios-find";
+			style.textContent = "::highlight(bios-find){background:#ffd24d;color:#000}";
+			(doc.head || doc.documentElement).appendChild(style);
+		}
+		marks.set("bios-find", new win.Highlight(selection.getRangeAt(0).cloneRange()));
+	}
+	return found;
+}
+
+/**
  * Tells the shell the tab's real address. In isolation mode the shell checks
  * that the address belongs to the site this frame's origin was created for,
  * so a page can't make the address bar show another site.
@@ -1204,5 +1241,10 @@ function reportToShell(client, win, setRepeat, whenReady) {
 		if (!data || data.bios !== "cmd") return;
 		if (data.cmd === "back") win.history.back();
 		else if (data.cmd === "forward") win.history.forward();
+		else if (data.cmd === "find") {
+			const text = String(data.text ?? "").slice(0, 200);
+			const found = findInPage(win, text, !!data.back, !!data.again);
+			parentOf(win).postMessage({ bios: "found", text, found }, target);
+		}
 	});
 }

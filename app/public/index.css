@@ -361,6 +361,38 @@ img.mark {
 	display: none;
 }
 
+#find {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	height: 36px;
+	padding: 0 8px 4px;
+}
+
+#find[hidden] {
+	display: none;
+}
+
+#find-input {
+	flex: 1;
+	min-width: 0;
+	height: 30px;
+	padding: 0 10px;
+	border: 0;
+	border-radius: 8px;
+	outline: none;
+	background: var(--field);
+	color: var(--ink);
+	font: inherit;
+}
+
+#find-status {
+	padding: 0 4px;
+	color: var(--muted);
+	font-size: 12px;
+	white-space: nowrap;
+}
+
 #bookmarks-bar::-webkit-scrollbar {
 	display: none;
 }
@@ -1072,7 +1104,8 @@ body:not(.browsing) #frames {
 	}
 
 	/* under 16px, iOS zooms in on focus */
-	#bar-input {
+	#bar-input,
+	#find-input {
 		font-size: 16px;
 	}
 

@@ -96,6 +96,28 @@
 			</div>
 
 			<nav id="bookmarks-bar" aria-label="Bookmarks" hidden></nav>
+			<form id="find" role="search" autocomplete="off" hidden>
+				<input
+					id="find-input"
+					type="text"
+					enterkeyhint="search"
+					autocapitalize="off"
+					autocorrect="off"
+					spellcheck="false"
+					aria-label="Find in page"
+					placeholder="Find in page"
+				/>
+				<span id="find-status" role="status"></span>
+				<button id="find-prev" class="icon-btn" type="button" aria-label="Previous match">
+					<svg viewBox="0 0 24 24"><path d="M6 15l6-6 6 6" /></svg>
+				</button>
+				<button id="find-next" class="icon-btn" type="submit" aria-label="Next match">
+					<svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6" /></svg>
+				</button>
+				<button id="find-close" class="icon-btn" type="button" aria-label="Close find in page">
+					<svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" /></svg>
+				</button>
+			</form>
 			<div id="progress"></div>
 		</header>
 
@@ -150,6 +172,7 @@
 				</div>
 
 				<button id="history-open" class="wide" type="button">History</button>
+				<button id="find-open" class="wide" type="button">Find in page</button>
 
 				<label class="row" id="site-row">
 					<span>
