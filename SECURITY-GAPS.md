@@ -15,6 +15,8 @@ Ticked items are fixed, each with a test in `app/e2e/`.
 - [x] **Sites' framing rules were dropped** (`X-Frame-Options`, `frame-ancestors`). Fixed in the page script: a page that forbids framing stays out of other pages' frames.
 - [x] **No Global Privacy Control header, and no `Accept-Language` at all.** Fixed: `Sec-GPC: 1`, and one language for everyone.
 - [x] **Tracking parameters were not stripped.** Fixed: an address typed or pasted, or a link from another site, loses `fbclid`, `gclid`, `utm_*` and the like; a site's own links keep theirs.
+- [x] **The security levels didn't hold against what the browser had kept.** Safari showed a page its site marked as keepable again as it was, without asking the service worker: after a switch to Safest and a reload, the page still ran its scripts. In both browsers a script or web font kept from an earlier visit was never asked for, so refusing it did nothing. Fixed: pages always ask, and the no-scripts and no-fonts rules are in the page's policy, which the browser enforces itself.
+- [x] **The anchor frame's address report could be forged** (introduced with the address-bar fix above, and fixed two deploys later): a page that got around the proxy's hooks could name another site's tab. The app now checks with the tab's own frame.
 - [x] **Third-party cookies are partitioned** (already the case). A site embedded in another site's page sees none of the cookies it has as a tab. On par with Safari, Brave and Tor.
 - [ ] **Sites' script rules are not enforced.** A page sent with `Content-Security-Policy: script-src 'none'` still runs its inline script: the proxy rewrites every script and address, so a site's policy no longer matches what the browser sees. Not planned.
 - [ ] **Revoked certificates are accepted.** `revoked.badssl.com` loads. Expired, wrong-host, self-signed and untrusted-root certificates are refused.
@@ -32,7 +34,7 @@ Ticked items are fixed, each with a test in `app/e2e/`.
 - [ ] **Site logins on the device aren't encrypted.** Wipe-on-launch is the only cover. No password manager.
 - [ ] **No certificate viewer.** The lock icon can't show who a certificate belongs to.
 - [ ] **No signed releases of the web app.** The server delivers the code on every launch; whoever runs it is trusted completely.
-- [ ] **Scripts are all-or-nothing.** Safest blocks every site's scripts; there is no per-site script switch (Tor's NoScript, Brave's Shields).
+- [x] **Scripts were all-or-nothing.** Now also a switch per site in the shield menu ("Scripts on this site").
 
 ## Privacy
 
@@ -41,7 +43,7 @@ Ticked items are fixed, each with a test in `app/e2e/`.
 - [ ] **No bounce-tracking protection.** Brave and DuckDuckGo skip redirect hops that exist only to track.
 - [ ] **No CNAME uncloaking.** Trackers hidden behind a site's own subdomain pass the lists; Brave and Firefox with uBlock resolve the name first. The server does the DNS here, so it could.
 - [x] **Cookie banners weren't handled.** Now a setting, off by default: "Hide cookie notices" loads EasyList Cookie and uBlock's cookie-notice list (1.5 MB more in every site's service worker, next to 7.1 MB for the ad lists). It hides notices; it doesn't answer them, as DuckDuckGo and Brave do.
-- [ ] **No "keep me signed in here".** Wiping is all sites or none; DuckDuckGo's fireproofing and Brave's per-site forgetting pick.
+- [x] **No "keep me signed in here".** Now a switch per site ("Stay signed in to this site"), with site isolation: that site's cookies and storage survive clearing. New identity still clears everything.
 - [ ] **No per-site report.** Only a weekly blocked count; no list of what was blocked on this page.
 - [ ] **No .onion sites.**
 
