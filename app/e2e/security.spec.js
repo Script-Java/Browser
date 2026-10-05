@@ -413,6 +413,21 @@ test("a site that can't be reached says so, and offers to try again", async ({ a
 	await expect(frame.locator("#go")).toHaveText("Try again");
 });
 
+test("scripts can be switched off for one site", async ({ app }) => {
+	await setSettings(app, { noScripts: ["httpbin.org"] });
+	let frame = await open(app, testPage(SCRIPTED_PAGE));
+	await expect.poll(() => frame.locator("#t").textContent()).toBe("test");
+	await app.waitForTimeout(2000);
+	expect(await frame.title()).toBe("ORIGINAL");
+	// the proxy's and the app's own scripts still run there
+	expect(await proxied(frame)).toEqual({ scramjet: true, badger: true });
+
+	// with another site on the list instead, this one's scripts run again
+	await setSettings(app, { noScripts: ["example.com"] });
+	frame = await open(app, testPage(SCRIPTED_PAGE + "<!-- on again -->"));
+	await expect.poll(() => frame.title()).not.toBe("ORIGINAL");
+});
+
 // Safari keeps what a site says it may keep, and shows it again without asking
 // the service worker: a page, with the policy it came with, or a script, which
 // then can't be refused. So no protection may depend on being asked.

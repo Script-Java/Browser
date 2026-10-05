@@ -351,6 +351,11 @@ export function createShield(scramjet, configStored) {
 		settings = { ...DEFAULT_SETTINGS, ...(next || {}) };
 		settingsAt = Date.now();
 		if (settings.notices) loadNotices();
+		// This origin is one site's (isolation): is it one with scripts switched off?
+		if (isolated)
+			Promise.all(settings.noScripts.map((site) => siteKey(site))).then(
+				(keys) => (tabScriptsOff = keys.includes(ownLabel))
+			);
 	}
 
 	async function getSettings() {
@@ -998,15 +1003,21 @@ function go(key) {
 	// "Safer" level: no web fonts (a fingerprinting and font-parser attack
 	// surface), and no scripts from pages that came over plain http.
 	// "Safest": the same, and no site's scripts on any page.
+	// Also for one site at a time, from the shield menu: that site's pages,
+	// and with isolation everything in its tabs (the frames of other sites
+	// inside its pages run in its origin, so this worker serves them too).
 	const hardened = () => settings.level === "safer" || settings.level === "safest";
+	let tabScriptsOff = false;
 	const noSiteScripts = (url) =>
-		settings.level === "safest" || (settings.level === "safer" && url?.protocol === "http:");
+		settings.level === "safest" ||
+		(settings.level === "safer" && url?.protocol === "http:") ||
+		tabScriptsOff ||
+		(!!url && settings.noScripts.includes(siteOf(url.hostname)));
 
 	const SCRIPTED = new Set(["script", "worker", "sharedworker", "serviceworker"]);
 
 	function saferBlock(destination, source) {
-		if (!hardened()) return null;
-		if (destination === "font") return blocked(destination);
+		if (hardened() && destination === "font") return blocked(destination);
 		if (SCRIPTED.has(destination) && noSiteScripts(source)) return blocked(destination);
 		return null;
 	}

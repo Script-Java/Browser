@@ -17,6 +17,14 @@ test("a long allow list drops its oldest sites to fit the cookie", () => {
 	assert.ok(!out.allow.includes(allow[0]));
 });
 
+test("every list of sites is cleaned, and the longest gives way first", () => {
+	const many = Array.from({ length: 400 }, (_, i) => `site-number-${i}.example.com`);
+	const out = cleanSettings({ allow: many, noScripts: ["a.com", "<b>"], keep: ["c.com", 7] });
+	assert.deepEqual(out.noScripts, ["a.com"]);
+	assert.deepEqual(out.keep, ["c.com"]);
+	assert.ok(out.allow.length < many.length);
+});
+
 test("junk is replaced by defaults", () => {
 	const out = cleanSettings({
 		ads: "yes",

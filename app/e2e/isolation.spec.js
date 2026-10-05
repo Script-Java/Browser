@@ -101,3 +101,32 @@ test("nothing on one site's origin can put its address on another site's tab", a
 	await page.waitForTimeout(1500);
 	expect(await page.evaluate(() => tabs[0].url)).toBe("https://example.com/");
 });
+
+test("a site chosen to stay signed in keeps its data when the rest is cleared", async ({ page }) => {
+	await page.goto(ISOLATED_URL + "/");
+	await page.waitForFunction(() => typeof go === "function" && !!active, null, { timeout: 60_000 });
+	// the site's own page, not the in-between page that starts its origin
+	const site = async (url) => {
+		await open(page, url);
+		await page.waitForFunction(() => active.title === "Example Domain");
+		return tabFrame(page);
+	};
+	const cookieAt = async (url) => (await site(url)).evaluate(() => document.cookie);
+	for (const url of ["https://example.com/", "https://example.org/"]) {
+		const frame = await site(url);
+		await frame.evaluate(() => (document.cookie = "signed=in; path=/"));
+		// the service worker has it too, not only the page
+		await expect.poll(() => cookieAt(url)).toContain("signed=in");
+	}
+
+	await setSettings(page, { keep: ["example.com"] });
+	await page.evaluate(() => clearAllSiteData());
+	expect(await cookieAt("https://example.com/")).toContain("signed=in");
+	expect(await cookieAt("https://example.org/")).toBe("");
+	// its history went with everyone else's
+	expect(await page.evaluate(() => readEntries(HISTORY).filter((entry) => entry.url.includes("example.com")).length)).toBeLessThanOrEqual(1);
+
+	// New identity clears it too
+	await page.evaluate(() => clearAllSiteData(true));
+	expect(await cookieAt("https://example.com/")).toBe("");
+});

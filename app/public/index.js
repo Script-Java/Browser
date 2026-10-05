@@ -1155,8 +1155,12 @@ function renderSheet() {
 			"Address verified. This site runs walled off from other sites.";
 	else trust.textContent = "Encrypted connection.";
 
-	$("site-row").hidden = !site;
+	$("site-row").hidden = $("scripts-row").hidden = !site;
+	// only with isolation does a site have storage of its own to keep
+	$("keep-row").hidden = !site || !isolated;
 	$("site-toggle").checked = !settings.allow.includes(site);
+	$("scripts-toggle").checked = !settings.noScripts.includes(site);
+	$("keep-toggle").checked = settings.keep.includes(site);
 
 	for (const input of sheet.querySelectorAll("[data-setting]"))
 		input.checked = !!settings[input.dataset.setting];
@@ -1253,20 +1257,28 @@ searchSelect.addEventListener("change", async () => {
 	}
 });
 
-$("site-toggle").addEventListener("change", async (event) => {
-	const site = currentSite();
-	if (!site) return;
-	const allow = new Set(settings.allow);
-	if (event.target.checked) allow.delete(site);
-	else allow.add(site);
-	try {
-		await saveSettings({ ...settings, allow: [...allow] });
-		reload();
-	} catch (err) {
-		event.target.checked = !event.target.checked;
-		$("filter-status").textContent = err.message;
-	}
-});
+// The switches for the site in the active tab. Each is a list of sites in
+// the settings; `on` says which way a listed site's switch shows.
+for (const [id, list, on] of [
+	["site-toggle", "allow", false],
+	["scripts-toggle", "noScripts", false],
+	["keep-toggle", "keep", true],
+])
+	$(id).addEventListener("change", async (event) => {
+		const site = currentSite();
+		if (!site) return;
+		const sites = new Set(settings[list]);
+		if (event.target.checked === on) sites.add(site);
+		else sites.delete(site);
+		try {
+			await saveSettings({ ...settings, [list]: [...sites] });
+			// staying signed in changes nothing on the page
+			if (list !== "keep") reload();
+		} catch (err) {
+			event.target.checked = !event.target.checked;
+			$("filter-status").textContent = err.message;
+		}
+	});
 
 // ------------------------------------------------------------------ wiping
 
@@ -1315,8 +1327,10 @@ function clearOrigin(origin) {
 }
 
 // Deletes every site's cookies, storage and logins, the history and the open
-// tabs. Every tab closes first so no page holds its databases open.
-async function clearAllSiteData() {
+// tabs. Every tab closes first so no page holds its databases open. The sites
+// the person chose to stay signed in to keep their cookies and storage (not
+// their history), unless `everything` goes.
+async function clearAllSiteData(everything = false) {
 	saveEntries(HISTORY, []);
 	split = null;
 	for (const tab of [...tabs]) closeTab(tab);
@@ -1326,8 +1340,11 @@ async function clearAllSiteData() {
 	await clearStorageHere();
 	if (config.isolation) {
 		const keys = readList("bios:origins").filter((key) => /^s[a-z2-7]{25}$/.test(key));
-		await Promise.all(keys.map((key) => clearOrigin(originFor(key))));
-		localStorage.setItem("bios:origins", "[]");
+		const kept = new Set(
+			everything ? [] : await Promise.all((settings?.keep || []).map((site) => BiosSiteKey.siteKey(site)))
+		);
+		await Promise.all(keys.filter((key) => !kept.has(key)).map((key) => clearOrigin(originFor(key))));
+		localStorage.setItem("bios:origins", JSON.stringify(keys.filter((key) => kept.has(key))));
 	}
 	renderNewTab();
 }
@@ -1343,7 +1360,7 @@ async function newIdentity() {
 		)
 	)
 		return;
-	await clearAllSiteData();
+	await clearAllSiteData(true);
 	location.reload();
 }
 
@@ -1574,7 +1591,7 @@ $("vault-erase").addEventListener("click", async () => {
 	)
 		return;
 	localStorage.removeItem(VAULT);
-	await clearAllSiteData();
+	await clearAllSiteData(true);
 	closeVaultPanel();
 });
 
