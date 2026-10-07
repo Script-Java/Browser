@@ -163,11 +163,55 @@ function svgIcon(paths) {
 
 // ----------------------------------------------------------- site origins
 
+// Sites' own origins: the ones the app sent a tab to, or a tab's page
+// reported from (which the app checks). Their data stays until it is cleared.
 function rememberOrigin(key) {
 	const keys = new Set(readList("bios:origins"));
 	if (keys.has(key)) return;
 	keys.add(key);
 	localStorage.setItem("bios:origins", JSON.stringify([...keys]));
+	// a site's own from here on, whatever asked for it before
+	localStorage.setItem("bios:frames", JSON.stringify(readList("bios:frames").filter((k) => k !== key)));
+}
+
+// Origins a page asked for (see "need-anchor"): a frame's, or one a tab went
+// to by itself, until its page says which site it is. A page can ask for any
+// number of them, and each keeps a service worker. So only the latest stay:
+// an older one that no open tab uses is wiped whole (clearOrigin).
+const FRAME_ORIGINS = 40;
+const wiping = new Map(); // origin -> promise, while it is being wiped
+// The site of the tab each frame origin was asked for in (its key), so a
+// frame in a site kept signed in stays with it (see clearAllSiteData).
+function frameTabs() {
+	try {
+		return JSON.parse(localStorage.getItem("bios:frame-tabs") || "{}");
+	} catch {
+		return {};
+	}
+}
+function rememberFrame(key, tabKey) {
+	if (readList("bios:origins").includes(key)) return;
+	const keys = readList("bios:frames").filter((k) => k !== key);
+	keys.push(key);
+	const inUse = new Set(tabs.flatMap((t) => [t.siteOrigin, ...t.frameOrigins.keys()]));
+	// (never the one just asked for)
+	// ponytail: a frame in a kept site's page is forgotten too, when it is old and not open
+	for (let i = 0; keys.length > FRAME_ORIGINS && i < keys.length - 1; ) {
+		if (inUse.has(originFor(keys[i]))) i++;
+		else forgetOrigin(originFor(keys.splice(i, 1)[0]));
+	}
+	localStorage.setItem("bios:frames", JSON.stringify(keys));
+	const was = frameTabs();
+	const tabOfFrame = Object.fromEntries(keys.filter((k) => was[k]).map((k) => [k, was[k]]));
+	if (tabKey && !tabOfFrame[key]) tabOfFrame[key] = tabKey;
+	localStorage.setItem("bios:frame-tabs", JSON.stringify(tabOfFrame));
+}
+function forgetOrigin(origin) {
+	anchors.get(origin)?.frame.remove();
+	anchors.delete(origin);
+	const done = clearOrigin(origin, true).finally(() => wiping.get(origin) === done && wiping.delete(origin));
+	wiping.set(origin, done);
+	return done;
 }
 
 // With a passphrase lock (see "passphrase lock" below) these live only in the
@@ -246,8 +290,9 @@ function ensureAnchor(origin) {
 	anchor = { frame: holder, ready };
 	anchors.set(origin, anchor);
 
-	// Drop the least recently used anchors, but never one an open tab is on.
-	const inUse = new Set(tabs.map((t) => t.siteOrigin));
+	// Drop the least recently used anchors, but never one an open tab is on,
+	// or one for a frame in an open tab's page.
+	const inUse = new Set(tabs.flatMap((t) => [t.siteOrigin, ...t.frameOrigins.keys()]));
 	for (const [old, entry] of anchors) {
 		if (anchors.size <= MAX_ANCHORS) break;
 		if (old === origin || inUse.has(old)) continue;
@@ -262,7 +307,10 @@ function ensureAnchor(origin) {
 /**
  * @typedef {{ id: number, frame: HTMLIFrameElement, url: string, title: string,
  *   siteOrigin: string, loading: boolean, pending: boolean, back: string[],
- *   fwd: string[], landing: boolean, navigated: boolean, ownHistory: boolean }} Tab
+ *   fwd: string[], landing: boolean, navigated: boolean, ownHistory: boolean,
+ *   frameOrigins: Map<string, number>, doc: string }} Tab
+ * `frameOrigins`: the origins of the frames in the tab's page (site isolation
+ * gives a frame of another site its own), each with when it last asked; `doc` tells one page from the next.
  * `pending`: a restored tab whose page loads the first time it's shown.
  * `back`/`fwd`: the tab's own history (see step()). `landing`: go() started a
  * load and recorded it; the page's first report only confirms where it landed.
@@ -277,7 +325,7 @@ let split = null;
 let nextTabId = 1;
 const MAX_TABS = 50;
 
-function createTab(url = "", { after = null, lazy = false, title = "", select = true } = {}) {
+function createTab(url = "", { after = null, lazy = false, title = "", select = true, cross = false } = {}) {
 	if (tabs.length >= MAX_TABS) return null;
 	const id = nextTabId++;
 	const frame = document.createElement("iframe");
@@ -314,6 +362,8 @@ function createTab(url = "", { after = null, lazy = false, title = "", select = 
 		landing: false,
 		navigated: false,
 		ownHistory: true,
+		frameOrigins: new Map(),
+		doc: "",
 	};
 	frame.addEventListener("load", () => {
 		if (!tab.url || tab.pending) return;
@@ -332,7 +382,7 @@ function createTab(url = "", { after = null, lazy = false, title = "", select = 
 	tabs.splice(at, 0, tab);
 	if (select) selectTab(tab);
 	else renderTabs();
-	if (url && !lazy) go(url, tab);
+	if (url && !lazy) go(url, tab, true, cross);
 	else if (!url && select) {
 		homeInput.focus({ preventScroll: true });
 		pulse($("newtab"), RISE);
@@ -604,7 +654,8 @@ window.addEventListener("blur", () => setTimeout(followPaneFocus, 0));
 
 let startup = Promise.resolve();
 
-async function go(input, tab = active, record = true) {
+// `cross`: a page of another site asked for it (see crossSite).
+async function go(input, tab = active, record = true, cross = false) {
 	if (!input.trim() || !tab) return;
 	error.textContent = "";
 	hideSuggest();
@@ -613,7 +664,13 @@ async function go(input, tab = active, record = true) {
 		await ensureReady();
 		const url = toUrl(input);
 		// before touching the tab: throws for addresses that can't be opened
-		const src = await frameUrlFor(url, tab);
+		let src = await frameUrlFor(url, tab);
+		// through the service worker's "cross", which marks it (shield.js)
+		if (cross)
+			src = src.replace(
+				/\/scramjet\/([^#]*)/,
+				(_, page) => "/scramjet/__bios/cross?u=" + encodeURIComponent("/scramjet/" + page)
+			);
 		if (!tabs.includes(tab)) return;
 		if (record && tab.url && tab.url !== url && !tab.pending) {
 			pushStep(tab.back, tab.url);
@@ -753,7 +810,58 @@ function openFromPage(event) {
 	}
 	if (url.protocol !== "http:" && url.protocol !== "https:") return;
 	lastOpen = Date.now();
-	createTab(url.href, { after: tab, select: !event.data.background });
+	createTab(url.href, { after: tab, select: !event.data.background, cross: crossSite(event, tab, url) });
+}
+
+// A page asked the app to load `to` (a new tab, or the whole tab from a frame
+// inside it). When the page is another site's than `to`, that site is told so,
+// as a browser tells it: it then keeps back the cookies it marked for its own
+// pages only, and can refuse a request another site made up. To the service
+// worker a page the app loads is an address typed into the bar otherwise.
+// ponytail: a frame on an origin of its own always counts as another site,
+// its own included; that only keeps cookies back.
+function crossSite(event, tab, to) {
+	if (isolated && event.origin !== tab.siteOrigin) return true;
+	try {
+		return BiosSiteKey.siteOf(new URL(tab.url).hostname) !== BiosSiteKey.siteOf(to.hostname);
+	} catch {
+		return true;
+	}
+}
+
+// A frame inside a tab's page asked for the tab itself to go somewhere (a
+// link or a form aimed at the top window). With site isolation the frame is
+// on another origin than the tab's page and can't send it there itself. As
+// for a new tab: only right after a real click or tap in the page.
+function goFromPage(event) {
+	const tab = tabOf(event.source);
+	const { url, fields } = event.data;
+	if (!tab || typeof url !== "string") return;
+	if (isolated ? !SITE_ORIGIN.test(event.origin) : event.origin !== location.origin) return;
+	if (navigator.userActivation && !navigator.userActivation.isActive) return;
+	if (Date.now() - lastOpen < 400) return;
+	let to;
+	try {
+		to = new URL(url);
+	} catch {
+		return;
+	}
+	if (to.protocol !== "http:" && to.protocol !== "https:") return;
+	lastOpen = Date.now();
+	if (!Array.isArray(fields) || !tab.siteOrigin) return void go(to.href, tab, true, crossSite(event, tab, to));
+	// a posted form: the tab's own page posts it (page.js), marked as another site's
+	window.postMessage.call(
+		tab.frame.contentWindow,
+		{
+			bios: "cmd",
+			cmd: "post",
+			url: to.href,
+			fields: fields
+				.slice(0, 500)
+				.filter((pair) => Array.isArray(pair) && typeof pair[0] === "string" && typeof pair[1] === "string"),
+		},
+		tab.siteOrigin
+	);
 }
 
 async function onFrameMessage(event) {
@@ -765,12 +873,41 @@ async function onFrameMessage(event) {
 		for (const [origin, anchor] of anchors)
 			if (anchor.frame.contentWindow === event.source && event.origin === origin) {
 				addBlocked(data.count);
-				noteBlocked(data.hosts);
+				// what a frame's own origin blocked counts for the page the frame is in
+				const holder = tabs.find((t) => t.frameOrigins.has(origin));
+				noteBlocked(
+					holder && Array.isArray(data.hosts) ? data.hosts.map((pair) => [holder.url, pair?.[1]]) : data.hosts
+				);
 			}
 		return;
 	}
 
 	if (data?.bios === "open") return openFromPage(event);
+	if (data?.bios === "go") return goFromPage(event);
+
+	// A page on a site origin with no proxy connection yet: the tab's own, or
+	// a frame inside it, which also asks for the origin it is about to go to
+	// (a frame of another site has an origin of its own). The tab keeps its
+	// frames' origins in use for as long as it shows the page they are in.
+	if (data?.bios === "need-anchor") {
+		const tab = tabOf(event.source);
+		const origin = typeof data.origin === "string" ? data.origin : event.origin;
+		if (!isolated || !tab || !SITE_ORIGIN.test(event.origin) || !SITE_ORIGIN.test(origin)) return;
+		if (tabFor(event.source) !== tab || origin !== event.origin) {
+			// (to the end: the latest last)
+			tab.frameOrigins.delete(origin);
+			tab.frameOrigins.set(origin, performance.now());
+			// ponytail: the latest twelve; a page with frames from more sites
+			// than that may lose the oldest's proxy connection
+			if (tab.frameOrigins.size > 12) tab.frameOrigins.delete(tab.frameOrigins.keys().next().value);
+		}
+		rememberFrame(SITE_ORIGIN.exec(origin)[1], SITE_ORIGIN.exec(tab.siteOrigin)?.[1]);
+		// (not one that is on its way out)
+		await wiping.get(origin);
+		await ensureAnchor(origin);
+		event.source.postMessage({ bios: "anchor-ready" }, event.origin);
+		return;
+	}
 
 	// Isolation mode: a site's anchor frame saying where the pages of its
 	// site are that can't say so themselves (a JSON file, an image, a PDF, a
@@ -817,14 +954,10 @@ async function onFrameMessage(event) {
 		return;
 	}
 
-	// The tab landed on a site origin with no proxy connection yet.
-	if (isolated && data?.bios === "need-anchor" && SITE_ORIGIN.test(event.origin)) {
-		await ensureAnchor(event.origin);
-		event.source.postMessage({ bios: "anchor-ready" }, event.origin);
-		return;
-	}
 
 	if (!data || data.bios !== "nav" || typeof data.url !== "string") return;
+	// (a new page's frames may ask for their origins during the waits below)
+	const heard = performance.now();
 
 	let url;
 	try {
@@ -851,6 +984,11 @@ async function onFrameMessage(event) {
 		return;
 	}
 
+	// a new page in the tab: the frames of the one before are gone
+	if (typeof data.doc === "string" && data.doc !== tab.doc) {
+		tab.doc = data.doc;
+		for (const [origin, at] of tab.frameOrigins) if (at < heard) tab.frameOrigins.delete(origin);
+	}
 	updateTab(tab, url.href, String(data.title || "").slice(0, 300));
 }
 
@@ -1365,7 +1503,9 @@ async function clearStorageHere() {
 		if (name !== "bios-filters") await caches.delete(name);
 }
 
-function clearOrigin(origin) {
+// `whole`: nothing of the origin is left, its service worker neither (an
+// origin a page asked for; a site's own keeps its worker).
+function clearOrigin(origin, whole = false) {
 	return new Promise((resolve) => {
 		const wiper = document.createElement("iframe");
 		wiper.hidden = true;
@@ -1376,8 +1516,10 @@ function clearOrigin(origin) {
 			resolve();
 		};
 		const onMessage = (event) => {
-			if (event.source === wiper.contentWindow && event.data?.bios === "wiped")
-				done();
+			if (event.source !== wiper.contentWindow || event.origin !== origin) return;
+			// the page wipes when the app says so, and nobody else
+			if (event.data?.bios === "wipe-ready") wiper.contentWindow.postMessage({ bios: "wipe", whole }, origin);
+			else if (event.data?.bios === "wiped") done();
 		};
 		const timer = setTimeout(done, 8000);
 		window.addEventListener("message", onMessage);
@@ -1403,8 +1545,24 @@ async function clearAllSiteData(everything = false) {
 		const kept = new Set(
 			everything ? [] : await Promise.all((settings?.keep || []).map((site) => BiosSiteKey.siteKey(site)))
 		);
-		await Promise.all(keys.filter((key) => !kept.has(key)).map((key) => clearOrigin(originFor(key))));
+		// a few at a time: each is a frame that loads a page
+		const stale = keys.filter((key) => !kept.has(key));
+		for (let i = 0; i < stale.length; i += 6)
+			await Promise.all(stale.slice(i, i + 6).map((key) => clearOrigin(originFor(key))));
 		localStorage.setItem("bios:origins", JSON.stringify(keys.filter((key) => kept.has(key))));
+		// and the origins pages asked for (frames'), whole, but for the frames
+		// in a kept site's pages
+		const tabOfFrame = frameTabs();
+		const frames = readList("bios:frames").filter((key) => /^s[a-z2-7]{25}$/.test(key));
+		const keptFrames = frames.filter((key) => kept.has(tabOfFrame[key]));
+		const gone = frames.filter((key) => !kept.has(tabOfFrame[key]));
+		for (let i = 0; i < gone.length; i += 6)
+			await Promise.all(gone.slice(i, i + 6).map((key) => forgetOrigin(originFor(key))));
+		localStorage.setItem("bios:frames", JSON.stringify(keptFrames));
+		localStorage.setItem(
+			"bios:frame-tabs",
+			JSON.stringify(Object.fromEntries(keptFrames.map((key) => [key, tabOfFrame[key]])))
+		);
 	}
 	renderNewTab();
 }

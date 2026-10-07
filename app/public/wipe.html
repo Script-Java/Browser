@@ -7,24 +7,29 @@
 	</head>
 	<body>
 		<script>
-			// Loaded by the shell in a hidden frame on each isolated site origin:
-			// deletes that site's cookies and storage, then reports back.
-			(async () => {
-				const keep = new Set(["bare-mux-path"]);
+			// Loaded by the shell in a hidden frame on an isolated site origin:
+			// deletes that site's cookies and storage when the shell says so,
+			// then reports back. Only the shell's word counts: any page can
+			// point a frame at this address.
+			const shell = location.protocol + "//" + location.host.replace(/^[^.]+\./, "");
+			addEventListener("message", async (event) => {
+				if (event.source !== parent || event.origin !== shell || event.data?.bios !== "wipe") return;
+				// `whole`: an origin a page asked for (a frame's), which the app
+				// has no more use for. Its service worker and what Scramjet's own
+				// database holds go too, so nothing of it is left.
+				const whole = !!event.data.whole;
 				try {
 					for (const key of Object.keys(localStorage))
-						if (!keep.has(key)) localStorage.removeItem(key);
+						if (whole || key !== "bare-mux-path") localStorage.removeItem(key);
 					sessionStorage.clear();
 				} catch {}
 				try {
-					const dbs = (
-						indexedDB.databases
-							? (await indexedDB.databases()).map((db) => db.name)
-							: []
-					).filter((name) => name !== "$scramjet");
-					await clearProxyCookies();
+					const dbs = new Set(indexedDB.databases ? (await indexedDB.databases()).map((db) => db.name) : []);
+					// (emptied, not deleted: see clearProxyCookies)
+					dbs.delete("$scramjet");
+					await clearProxyCookies(whole);
 					await Promise.all(
-						dbs.map(
+						[...dbs].map(
 							(name) =>
 								new Promise((resolve) => {
 									const req = indexedDB.deleteDatabase(name);
@@ -35,10 +40,16 @@
 				} catch {}
 				try {
 					for (const name of await caches.keys())
-						if (name !== "bios-filters") await caches.delete(name);
+						if (whole || name !== "bios-filters") await caches.delete(name);
 				} catch {}
-				parent.postMessage({ bios: "wiped" }, "*");
-			})();
+				if (whole)
+					try {
+						for (const registration of await navigator.serviceWorker.getRegistrations())
+							await registration.unregister();
+					} catch {}
+				parent.postMessage({ bios: "wiped" }, shell);
+			});
+			parent.postMessage({ bios: "wipe-ready" }, shell);
 		</script>
 	</body>
 </html>

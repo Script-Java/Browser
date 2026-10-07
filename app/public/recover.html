@@ -22,13 +22,15 @@
 		<p id="msg">Loading…</p>
 		<script>
 			const key = "bios-recover:" + location.pathname;
-			// Isolation mode, inside the app's frame (the parent is the shell on
-			// another origin): ask the shell to open this site's anchor frame,
+			// Isolation mode, inside the app (the top window is the shell, on
+			// another origin): ask the shell to open this origin's anchor frame,
 			// which registers the service worker and keeps the proxy connection.
-			function inIsolatedTab() {
-				if (parent === self) return false;
+			// That goes for a tab's page and for a frame inside one, which has
+			// an origin of its own.
+			function inApp() {
+				if (top === self) return false;
 				try {
-					parent.location.href;
+					top.location.href;
 					return false;
 				} catch {
 					return true;
@@ -41,15 +43,15 @@
 						10000
 					);
 					addEventListener("message", (event) => {
-						if (event.source !== parent || event.data?.bios !== "anchor-ready")
+						if (event.source !== top || event.data?.bios !== "anchor-ready")
 							return;
 						clearTimeout(timer);
 						resolve();
 					});
-					parent.postMessage({ bios: "need-anchor" }, "*");
+					top.postMessage({ bios: "need-anchor", origin: location.origin }, "*");
 				});
 			}
-			(inIsolatedTab() ? needAnchor() : registerSW().then(setupTransport))
+			(inApp() ? needAnchor() : registerSW().then(setupTransport))
 				.then(() => {
 					if (sessionStorage.getItem(key)) {
 						sessionStorage.removeItem(key);

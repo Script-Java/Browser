@@ -7,16 +7,33 @@
 // This code is not rewritten by Scramjet: `location` here is the proxy's
 // real address, and the site's address comes from the Scramjet client.
 
+import { label } from "./label.js";
+
 const SCRAMJET = Symbol.for("scramjet client global");
-// The shell's window, for each tab window that ownParent has changed.
-const shells = new WeakMap();
+// The window above, as the browser has it. Not win.parent: crossParent puts
+// something else there for the page's scripts, on windows of other pages'
+// copies of this script too.
+const parentGetter = (
+	Object.getOwnPropertyDescriptor(self, "parent") ||
+	Object.getOwnPropertyDescriptor(self.Window.prototype, "parent") ||
+	{}
+).get;
 function parentOf(win) {
-	return shells.get(win) || win.parent;
+	return parentGetter ? parentGetter.call(win) : win.parent;
 }
+// The app's window, when the page is in the app.
+const TOP = self.top;
 // Server settings: { isolation: "<domain>" | null, auth: boolean }.
 const bios = self.__biosConfig || {};
 // The service worker's own endpoints (shield.js).
 const API = self.location.origin + "/scramjet/__bios/";
+
+// A form's address. Not form.action: a field named "action" takes its place.
+function actionOf(form) {
+	// (a document with no window of its own, as DOMParser makes, has this one's)
+	const proto = (form.ownerDocument?.defaultView || self).HTMLFormElement.prototype;
+	return Object.getOwnPropertyDescriptor(proto, "action").get.call(form);
+}
 
 /** @param {Window} win */
 function hook(win) {
@@ -32,7 +49,8 @@ function hook(win) {
 	if (!client) return lockBare(win);
 	if (refusesFrame(client, win)) return;
 	frameNames(client, win);
-	ownParent(win);
+	crossParent(win);
+	hearWindows(win);
 	blobSources(client, win);
 	noPopups(client, win);
 	pageShield(client, win);
@@ -83,7 +101,7 @@ function lockBare(win) {
 	const stays = (form) => {
 		if (!bare()) return true;
 		form.removeAttribute("target");
-		return !leaves(form.action);
+		return !leaves(actionOf(form));
 	};
 	win.addEventListener(
 		"submit",
@@ -142,6 +160,17 @@ function hookFrames(win) {
 			Object.defineProperty(proto, prop, {
 				...desc,
 				get() {
+					// A frame showing another origin's page (site isolation):
+					// the browser keeps its window shut, and Scramjet's own
+					// getter throws asking it. Scripts get a stand-in, as for
+					// any window of another origin, and no document.
+					const client = win[SCRAMJET];
+					const key = `${name}.prototype.contentWindow`;
+					const inner =
+						client && Object.prototype.hasOwnProperty.call(client.descriptors.store, key)
+							? client.descriptors.get(key, this)
+							: null;
+					if (inner && !reachable(inner)) return prop === "contentWindow" ? standIn(inner) : null;
 					const value = desc.get.call(this);
 					try {
 						const child = prop === "contentWindow" ? value : value?.defaultView;
@@ -153,6 +182,27 @@ function hookFrames(win) {
 				},
 			});
 		}
+	}
+	// frames[0] or frames["name"]: a stand-in for a frame of another origin,
+	// as from contentWindow (Scramjet's rewritten frames[0].postMessage reads
+	// the window, which the browser refuses).
+	// ponytail: window[0] itself can't be hooked, and stays the browser's own
+	const framesDesc = bios.isolation && Object.getOwnPropertyDescriptor(win, "frames");
+	if (framesDesc?.get && framesDesc.configurable) {
+		const list = new Proxy(win, {
+			get(target, key) {
+				const value = target[key];
+				if (typeof value === "function") return value.bind(target);
+				if (typeof key !== "string" || !value || value === target || typeof value !== "object") return value;
+				try {
+					// a window: across origins, its window is itself
+					return value.window === value ? seen(value) : value;
+				} catch {
+					return value;
+				}
+			},
+		});
+		Object.defineProperty(win, "frames", { ...framesDesc, get: () => list });
 	}
 	const sweepAfter = (proto, name) => {
 		const desc = proto && Object.getOwnPropertyDescriptor(proto, name);
@@ -197,7 +247,6 @@ function hookFrames(win) {
 	sweep(win);
 }
 
-hook(self);
 
 /**
  * WebRTC talks to STUN servers over UDP straight from the device, around the
@@ -253,11 +302,11 @@ function pageFlags(win) {
 	try {
 		for (let w = win, depth = 0; depth < 8; depth++) {
 			if (w.__biosPage) return w.__biosPage;
-			if (w.parent === w) break;
-			w = w.parent;
+			if (parentOf(w) === w) break;
+			w = parentOf(w);
 		}
 	} catch {
-		// the shell, on another origin
+		// another origin's window: the shell, or the page around a frame
 	}
 	return {};
 }
@@ -577,12 +626,13 @@ function frameNames(client, win) {
 			try {
 				return real.call(this);
 			} catch {
-				// the highest proxied window we can reach is the tab: its name is its frame's
+				// the highest proxied window we can reach (the tab's, unless
+				// this is a frame on an origin of its own): its name is its frame's
 				let w = win;
 				try {
-					while (w.parent !== w && w.parent[SCRAMJET]) w = w.parent;
+					while (parentOf(w) !== w && parentOf(w)[SCRAMJET]) w = parentOf(w);
 				} catch {
-					// cross-origin parent: the shell
+					// another origin's window above
 				}
 				return w.name || null;
 			}
@@ -592,25 +642,379 @@ function frameNames(client, win) {
 	}
 }
 
+const crossed = new WeakSet(); // windows crossParent has done
+
 /**
  * Scramjet's stand-ins for window.parent and window.top ask each window on
- * the way up whether Scramjet runs there, which throws for the shell on
- * another origin (site isolation): a page that read window.top, as embedded
- * video players do, crashed. The tab's window says it is its own parent, as
- * a top-level page's is, so the walk up ends at the tab.
+ * the way up whether Scramjet runs there, which throws for a window on
+ * another origin (site isolation): the shell above a tab's page, or the page
+ * around a frame of another site. A page that read window.top, as embedded
+ * video players do, crashed. So a window under another origin's gets a
+ * `parent` its scripts can use. The tab's window says it is its own parent,
+ * as a top-level page's is, and the walk up ends there. A frame gets a
+ * stand-in for the page around it (see standIn).
  * @param {Window} win
  */
-function ownParent(win) {
-	const shell = win.parent;
-	if (shell === win || shells.has(win)) return;
+function crossParent(win) {
+	const above = parentOf(win);
+	if (above === win || crossed.has(win)) return;
 	try {
-		void shell[SCRAMJET];
+		void above[SCRAMJET];
 		return;
 	} catch {
-		// cross-origin parent: the shell
+		// another origin's window
 	}
-	shells.set(win, shell);
-	Object.defineProperty(win, "parent", { get: () => win, set() {}, configurable: true });
+	crossed.add(win);
+	const shown = above === win.top ? win : standIn(above);
+	Object.defineProperty(win, "parent", { get: () => shown, set() {}, configurable: true });
+}
+
+// --------------------------------------------------- other origins' windows
+// With site isolation a page and a frame of another site inside it are on
+// different origins, and the browser lets neither see into the other. That
+// is the protection. What follows only keeps the ways pages talk across it
+// working, because Scramjet expects every window to be one it can reach: a
+// script gets a stand-in for the other window, with what a browser allows
+// there (posting it a message, sending it to a new address, focus) and a
+// SecurityError for the rest.
+
+const standIns = new WeakMap(); // another origin's window -> its stand-in
+// stand-in -> where the last message from its window came from: `origin`
+// (the browser's word for it) and `claimed` (the site's own origin, which
+// comes with each message, once it has been checked: see hearWindows)
+const heard = new WeakMap();
+// what Scramjet finds when it asks a stand-in for its client: nothing to see
+const NO_CLIENT = Object.freeze({ descriptors: Object.freeze({ get: () => null }) });
+// Scramjet's names for parent, top and location in the code it rewrites
+const WRAPPED = "$scramjet__";
+const refuse = () => {
+	throw new DOMException("Blocked a frame from accessing a cross-origin frame.", "SecurityError");
+};
+
+/** True for a window scripts here may see into: one of this origin. */
+function reachable(other) {
+	try {
+		void other.location.href;
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/** What scripts get for a window: the window, or its stand-in when it is another origin's. */
+function seen(other) {
+	return !other || other === TOP || reachable(other) ? other : standIn(other);
+}
+
+// A real tap or key press happened in this page (see noPopups).
+let tapped = false;
+
+/**
+ * Asks the app to send the tab somewhere: only it can, from a frame on an
+ * origin of its own. Like a new tab, only once the person has tapped in this
+ * page: a tap in the app (Go in the address bar) leaves the app "just
+ * tapped" for a few seconds, which is all the app itself can check.
+ */
+function sendTab(url, fields) {
+	const activation = self.navigator.userActivation;
+	if (!tapped || (activation && !activation.isActive)) return;
+	try {
+		TOP.postMessage({ bios: "go", url, fields }, shellOrigin(self));
+	} catch {
+		// not in the app
+	}
+}
+
+// The origin kept for the site at `wanted` in a frame under the origin
+// labelled `under` ("" for the site's own). The service worker works it out;
+// this script has no table of site names.
+const kept = new Map();
+function keptOrigin(wanted, under) {
+	const key = under + " " + wanted;
+	if (!kept.has(key))
+		kept.set(
+			key,
+			self[SCRAMJET].natives.store.fetch
+				.call(self, `${API}origin?o=${encodeURIComponent(wanted)}&under=${under}`)
+				.then((res) => res.json())
+				.then(
+					(answer) => answer.origin || "",
+					() => {
+						// not known for good: the next message asks again
+						kept.delete(key);
+						return "";
+					}
+				)
+		);
+	return kept.get(key);
+}
+const labelOf = (origin) => new URL(origin).hostname.slice(0, -(String(bios.isolation).length + 1));
+
+/**
+ * The origin a message for the site at `wanted` may be delivered to (the
+ * browser checks the window is on it before handing the message over), or ""
+ * when the window can't be that site's, and nothing is sent.
+ * ponytail: knows the pages above this one, the frames in it, and a window
+ * that just wrote. A message with an origin on it for a frame beside this
+ * one isn't sent; "*" goes anywhere, as it does in a browser.
+ */
+async function deliverTo(other, stand, wanted) {
+	if (wanted === "*") return "*";
+	try {
+		// "/" is what postMessage means when no origin is given: the sender's own
+		wanted = wanted === "/" ? self[SCRAMJET].url.origin : new URL(wanted).origin;
+	} catch {
+		return "";
+	}
+	// an answer to a window that just wrote goes back where its message came from
+	const last = heard.get(stand);
+	if (last && last.claimed === wanted) return last.origin;
+	// a frame of this origin's page: the origin kept for that site under this one
+	if (reachable(parentOf(other))) return keptOrigin(wanted, labelOf(location.origin));
+	// a page above this one. The browser lists their origins, nearest first,
+	// the app's last: is this one's the origin kept for the site named?
+	const above = location.ancestorOrigins;
+	// Firefox lists none. The tab's page is on its site's own origin, and the
+	// browser drops the message if the window isn't.
+	// ponytail: only the tab's page then; a page further up gets nothing
+	if (!above && other === parentOf(self) && parentOf(other) === TOP) return keptOrigin(wanted, "");
+	let w = parentOf(self);
+	for (let k = 0; above && w !== TOP && k < above.length; k++, w = parentOf(w)) {
+		if (w !== other) continue;
+		let over = k + 1;
+		while (above[over] === above[k]) over++;
+		const under = over >= above.length - 1 ? "" : labelOf(above[over]);
+		return (await keptOrigin(wanted, under)) === above[k] ? above[k] : "";
+	}
+	return "";
+}
+
+/**
+ * What a script gets for a window of another origin.
+ * @param {Window} other
+ */
+function standIn(other) {
+	let stand = standIns.get(other);
+	if (stand) return stand;
+	const client = self[SCRAMJET];
+	// the tab's own page: nothing above it for a page's scripts
+	const tabs = () => parentOf(other) === TOP || parentOf(other) === other;
+
+	function navigate(to, replace) {
+		let url;
+		try {
+			url = new URL(String(to), client.url);
+		} catch {
+			return;
+		}
+		if (url.protocol !== "http:" && url.protocol !== "https:") return;
+		// the tab's page: only the app can send the tab somewhere
+		if (tabs()) return sendTab(url.href);
+		// A frame inside this origin's page, or further in: through this
+		// origin's worker, which sends it on to the origin that site has here.
+		for (let w = other; w !== TOP && parentOf(w) !== w; w = parentOf(w)) {
+			if (!reachable(parentOf(w))) continue;
+			const hash = url.hash.slice(1);
+			url.hash = "";
+			const proxied =
+				location.origin + "/scramjet/" + encodeURIComponent(url.href) + (hash ? "#" + encodeURIComponent(hash) : "");
+			if (replace) other.location.replace(proxied);
+			else other.location.href = proxied;
+			return;
+		}
+		// any other window isn't this page's to send anywhere
+	}
+
+	// Messages arrive in the order they were sent, though working out where
+	// each may go can take a moment.
+	let queue = Promise.resolve();
+	function post(message, options, transfer) {
+		let wanted = "/";
+		if (typeof options === "string") wanted = options;
+		else if (options && typeof options === "object") {
+			if (options.targetOrigin !== undefined) wanted = String(options.targetOrigin);
+			transfer = options.transfer;
+		}
+		// wrapped as Scramjet wraps one, so the other side is told which site
+		// it is from, with what it takes to check that (see hearWindows)
+		const flags = pageFlags(self);
+		const wrapped = {
+			$scramjet$messagetype: "window",
+			$scramjet$origin: client.url.origin,
+			$scramjet$data: message,
+			$bios$site: flags.site,
+			$bios$under: flags.under || "",
+		};
+		const going = deliverTo(other, stand, wanted);
+		queue = queue
+			.then(() => going)
+			.then((origin) => origin && other.postMessage(wrapped, origin, transfer || []))
+			.catch(() => {});
+	}
+
+	const place = new Proxy(Object.create(null), {
+		get(_, key) {
+			if (key === "replace") return (to) => navigate(to, true);
+			if (key === "assign") return (to) => navigate(to, false);
+			if (typeof key === "symbol" || key === "then") return undefined;
+			return refuse();
+		},
+		set(_, key, to) {
+			if (key !== "href") refuse();
+			navigate(to, false);
+			return true;
+		},
+	});
+	stand = new Proxy(Object.create(null), {
+		// Scramjet takes a window it can ask this of for one of its own, and
+		// leaves it alone
+		has: (_, key) => key === SCRAMJET,
+		get(_, key) {
+			if (key === SCRAMJET) return NO_CLIENT;
+			if (typeof key === "symbol" || key === "then") return undefined;
+			if (key.startsWith(WRAPPED)) key = key.slice(WRAPPED.length);
+			switch (key) {
+				case "window":
+				case "self":
+				case "frames":
+					return stand;
+				// Scramjet's rewritten postMessage calls go through this first
+				// (it marks the window with the caller's own, for its stand-in
+				// of postMessage; ours takes the caller from this page)
+				case "$scramjet$setrealm":
+					return () => stand;
+				case "parent":
+					return tabs() ? stand : seen(parentOf(other));
+				case "top": {
+					let w = other;
+					while (parentOf(w) !== TOP && parentOf(w) !== w) w = parentOf(w);
+					return seen(w);
+				}
+				case "location":
+					return place;
+				case "postMessage":
+					return post;
+				case "closed":
+					return other.closed;
+				case "length":
+					return other.length;
+				case "opener":
+				// (a browser throws for document; null is as closed, and what Scramjet's own frame code can live with)
+				case "document":
+					return null;
+				case "focus":
+				case "blur":
+					return () => other[key]();
+				case "close":
+					return () => {};
+			}
+			// a frame inside it, by its place or its name (a consent script
+			// finds "__tcfapiLocator" so), as a browser allows across origins
+			let child;
+			try {
+				child = other[key];
+			} catch {
+				return refuse();
+			}
+			return child ? seen(child) : undefined;
+		},
+		set(_, key, value) {
+			if (key !== "location" && key !== WRAPPED + "location") refuse();
+			navigate(value, false);
+			return true;
+		},
+	});
+	standIns.set(other, stand);
+	return stand;
+}
+
+const LABEL = /^s[a-z2-7]{25}$/;
+const told = new WeakMap(); // message event -> what the page's scripts get of it
+
+/**
+ * Messages from another origin's window.
+ *
+ * Who sent it: Scramjet shows a page's scripts the origin the sender wrote
+ * on the message, or the page's own when there is none. That is the sender's
+ * word, where a browser gives its own, and pages decide by it whom to
+ * believe. With site isolation the browser's word is the sender's origin in
+ * this app, whose label is a hash of the site it serves (and, for a frame's
+ * origin, of the origin it sits in): what a sender says of itself fits its
+ * label or doesn't. What doesn't fit comes from "null", a browser's word for
+ * a sender with no origin to its name.
+ *
+ * And the sender itself: its stand-in, so a script can answer it, or tell it
+ * from a frame's contentWindow. Where the message came from is kept for the
+ * answer (see deliverTo).
+ * @param {Window} win
+ */
+function hearWindows(win) {
+	const proto = win.MessageEvent?.prototype;
+	const [source, origin, data] = ["source", "origin", "data"].map(
+		(name) => proto && Object.getOwnPropertyDescriptor(proto, name)
+	);
+	if (!source?.get || !source.configurable || !origin?.get || !data?.get || !data.configurable || proto.__biosHeard)
+		return;
+	Object.defineProperty(proto, "__biosHeard", { value: true });
+
+	// { data: what Scramjet reads, claimed: the sender's site origin once checked, or "" }
+	const checked = (event) => {
+		let seen = told.get(event);
+		if (seen) return seen;
+		const said = data.get.call(event);
+		const from = origin.get.call(event);
+		seen = { data: said, claimed: "" };
+		// not a worker's or a port's (no origin), this origin's own, or the app's
+		if (bios.isolation && from && from !== location.origin && from !== shellOrigin(self)) {
+			const wrapped = !!said && typeof said === "object" && said.$scramjet$messagetype === "window";
+			try {
+				const { $scramjet$origin: says, $bios$site: site, $bios$under: under } = said;
+				const { hostname, origin: claimed } = new URL(says);
+				if (
+					wrapped &&
+					typeof site === "string" &&
+					!/\s/.test(site) &&
+					(under === "" || LABEL.test(under)) &&
+					(hostname === site || hostname.endsWith("." + site)) &&
+					label(under ? under + " " + site : site) === labelOf(from)
+				)
+					seen.claimed = claimed;
+			} catch {
+				// says nothing of itself that can be read
+			}
+			seen.data = {
+				$scramjet$messagetype: "window",
+				$scramjet$origin: seen.claimed || "null",
+				$scramjet$data: wrapped ? said.$scramjet$data : said,
+			};
+		}
+		told.set(event, seen);
+		return seen;
+	};
+
+	Object.defineProperty(proto, "data", {
+		...data,
+		get() {
+			return checked(this).data;
+		},
+	});
+	Object.defineProperty(proto, "source", {
+		...source,
+		get() {
+			const from = source.get.call(this);
+			// a window (a worker's port isn't one), not the app's, and not one of this origin
+			let other = false;
+			try {
+				other = !!from && from !== TOP && from.window === from && !reachable(from);
+			} catch {
+				// no window
+			}
+			if (!other) return from;
+			const stand = standIn(from);
+			heard.set(stand, { origin: origin.get.call(this), claimed: checked(this).claimed });
+			return stand;
+		},
+	});
 }
 
 /**
@@ -714,14 +1118,19 @@ function refusesFrame(client, win) {
  * @param {Window} win
  */
 function isTab(win) {
-	const parent = parentOf(win);
-	if (parent === win) return false;
+	// the app is the window above it, and the top one (a frame inside a page
+	// has a page above it, on its own origin or another)
+	const above = parentOf(win);
+	if (above === win || above !== win.top) return false;
+	// and not a page that escaped the app, with a frame in it
 	try {
-		return !!parent.__biosShell;
+		return !!above.__biosShell;
 	} catch {
-		// cross-origin parent: only the shell (isolation mode)
-		return true;
+		// another origin's: where the browser says which (not Firefox)
 	}
+	const origins = win.location.ancestorOrigins;
+	// ponytail: without ancestorOrigins it's taken for the app; an escaped page puts itself back in the app at once
+	return !origins || origins[origins.length - 1] === shellOrigin(win);
 }
 
 /**
@@ -877,8 +1286,16 @@ function noPopups(client, win) {
 		}
 	}
 
+	// A frame on an origin of its own (site isolation) can't send the tab's
+	// page anywhere: that page is another origin's. A link or a form aimed at
+	// it goes through the app, which checks for a click or tap as it does for
+	// a new tab.
+	const VIA_APP = "\u0000the app";
+	const walled = () => hasShell() && !isTab(tabWindow());
+
 	// Decide whether a link/form target would leave the current tab.
-	// Returns the replacement target, or null when it is already safe.
+	// Returns the replacement target (VIA_APP: see above), or null when it is
+	// already safe.
 	function fixTarget(target) {
 		target = (target || "").trim();
 		const lower = target.toLowerCase();
@@ -889,10 +1306,13 @@ function noPopups(client, win) {
 			} catch {
 				// fall through
 			}
+			// The page around this frame is another origin's: the tab's own,
+			// or one further in, and then the link stays in this frame.
+			if (walled()) return isTab(parentOf(win)) ? VIA_APP : "_self";
 			return tabTargetName();
 		}
 		if (lower === "_top" || lower === "_blank" || lower === "_new")
-			return tabTargetName();
+			return walled() ? VIA_APP : tabTargetName();
 		if (hasShell() && target === tabWindow().name) return null;
 		return findFrame(target) ? null : tabTargetName();
 	}
@@ -947,7 +1367,10 @@ function noPopups(client, win) {
 				}
 			}
 			const fixed = fixTarget(target);
-			if (fixed) link.setAttribute("target", fixed);
+			if (fixed === VIA_APP) {
+				event.preventDefault();
+				sendTab(realUrl(link.href));
+			} else if (fixed) link.setAttribute("target", fixed);
 		},
 		true
 	);
@@ -966,16 +1389,45 @@ function noPopups(client, win) {
 		true
 	);
 
+	// True when the form is for the tab's page and only the app can send it
+	// there (VIA_APP); the button's own target counts before the form's.
 	function fixForm(form, submitter) {
+		let viaApp = null;
 		if (submitter && submitter.hasAttribute("formtarget")) {
 			const fixed = fixTarget(submitter.getAttribute("formtarget"));
-			if (fixed) submitter.setAttribute("formtarget", fixed);
+			viaApp = fixed === VIA_APP;
+			if (fixed && !viaApp) submitter.setAttribute("formtarget", fixed);
 		}
 		const target = form.hasAttribute("target")
 			? form.getAttribute("target")
 			: baseTarget();
 		const fixed = fixTarget(target);
-		if (fixed) form.setAttribute("target", fixed);
+		if (fixed && fixed !== VIA_APP) form.setAttribute("target", fixed);
+		return viaApp ?? fixed === VIA_APP;
+	}
+
+	// The form's fields go to the app with its address; the tab's own page
+	// posts them (see reportToShell), or they join the address for a GET form.
+	function sendForm(form, submitter) {
+		let entries;
+		try {
+			entries = new win.FormData(form, submitter);
+		} catch {
+			// older browsers take no button here
+			entries = new win.FormData(form);
+		}
+		const fields = [];
+		for (const [name, value] of entries) if (typeof value === "string") fields.push([name, value]);
+		const action = realUrl(submitter?.hasAttribute("formaction") ? submitter.formAction : actionOf(form));
+		const method = (submitter?.getAttribute("formmethod") || form.getAttribute("method") || "get").toLowerCase();
+		if (method === "post") return sendTab(action, fields);
+		try {
+			const url = new URL(action);
+			url.search = new URLSearchParams(fields).toString();
+			sendTab(url.href);
+		} catch {
+			// no address to send it to
+		}
 	}
 
 	win.addEventListener(
@@ -983,11 +1435,14 @@ function noPopups(client, win) {
 		(event) => {
 			const form = event.target;
 			if (!form || form.localName !== "form") return;
-			if (!isSafeScheme(form.action)) {
+			if (!isSafeScheme(actionOf(form))) {
 				event.preventDefault();
 				return;
 			}
-			fixForm(form, event.submitter);
+			if (fixForm(form, event.submitter)) {
+				event.preventDefault();
+				sendForm(form, event.submitter);
+			}
 		},
 		true
 	);
@@ -996,8 +1451,8 @@ function noPopups(client, win) {
 	const formProto = win.HTMLFormElement.prototype;
 	const realSubmit = formProto.submit;
 	formProto.submit = function () {
-		if (!isSafeScheme(this.action)) return;
-		fixForm(this);
+		if (!isSafeScheme(actionOf(this))) return;
+		if (fixForm(this)) return sendForm(this);
 		return realSubmit.call(this);
 	};
 
@@ -1020,6 +1475,7 @@ function noPopups(client, win) {
 
 	function resolveTargetWindow(target) {
 		const fixed = fixTarget(target == null ? "_blank" : String(target));
+		if (fixed === VIA_APP) return VIA_APP;
 		if (!fixed) {
 			const lower = String(target || "").toLowerCase();
 			if (lower === "_parent") return win.parent;
@@ -1075,7 +1531,7 @@ function noPopups(client, win) {
 		win.addEventListener(
 			type,
 			(event) => {
-				if (event.isTrusted) touched = true;
+				if (event.isTrusted) touched = tapped = true;
 			},
 			true
 		);
@@ -1095,9 +1551,19 @@ function noPopups(client, win) {
 			return fakeWindow(null, (next) => openTab(next));
 		}
 		const targetWin = resolveTargetWindow(target);
+		// the tab's page, from a frame on an origin of its own: through the app
+		const viaApp =
+			targetWin === VIA_APP &&
+			((next) => {
+				if (isSafeScheme(String(next))) sendTab(realUrl(next));
+			});
 		if (url == null || String(url).trim() === "" || url === "about:blank")
-			return fakeWindow(targetWin);
+			return viaApp ? fakeWindow(null, viaApp) : fakeWindow(targetWin);
 		if (!isSafeScheme(String(url))) return null;
+		if (viaApp) {
+			viaApp(url);
+			return fakeWindow(null, viaApp);
+		}
 		navigateTo(targetWin, url);
 		return targetWin === win ? win : fakeWindow(targetWin);
 	};
@@ -1481,6 +1947,9 @@ function findInPage(win, text, back, again) {
  */
 function reportToShell(client, win, setRepeat, whenReady) {
 	const target = shellOrigin(win);
+	// one for each page: the app tells a new page in the tab from the same
+	// page changing its address
+	const doc = crypto.randomUUID();
 	let last = "";
 	function send() {
 		let url;
@@ -1493,7 +1962,7 @@ function reportToShell(client, win, setRepeat, whenReady) {
 		if (url + "\n" + title === last) return;
 		last = url + "\n" + title;
 		try {
-			parentOf(win).postMessage({ bios: "nav", url, title }, target);
+			parentOf(win).postMessage({ bios: "nav", url, title, doc }, target);
 		} catch {
 			// shell gone
 		}
@@ -1503,19 +1972,68 @@ function reportToShell(client, win, setRepeat, whenReady) {
 	win.addEventListener("load", send);
 	setRepeat(send, 500);
 
-	win.addEventListener("message", (event) => {
-		// Scramjet reports this page's own site as every message's origin, so
-		// check the sender instead: only the shell is the tab's parent, and
-		// the browser sets event.source.
-		if (event.source !== parentOf(win)) return;
-		const data = event.data;
-		if (!data || data.bios !== "cmd") return;
-		if (data.cmd === "back") win.history.back();
-		else if (data.cmd === "forward") win.history.forward();
-		else if (data.cmd === "find") {
-			const text = String(data.text ?? "").slice(0, 200);
-			const found = findInPage(win, text, !!data.back, !!data.again);
-			parentOf(win).postMessage({ bios: "found", text, found }, target);
-		}
-	});
+	win.addEventListener(
+		"message",
+		(event) => {
+			// Scramjet reports this page's own site as every message's origin, so
+			// check the sender instead: only the shell is the tab's parent, and
+			// the browser sets event.source.
+			if (event.source !== parentOf(win)) return;
+			// The app's messages are for this script. The page's own would take
+			// them for the page's (see above), and a frame can have the app
+			// send one (the form below).
+			event.stopImmediatePropagation();
+			const data = event.data;
+			if (!data || data.bios !== "cmd") return;
+			if (data.cmd === "back") win.history.back();
+			else if (data.cmd === "forward") win.history.forward();
+			else if (data.cmd === "find") {
+				const text = String(data.text ?? "").slice(0, 200);
+				const found = findInPage(win, text, !!data.back, !!data.again);
+				parentOf(win).postMessage({ bios: "found", text, found }, target);
+			} else if (data.cmd === "post" && Array.isArray(data.fields)) {
+				// A form from a frame inside this page, for the tab (a frame on
+				// another origin can't post it here itself: see sendForm). This
+				// page posts it, but it isn't this page's request: the service
+				// worker's "cross" marks it first, so the site it reaches is
+				// told another site sent it, and can't take it for its own.
+				// (Marked, then posted: Safari drops a POST's fields when the
+				// worker answers it with a redirect.)
+				let to;
+				try {
+					to = new URL(String(data.url));
+				} catch {
+					return;
+				}
+				to.hash = "";
+				const path = "/scramjet/" + encodeURIComponent(to.href);
+				const nativeFetch = client.natives.store.fetch;
+				// not marked, not sent: unmarked, it would go as this page's own
+				if (!nativeFetch) return;
+				nativeFetch
+					.call(win, API + "cross?u=" + encodeURIComponent(path), { redirect: "manual" })
+					.then(() => {
+						const form = win.document.createElement("form");
+						form.method = "post";
+						// (Scramjet's own setAttribute would take the address for a site's)
+						client.natives.call("Element.prototype.setAttribute", form, "action", path);
+						for (const [name, value] of data.fields) {
+							const input = win.document.createElement("input");
+							input.type = "hidden";
+							input.name = String(name);
+							input.value = String(value);
+							form.append(input);
+						}
+						(win.document.body || win.document.documentElement).append(form);
+						win.HTMLFormElement.prototype.submit.call(form);
+					})
+					.catch(() => {});
+			}
+		},
+		// before any listener of the page's
+		true
+	);
 }
+
+// Last, so everything above is in place: this page's own window.
+hook(self);

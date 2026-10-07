@@ -9,7 +9,7 @@
 
 import { FiltersEngine, Request as FilterRequest } from "@ghostery/adblocker";
 import { parse } from "tldts";
-import { siteOf, siteKey } from "../client/sitekey.js";
+import { siteOf, siteKey, frameKey } from "../client/sitekey.js";
 import { DEFAULT_SETTINGS } from "../settings.js";
 import { PREFIX, decodeUrl, encodeUrl } from "../codec.js";
 
@@ -189,8 +189,37 @@ export function createShield(scramjet, configStored) {
 		if (event.data?.bios !== "wipe") return;
 		scramjet.cookieStore.load("{}");
 		// New Identity: forget the warnings the person clicked through too
-		for (const set of [bypassed, plainHttp, allowOnce, inlineOnce]) set.clear();
+		for (const set of [bypassed, plainHttp, allowOnce]) set.clear();
+		// (the page that clears this origin's data deleted what was written down)
+		home = null;
 	});
+
+	// Isolation: what this origin is for. A site's own origin (its label is
+	// the site's key) needs nothing written down. An origin made for a
+	// site's pages shown in frames inside another origin's page can't tell
+	// from its label, which is a hash: it is told on the way in (the "enter"
+	// call in api()), checks the claim against its label, and remembers.
+	// { site, above: the labels of the origins it is framed in, nearest first }
+	let home = null;
+	const HOME_CACHE = "bios-origin";
+	const LABEL = /^s[a-z2-7]{25}$/;
+	const homeLoaded = isolated
+		? caches
+				.open(HOME_CACHE)
+				.then((cache) => cache.match("/home"))
+				.then((saved) => saved && saved.json())
+				.then(
+					(saved) => {
+						if (typeof saved?.site === "string" && Array.isArray(saved.above)) home = saved;
+					},
+					() => {}
+				)
+		: Promise.resolve();
+	async function setHome(next) {
+		home = next;
+		const cache = await caches.open(HOME_CACHE);
+		await cache.put("/home", new Response(JSON.stringify(next)));
+	}
 
 	let engine = null;
 	let engineLoad = null;
@@ -201,7 +230,6 @@ export function createShield(scramjet, configStored) {
 	const plainHttp = new Set(); // sites (example.com) the user chose to open over http
 	const httpsWorks = new Set(); // hosts that answered over https
 	const allowOnce = new Set(); // proxied URLs to load once without ad blocking
-	const inlineOnce = new Set(); // proxied URLs to load in this origin once
 	const pages = new Map(); // site URL -> page info for the response hook
 	const framed = new Map(); // proxied URL of a page shown in a frame inside a page -> its tab's page (a site URL)
 
@@ -351,11 +379,10 @@ export function createShield(scramjet, configStored) {
 		settings = { ...DEFAULT_SETTINGS, ...(next || {}) };
 		settingsAt = Date.now();
 		if (settings.notices) loadNotices();
-		// This origin is one site's (isolation): is it one with scripts switched off?
+		// This origin is one site's, or a frame's inside a site's page
+		// (isolation): which sites' tabs have scripts switched off?
 		if (isolated)
-			Promise.all(settings.noScripts.map((site) => siteKey(site))).then(
-				(keys) => (tabScriptsOff = keys.includes(ownLabel))
-			);
+			Promise.all(settings.noScripts.map((site) => siteKey(site))).then((keys) => (scriptsOffIn = keys));
 	}
 
 	async function getSettings() {
@@ -409,8 +436,9 @@ export function createShield(scramjet, configStored) {
 	const redirect = (to) => new Response(null, { status: 307, headers: { ...headers(), location: to } });
 
 	// Runs in a page we generate. Works out where it is: "top" (escaped the
-	// app), "tab" (the app's page frame) or "sub" (a frame inside a page).
-	const WHERE = `function where(){try{if(parent===self)return"top";if(parent.__biosShell)return"tab";parent.location.href;return"sub"}catch(e){return"tab"}}`;
+	// app), "tab" (the app's page frame: the app is the window above, and the
+	// top one) or "sub" (a frame inside a page).
+	const WHERE = `function where(){if(parent===self)return"top";return parent===top?"tab":"sub"}`;
 
 	const WARNINGS = {
 		phishing: {
@@ -529,7 +557,9 @@ if (go) go.onclick = function () { location.replace(${scriptJson(proceed)}); };
 		const targets = {
 			shell: plan.shell || null,
 			tab: plan.tab || null,
-			sub: plan.inline ? goUrl("inline", plan.inline) : plan.url,
+			child: plan.child || null,
+			sibling: plan.sibling || null,
+			sub: plan.url || null,
 		};
 		const inputs = (fields || [])
 			.map(
@@ -549,39 +579,52 @@ if (go) go.onclick = function () { location.replace(${scriptJson(proceed)}); };
 		const boot = plan.boot
 			? `<script src="/baremux/index.js"></script><script src="/register-sw.js"></script>`
 			: "";
+		// (its address is no site's, so it isn't given as a referrer)
+		const quiet = plan.quiet ? `<meta name="referrer" content="no-referrer">` : "";
 		return new Response(
-			`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>html{background:#fff}</style>${boot}</head><body>${forms}<script>
+			`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${quiet}<style>html{background:#fff}</style>${boot}</head><body>${forms}<script>
 ${WHERE}
 var targets = ${scriptJson(targets)};
-function needAnchor() {
+// The app (the top window) opens an origin's anchor frame, which keeps its
+// proxy connection alive: this origin's, or the one a frame is about to go to.
+function needAnchor(origin, fallback) {
 	return new Promise(function (resolve) {
-		var timer = setTimeout(function () { setupTransport().then(resolve, resolve); }, 8000);
+		var timer = setTimeout(function () { fallback().then(resolve, resolve); }, 8000);
 		addEventListener("message", function (e) {
-			if (e.source !== parent || !e.data || e.data.bios !== "anchor-ready") return;
+			if (e.source !== top || !e.data || e.data.bios !== "anchor-ready") return;
 			clearTimeout(timer);
 			resolve();
 		});
-		parent.postMessage({ bios: "need-anchor" }, "*");
+		top.postMessage({ bios: "need-anchor", origin: origin }, "*");
 	});
 }
 function go(key) {
 	var form = document.getElementById("f-" + key);
-	if (form) form.submit();
+	if (form) HTMLFormElement.prototype.submit.call(form);
 	else location.replace(targets[key]);
 }
 (async function () {
 	var at = where();
 	if (${plan.boot ? "true" : "false"}) {
 		try {
-			// In the app's frame, have the shell open this site's anchor
-			// (it keeps the proxy connection alive); otherwise connect here.
-			if (at === "tab") await needAnchor();
-			else await setupTransport();
+			// outside the app there is nobody to ask: connect here
+			if (at === "top") await setupTransport();
+			else await needAnchor(location.origin, setupTransport);
 		} catch (e) { document.body.textContent = String(e && e.message || e); return; }
 	}
-	if (at === "top" && targets.shell) return location.replace(targets.shell);
-	if (at !== "sub" && targets.tab) return go("tab");
-	go("sub");
+	if (targets.sub) return go("sub");
+	if (at === "top") return targets.shell && location.replace(targets.shell);
+	if (at === "tab") return go("tab");
+	// A frame inside a page, bound for another site: to the origin kept for
+	// that site in this frame's place. A frame of this origin's own page is
+	// its child; one whose parent is another origin's page is moving on from
+	// the site it showed.
+	var own = false;
+	try { parent.location.href; own = true; } catch (e) {}
+	var key = own ? "child" : "sibling";
+	if (!targets[key]) return;
+	await needAnchor(new URL(targets[key]).origin, function () { return Promise.resolve(); });
+	go(key);
 })();
 </script></body></html>`,
 			// The site origin the tab goes on to learns from the referrer that
@@ -606,7 +649,7 @@ function go(key) {
 	// ------------------------------------------------------------ internal API
 
 	async function api(request, path) {
-		// /scramjet/__bios/go?do=<inline|allow|bypass|http>&t=<token>&u=<proxied URL>:
+		// /scramjet/__bios/go?do=<allow|bypass|http>&t=<token>&u=<proxied URL>:
 		// remember the choice, then continue to the page (307 keeps a form POST
 		// intact). Without the token (a made-up link, or this worker restarted
 		// since the page was made) nothing is remembered, and the page's
@@ -617,11 +660,87 @@ function go(key) {
 			const target = decode(to);
 			if (!target) return new Response(null, { status: 400 });
 			const action = params.get("t") === goToken ? params.get("do") : null;
-			if (action === "inline") inlineOnce.add(to);
-			else if (action === "allow") allowOnce.add(to);
+			if (action === "allow") allowOnce.add(to);
 			else if (action === "bypass") bypassed.add(target.hostname.toLowerCase());
 			else if (action === "http") plainHttp.add(siteOf(target.hostname.toLowerCase()));
 			return redirect(to);
+		}
+		// /scramjet/__bios/enter?u=<proxied path>&a=<labels>[&from=<site>]: a
+		// frame arriving from the page that holds it, or (with `from`) moving
+		// on from the origin kept for another site in the same place. The
+		// browser says which origin sent it (the referrer, which a page can
+		// hide but not forge), and labels are hashes: the claim fits this
+		// origin's own label or it doesn't. Only then does this origin serve
+		// that site's pages, so nothing can be shown here but the one site
+		// this origin was made for, under the one origin it was made for.
+		// `a` is the labels of the origins above, nearest first.
+		if (path === "enter") {
+			const params = new URL(request.url).searchParams;
+			const to = location.origin + (params.get("u") || "");
+			const target = decode(to);
+			const above = (params.get("a") || "").split(",");
+			const from = params.get("from");
+			let sender = "";
+			try {
+				const { hostname } = new URL(request.referrer);
+				if (hostname.endsWith("." + isolationDomain))
+					sender = hostname.slice(0, -(isolationDomain.length + 1));
+			} catch {
+				// no referrer
+			}
+			const fits =
+				isolated &&
+				!!target &&
+				!!sender &&
+				sender !== ownLabel &&
+				above.length <= 6 &&
+				above.every((label) => LABEL.test(label)) &&
+				(from ? (await frameKey(above[0], from)) === sender : above[0] === sender) &&
+				(await frameKey(above[0], target.hostname)) === ownLabel;
+			if (!fits) return new Response(null, { status: 403, headers: headers() });
+			await homeLoaded;
+			await setHome({ site: siteOf(target.hostname), above });
+			// Safari drops a POST's fields when this worker redirects it, so a
+			// form is posted on from here, as asked by whoever sent it here.
+			if (request.method === "POST") {
+				const who = await whoAsks({ request }, to, target, true);
+				const page = await trampoline(request, { url: to, quiet: true });
+				if (page) {
+					keep(hops, pageKey(to), { who, redirect: true, at: Date.now() });
+					return page;
+				}
+			}
+			return redirect(to);
+		}
+		// /scramjet/__bios/cross?u=<proxied path>: a page asked the app for
+		// this navigation (a link that opens a new tab, or a frame's link or
+		// form aimed at the whole tab) and the app loads it for the page. To
+		// this worker that looked like an address typed into the bar, or,
+		// when the tab's own page posts the frame's form, like the site's own
+		// request, with all its cookies. So it comes marked as another
+		// site's. Anyone may mark a navigation so: it only takes away.
+		if (path === "cross") {
+			const to = location.origin + (new URL(request.url).searchParams.get("u") || "");
+			if (!decode(to)) return new Response(null, { status: 400 });
+			keep(hops, pageKey(to), { who: OUTSIDER, redirect: true, at: Date.now() });
+			return redirect(to);
+		}
+		// Where a message for the site at `o` may be delivered: the origin
+		// kept for that site in a frame under `under` (a label), or its own
+		// origin when there's no `under`. For page.js, which has no hashing
+		// of site names; nothing here is secret.
+		if (path === "origin") {
+			const params = new URL(request.url).searchParams;
+			const under = params.get("under") || "";
+			let kept = "";
+			try {
+				const { hostname } = new URL(params.get("o"));
+				if (isolated && (!under || LABEL.test(under)))
+					kept = originFor(under ? await frameKey(under, hostname) : await siteKey(hostname));
+			} catch {
+				// not an origin
+			}
+			return json({ origin: kept });
 		}
 		// A page in a frame inside another page (an embedded player) says so:
 		// see where a blocked page is answered with nothing, in handle().
@@ -730,6 +849,17 @@ function go(key) {
 		if (map.size > 200) map.clear();
 		map.set(key, value);
 	}
+	// A navigation another site began, which won't be named (see "cross" in api()).
+	const OUTSIDER = {
+		site: "cross-site",
+		from: null,
+		quiet: true,
+		brief: false,
+		nav: true,
+		framed: false,
+		mode: "navigate",
+		method: "GET",
+	};
 
 	/**
 	 * Who is asking for `target`: { site, from, quiet, brief, nav, framed,
@@ -746,6 +876,8 @@ function go(key) {
 			quiet: !request.referrer,
 			brief: !!request.referrer && !ref,
 			nav: isPage,
+			// every page of an origin kept for frames is in a frame
+			framed: isPage && !!home,
 			mode: request.mode,
 			method: request.method,
 		};
@@ -946,6 +1078,15 @@ function go(key) {
 	// the page around it.
 	const pageFor = (referrer, source) => framed.get(pageKey(referrer || "")) || source?.href;
 
+	// Whether the block lists refuse `target` as a frame in the page `holder`.
+	async function refusedFrame(target, holder) {
+		await getSettings();
+		if (!settings.ads || isAllowed(target.hostname) || isAllowed(holder.hostname)) return false;
+		await waitForEngine();
+		await waitForNotices();
+		return !!engine && !!listed(target, holder, "sub_frame").match;
+	}
+
 	function blocked(destination) {
 		if (SCRIPTED.has(destination))
 			return new Response("", { headers: headers("text/javascript") });
@@ -1015,7 +1156,11 @@ function go(key) {
 			return interstitial({ kind: "http", host: target.hostname, url });
 		const secure = new URL(target.href);
 		secure.protocol = "https:";
-		return redirect(location.origin + encodeUrl(secure.href));
+		const to = location.origin + encodeUrl(secure.href);
+		// whoever began the navigation is still the one asking
+		const hop = isPage && hops.get(pageKey(url));
+		if (hop) keep(hops, pageKey(to), { ...hop, redirect: true });
+		return redirect(to);
 	}
 
 	// "Safer" level: no web fonts (a fingerprinting and font-parser attack
@@ -1023,13 +1168,19 @@ function go(key) {
 	// "Safest": the same, and no site's scripts on any page.
 	// Also for one site at a time, from the shield menu: that site's pages,
 	// and with isolation everything in its tabs (the frames of other sites
-	// inside its pages run in its origin, so this worker serves them too).
+	// inside its pages too: see tabScriptsOff).
 	const hardened = () => settings.level === "safer" || settings.level === "safest";
-	let tabScriptsOff = false;
+	// The labels of the sites with scripts switched off. A frame on an origin
+	// of its own is in such a site's tab when one of the origins above it is
+	// that site's: the browser shows a page only inside the origins it names
+	// (framers), so the tab's own can't be left out of `home.above`.
+	let scriptsOffIn = [];
+	const tabScriptsOff = () =>
+		scriptsOffIn.includes(ownLabel) || !!home?.above.some((label) => scriptsOffIn.includes(label));
 	const noSiteScripts = (url) =>
 		settings.level === "safest" ||
 		(settings.level === "safer" && url?.protocol === "http:") ||
-		tabScriptsOff ||
+		tabScriptsOff() ||
 		(!!url && settings.noScripts.includes(siteOf(url.hostname)));
 
 	const SCRIPTED = new Set(["script", "worker", "sharedworker", "serviceworker"]);
@@ -1080,6 +1231,7 @@ function go(key) {
 				url.slice((location.origin + API).length).split("?")[0]
 			);
 		await ensureConfig();
+		await homeLoaded;
 		if (!scramjet.route(event)) {
 			// A proxied page asking for a real address directly (a preload or
 			// an API Scramjet doesn't cover) would reach the site from the
@@ -1120,33 +1272,60 @@ function go(key) {
 			if (clean) settingsAt = 0;
 			if (clean && (await getSettings()).ads && !isAllowed(target.hostname)) {
 				countBlocked();
-				return redirect(location.origin + encodeUrl(clean.href));
+				const to = location.origin + encodeUrl(clean.href);
+				// the same navigation, by whoever began it
+				if (who) keep(hops, pageKey(to), { who, redirect: true, at: Date.now() });
+				return redirect(to);
 			}
 		}
 
 		const enginePromise = waitForEngine();
 
 		if (isPage) {
-			// Isolation: every site runs on its own subdomain. A page that
-			// belongs to another site goes there, unless it's a frame inside
-			// a page (those stay with the page, like Safari's partitioning).
-			if (isolated && !inlineOnce.delete(url)) {
-				const key = await siteKey(target.hostname);
-				if (key !== ownLabel) {
+			// Isolation: every site runs on its own subdomain, and so does
+			// each site shown in a frame inside another origin's page, so
+			// the browser itself keeps a page and the frames in it apart. A
+			// page that belongs elsewhere goes there; the in-between page
+			// works out whether it is a tab or a frame, and which.
+			if (isolated) {
+				const mine = home
+					? home.site === siteOf(target.hostname)
+					: (await siteKey(target.hostname)) === ownLabel;
+				if (!mine) {
+					// A frame is held to the block lists here, where the page
+					// it sits in is known (the origin it goes to only sees that
+					// another origin sent it). One the lists refuse gets no
+					// origin; and when a player's own script sent its frame to
+					// an ad, the frame stays as it is (see `framed` below).
+					const holder = decode(request.referrer);
+					const refused = !!holder && (await refusedFrame(target, holder));
+					if (refused && framed.has(pageKey(request.referrer))) {
+						countBlocked(pageFor(request.referrer, holder), target.hostname);
+						return new Response(null, { status: 204 });
+					}
+					const path = url.slice(location.origin.length);
+					const enter = (label, above, from) =>
+						`${originFor(label)}${API}enter?u=${encodeURIComponent(path)}&a=${above.join(",")}` +
+						(from ? `&from=${encodeURIComponent(from)}` : "");
 					const page = await trampoline(request, {
-						tab: originFor(key) + url.slice(location.origin.length),
-						inline: url,
+						tab: originFor(await siteKey(target.hostname)) + path,
+						// a frame of this origin's page
+						child:
+							!refused && enter(await frameKey(ownLabel, target.hostname), [ownLabel, ...(home?.above || [])]),
+						// this origin's own frame, moving on to another site
+						sibling:
+							!refused &&
+							home &&
+							enter(await frameKey(home.above[0], target.hostname), home.above, home.site),
 						shell: shellOrigin + "/#" + encodeURIComponent(target.href),
 					});
-					// Only a frame inside a page carries on in this origin. Its
-					// site isn't this origin's, so unless a page of that site
-					// asked, the request is another site's.
-					if (page && who)
-						keep(hops, pageKey(url), {
-							who: { ...who, framed: true, site: who.from ? who.site : "cross-site" },
-							at: Date.now(),
-						});
 					if (page) return page;
+					// What can't be sent on (a form that isn't one of the usual
+					// kinds) isn't loaded here either: this origin is one site's.
+					return new Response("This page belongs to another site and couldn't be sent there.", {
+						status: 403,
+						headers: headers("text/plain"),
+					});
 				} else if (!(await hasProxyClient())) {
 					// First page of this site since the app opened: start the
 					// proxy connection for this origin, then load the page.
@@ -1205,21 +1384,29 @@ function go(key) {
 			}
 		}
 
-		if (isPage) {
-			rememberPage({
-				url: target.href,
-				hostname: target.hostname,
-				cosmetic: blocking && settings.cosmetic,
-				notices: blocking && settings.notices,
-				videoAds: settings.videoAds && !isAllowed(target.hostname),
-				safer: hardened(),
-				// "Safest", or "Safer" on a plain http page: none of the page's own scripts run
-				noScripts: noSiteScripts(target),
-			});
-		}
+		const page = isPage && {
+			url: target.href,
+			hostname: target.hostname,
+			cosmetic: blocking && settings.cosmetic,
+			notices: blocking && settings.notices,
+			videoAds: settings.videoAds && !isAllowed(target.hostname),
+			safer: hardened(),
+			// "Safest", or "Safer" on a plain http page: none of the page's own scripts run
+			noScripts: noSiteScripts(target),
+		};
+		if (page) rememberPage(page);
 		failures.delete(target.href);
 		if (who) keep(asked, target.href, who);
-		const response = await scramjet.fetch(event);
+		// A form one of this worker's own pages posts on (see "enter") has that
+		// page for its client, whose address Scramjet would take for a site's.
+		const client = isPage && event.clientId ? await self.clients.get(event.clientId) : null;
+		const ours = !!client && client.url.startsWith(prefix + "__bios/");
+		const response = await scramjet.fetch(ours ? { request: event.request, clientId: "" } : event);
+		// The site's own rule about who may frame it (the response hook read
+		// it into `page`), for a page on an origin kept for frames: the pages
+		// above it are other origins', which the page script can't see into.
+		if (page && page.ancestors && home && !(await framersFit(page.ancestors, target)))
+			return new Response("", { headers: headers() });
 		if (isPage && who && response.status >= 300 && response.status < 400) {
 			const to = response.headers.get("location");
 			if (to) keep(hops, pageKey(new URL(to, url).href), { who, redirect: true, at: Date.now() });
@@ -1259,6 +1446,11 @@ function go(key) {
 			safer: page.safer,
 			// left out when the site has no framing rule
 			ancestors: page.ancestors || undefined,
+			// What this origin is for, which a window of another origin can
+			// check a message against (page.js, hearWindows): the site, and
+			// for a frame's origin the label of the origin it sits in.
+			site: page.hostname ? siteOf(page.hostname) : undefined,
+			under: home?.above[0],
 		};
 		// On a no-scripts page (see policyFor), only scripts with the nonce run.
 		const nonce = page.nonce ? ` nonce="${page.nonce}"` : "";
@@ -1293,14 +1485,58 @@ function go(key) {
 	// WebSocket and WebRTC). This rule is the browser's, so it holds there
 	// too, and frames a page writes itself inherit it.
 	// ponytail: no browser has a rule like this for WebRTC; page.js is the only block.
+	// Frames may also be on the proxy's other origins: each site shown in a
+	// frame has one of its own (isolation). Those origins say themselves who
+	// may frame them (`framers`).
 	const socket = (location.protocol === "https:" ? "wss://" : "ws://") + location.host;
-	const NETWORK_LOCK = `default-src 'self' ${socket} data: blob: 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'; frame-src 'self'`;
+	const siteOrigins = isolated ? ` ${location.protocol}//*.${isolationDomain}${port}` : "";
+	const NETWORK_LOCK = `default-src 'self' ${socket} data: blob: 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'; frame-src 'self'${siteOrigins}`;
+
+	// Isolation: who may show this origin's pages in a frame. The app, this
+	// origin's own pages, and the origins it was made to sit in. So a page
+	// elsewhere can't put a site's own origin, with the person's sign-in, in
+	// a frame of its own. The browser enforces this one.
+	const framers = () =>
+		isolated
+			? `frame-ancestors 'self' ${shellOrigin}${(home?.above || []).map((label) => " " + originFor(label)).join("")}; `
+			: "";
+
+	/**
+	 * A site's own framing rule (framingRule's lists) against the origins
+	 * above this one, by their labels: the origin kept for a site in a place
+	 * is a hash of the site and the origin above, so a label either is the
+	 * one for a site the rule names or isn't.
+	 * ponytail: by site, as origins here go: a rule that names one subdomain
+	 * lets its sister subdomains frame the page too.
+	 */
+	async function framersFit(policies, target) {
+		const { above } = home;
+		for (let i = 0; i < above.length; i++) {
+			const keptFor = (hostname) =>
+				i === above.length - 1 ? siteKey(hostname) : frameKey(above[i + 1], hostname);
+			for (const sources of policies) {
+				let fits = false;
+				for (const source of sources) {
+					const lower = source.toLowerCase();
+					if (lower === "*" || /^[a-z][a-z0-9+.-]*:$/.test(lower)) fits = true;
+					else if (lower === "'self'") fits = (await keptFor(target.hostname)) === above[i];
+					else {
+						const host = /^(?:[a-z][a-z0-9+.-]*:\/\/)?(?:\*\.)?([a-z0-9.-]+)/.exec(lower)?.[1];
+						fits = !!host && (await keptFor(host)) === above[i];
+					}
+					if (fits) break;
+				}
+				if (!fits) return false;
+			}
+		}
+		return true;
+	}
 
 	// The policy for a proxied response; `page` is set for the pages we inject.
 	function policyFor(page) {
 		// "Safer": no web fonts. handle() refuses them too, but a font the
 		// browser kept from an earlier visit never gets there to be refused.
-		const lock = page?.safer ? `font-src 'none'; ${NETWORK_LOCK}` : NETWORK_LOCK;
+		const lock = (page ? framers() : "") + (page?.safer ? `font-src 'none'; ${NETWORK_LOCK}` : NETWORK_LOCK);
 		if (!page?.noScripts) return lock;
 		// Its inline scripts and handlers don't run; Scramjet's own scripts
 		// (its folder, and its data: one, which injectHtml gives the nonce)

@@ -57,7 +57,9 @@ if (process.env.NODE_ENV === "production") {
 
 const limits = createLimits({
 	// ponytail: per address, so a household behind one IP shares these.
-	maxSockets: 16,
+	// One for every site origin in use: each tab's site, and each site in a
+	// frame inside a page (site isolation gives those origins of their own).
+	maxSockets: 32,
 	dailyBytes: Number(process.env.DAILY_GB_PER_CLIENT || 2) * 1024 ** 3,
 	// Hard cap for the whole server, so the bandwidth bill can't run away.
 	totalDailyBytes: Number(process.env.DAILY_GB_TOTAL || 50) * 1024 ** 3,
@@ -182,10 +184,14 @@ for (const name of (await readdir(publicPath)).filter((n) => n.endsWith(".html")
 }
 
 const portOf = (req) => String(req.headers.host || "").match(/:\d+$/)?.[0] || "";
-const framing = (req) =>
-	"frame-ancestors 'self'" + (ISOLATION ? ` ${req.protocol}://${ISOLATION}${portOf(req)}` : "");
+// `sites`: also the pages of site origins, for the one page a frame inside a
+// page may start on (see the /scramjet/ route).
+const framing = (req, sites = false) =>
+	"frame-ancestors 'self'" +
+	(ISOLATION ? ` ${req.protocol}://${ISOLATION}${portOf(req)}` : "") +
+	(ISOLATION && sites ? ` ${req.protocol}://*.${ISOLATION}${portOf(req)}` : "");
 
-function pageCsp(req) {
+function pageCsp(req, framedBySites = false) {
 	// isolation: the shell frames every site's own subdomain
 	const sites = ISOLATION ? ` ${req.protocol}://*.${ISOLATION}${portOf(req)}` : "";
 	return [
@@ -197,7 +203,7 @@ function pageCsp(req) {
 		"object-src 'none'",
 		"base-uri 'none'",
 		"form-action 'self'",
-		framing(req),
+		framing(req, framedBySites),
 	].join("; ");
 }
 
@@ -423,6 +429,11 @@ app.all("/scramjet/{*rest}", async (req, res) => {
 			`proxied request reached the server: dest=${dest || "?"} range=${req.headers.range || "-"} ua=${String(req.headers["user-agent"] || "").slice(0, 60)}`
 		);
 	}
+	// A frame inside a page has an origin of its own (site isolation), and
+	// may start it here: the pages above it are other site origins'. The page
+	// only registers the service worker and reloads, and what loads then
+	// says for itself who may frame it (shield.js, framers).
+	res.setHeader("Content-Security-Policy", pageCsp(req, true));
 	res.sendFile(resolve(publicPath, "recover.html"));
 });
 

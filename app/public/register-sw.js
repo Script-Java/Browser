@@ -66,8 +66,9 @@ async function setupTransport(fresh = false) {
 		"/wisp/";
 	// ponytail: replacing a live transport leaks its connection, so only
 	// `fresh` (the old one is known dead) replaces one that's set
-	if (fresh || (await connection.getTransport()) !== "/epoxy/index.mjs")
-		await connection.setTransport("/epoxy/index.mjs", [{ wisp: wispUrl }]);
+	// (once.mjs: the package's transport, kept from starting twice)
+	if (fresh || (await connection.getTransport()) !== "/epoxy/once.mjs")
+		await connection.setTransport("/epoxy/once.mjs", [{ wisp: wispUrl }]);
 }
 
 // The proxy's connection to the server can drop (a deploy, the network
@@ -88,9 +89,11 @@ if (navigator.serviceWorker && typeof BareMux !== "undefined") {
  * Global util
  * Deletes the proxy's cookies (Scramjet keeps every site's cookies in its own
  * database and in the service worker's memory). Its database also holds its
- * config, so callers must not delete "$scramjet" itself.
+ * config, so callers must not delete "$scramjet" itself (a worker holding it
+ * open blocks the delete, and the next worker hangs behind it). `whole`:
+ * everything else in it goes too.
  */
-async function clearProxyCookies() {
+async function clearProxyCookies(whole = false) {
 	await new Promise((resolve) => {
 		const req = indexedDB.open("$scramjet");
 		// no database yet: don't create an empty one
@@ -98,12 +101,13 @@ async function clearProxyCookies() {
 		req.onerror = req.onblocked = resolve;
 		req.onsuccess = () => {
 			const db = req.result;
-			if (!db.objectStoreNames.contains("cookies")) {
+			const stores = [...db.objectStoreNames].filter((name) => (whole ? name !== "config" : name === "cookies"));
+			if (!stores.length) {
 				db.close();
 				return resolve();
 			}
-			const tx = db.transaction("cookies", "readwrite");
-			tx.objectStore("cookies").clear();
+			const tx = db.transaction(stores, "readwrite");
+			for (const name of stores) tx.objectStore(name).clear();
 			tx.oncomplete = tx.onerror = tx.onabort = () => {
 				db.close();
 				resolve();
