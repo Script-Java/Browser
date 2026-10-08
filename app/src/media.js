@@ -17,7 +17,7 @@ import dns from "node:dns";
 import net from "node:net";
 import { pipeline } from "node:stream";
 import { decodeUrl, encodeUrl } from "./codec.js";
-import { isBlockedAddress } from "./wisp.js";
+import { WEB_PORTS, isBlockedAddress } from "./wisp.js";
 
 const MAX_REDIRECTS = 5;
 const MAX_PLAYLIST_BYTES = 4 * 1024 * 1024;
@@ -90,8 +90,7 @@ function upstreamRequest(url, headers, method, redirects = 0) {
 		if (net.isIP(literal) && isBlockedAddress(literal))
 			return reject(new Error(`Blocked connection to a private address (${literal})`));
 		// same ports as wisp, so this can't be used for port scans either; checked per redirect hop
-		if (url.port && url.port !== "80" && url.port !== "443")
-			return reject(new Error(`Blocked port ${url.port}`));
+		if (url.port && !WEB_PORTS.includes(Number(url.port))) return reject(new Error(`Blocked port ${url.port}`));
 		const lib = url.protocol === "https:" ? https : http;
 		const req = lib.request(
 			url,

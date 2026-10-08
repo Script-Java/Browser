@@ -52,12 +52,15 @@ All in the service worker, which already sees every request.
 | 3.5 | Hostile-frame test | Tests in which an embedded third-party frame tries to read its parent's page, cookies and storage. This measures the deepest gap; what it finds decides whether anything can be done about it. | M |
 | 3.6 | Find in page | The one everyday feature in this plan, because its absence is felt daily. The app can't reach into an isolated tab, so the page script does the search on the app's request. | M |
 
+## Done after phase 3 (2026-10-07)
+
+Everything in phases 1 to 3, and besides: frames from other sites on origins of their own, revoked certificates (the server checks the issuer's CRL) and a certificate viewer, logins kept across service-worker restarts (a Scramjet bug), forged no-referrer navigations refused, bounce tracking, CNAME uncloaking, threat lists checked every 15 minutes, fingerprinting in workers and of the screen and fonts, more web ports, and zoom, reader view, translation, printing, downloads and camera/microphone/location by permission. `SECURITY-GAPS.md` has the details.
+
 ## Not planned
 
 | Item | Why |
 |---|---|
 | Full enforcement of sites' Content-Security-Policy | The proxy rewrites every script and address, so a site's policy no longer matches what the browser sees. Only the framing rules (1.3) carry over cleanly. |
-| Revoked-certificate checks | Needs revocation support in the TLS library inside the app. Chrome itself only does this in part. |
 | Several hops, or a different exit per site | Means sending traffic through Tor from the server: slow, and many sites block it. Without it the server operator can always see who opens what; the README says so. |
 | Passkeys and security keys | They are bound to the real address of a site, and every site here lives on the proxy's address. |
 | .onion sites, sync, password manager, signed web-app releases | Each is a project of its own; none fits a home-screen web app without a native part. |

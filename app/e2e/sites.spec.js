@@ -4,12 +4,29 @@
 // The browser never sees the real requests, so the proxy has to get these right.
 
 import { expect, test } from "./fixtures.js";
-import { ECHO, bodyText, follow, open, received, testPage } from "./fixtures.js";
+import { ECHO, bodyText, follow, open, received, tabFrame, testPage } from "./fixtures.js";
 import { ISOLATED_URL } from "./env.js";
 
 async function openIsolated(page) {
 	await page.goto(ISOLATED_URL + "/");
 	await page.waitForFunction(() => typeof go === "function" && !!active, null, { timeout: 60_000 });
+}
+
+// A site signs someone in: one cookie of each SameSite kind.
+const SIGNED_IN = ["strict=1; SameSite=Strict", "lax=1; SameSite=Lax", "plain=1"];
+const signIn = (page, site = ECHO) =>
+	open(page, `${site}/response-headers?${SIGNED_IN.map((c) => "Set-Cookie=" + encodeURIComponent(c)).join("&")}`);
+/** The names in a Cookie header, sorted. */
+const names = (cookie = "") =>
+	cookie
+		.split(/;\s*/)
+		.filter(Boolean)
+		.map((c) => c.split("=")[0])
+		.sort();
+/** The headers the echo page in the tab says it received, once the tab shows `url`. */
+async function echoed(page, url) {
+	await page.waitForFunction((u) => active.url === u && !active.loading, url);
+	return received(await bodyText(await tabFrame(page)));
 }
 
 test("a page's requests to other sites say where they come from, and no more", async ({ app }) => {
@@ -132,4 +149,125 @@ test("a site that forbids framing stays out of other pages' frames", async ({ ap
 	// opened as a tab, a page with such a rule loads as usual
 	const tab = await open(app, frames.deny);
 	await expect(tab.locator("body")).toContainText("FRAMED-CONTENT");
+});
+
+test("a form posted to a site not opened before arrives with its fields (isolated)", async ({ page }) => {
+	await openIsolated(page);
+	// (nothing of the echo site opened first: its origin has no service worker yet)
+	await open(page, testPage(`<!doctype html><title>form</title>
+<form id="form" method="post" action="${ECHO}/post"><input name="a" value="1"></form>`));
+	const sent = JSON.parse(await bodyText(await follow(page, "form", ECHO + "/post")));
+	expect(sent.form).toEqual({ a: ["1"] });
+});
+
+const OPENER = testPage(`<!doctype html><title>opener</title><a id="out" target="_blank" href="${ECHO}/headers">out</a>`);
+
+test("a tab a page opens arrives as that page's site's request, not as typed", async ({ app }) => {
+	await signIn(app);
+	await (await open(app, OPENER)).click("#out");
+	const headers = await echoed(app, ECHO + "/headers");
+	expect(await app.evaluate(() => tabs.length)).toBe(2);
+	expect(headers["sec-fetch-site"]).toBe("cross-site");
+	expect(names(headers.cookie)).toEqual(["lax", "plain"]);
+});
+
+test("a tab a page opens arrives as that page's site's request, not as typed (isolated)", async ({ page }) => {
+	await openIsolated(page);
+	await signIn(page);
+	await (await open(page, OPENER)).click("#out");
+	const headers = await echoed(page, ECHO + "/headers");
+	expect(headers["sec-fetch-site"]).toBe("cross-site");
+	expect(names(headers.cookie)).toEqual(["lax", "plain"]);
+});
+
+// What a page that got around the proxy's hooks can do: send its own tab
+// straight to another site's origin, with the browser's own setAttribute
+// (borrowed from a frame Scramjet hasn't hooked) and no referrer.
+const FORGER = testPage(`<!doctype html><title>forger</title><meta name="referrer" content="no-referrer"><script>
+function raw(to, post) {
+	document.body.append(document.createElement("iframe"));
+	const untouched = window[window.length - 1];
+	const el = document.createElement(post ? "form" : "a");
+	untouched.Element.prototype.setAttribute.call(el, post ? "action" : "href", to);
+	if (post) {
+		el.method = "post";
+		el.innerHTML = '<input name="a" value="1">';
+	}
+	document.body.append(el);
+	post ? el.submit() : el.click();
+}
+</script>`);
+
+test("a page that sends its tab straight to another site, hiding where from, isn't taken for the person (isolated)", async ({ page }) => {
+	await openIsolated(page);
+	await signIn(page);
+	// typed into the bar: the person's own request, with every cookie
+	let headers = received(await bodyText(await open(page, ECHO + "/headers")));
+	expect(headers["sec-fetch-site"]).toBe("none");
+	expect(names(headers.cookie)).toEqual(["lax", "plain", "strict"]);
+
+	const echoOrigin = await page.evaluate(async () => originFor(await BiosSiteKey.siteKey("httpbingo.org")));
+	const forge = async (path, post) => {
+		const frame = await open(page, FORGER);
+		await frame.evaluate(([to, post]) => window.raw(to, post), [echoOrigin + "/scramjet/" + encodeURIComponent(ECHO + path), post]);
+		return echoed(page, ECHO + path);
+	};
+	// a link: like any from another site, Lax cookies go and Strict ones stay home
+	headers = await forge("/headers", false);
+	expect(headers["sec-fetch-site"]).toBe("cross-site");
+	expect(names(headers.cookie)).toEqual(["lax", "plain"]);
+	// a form posted from another site, as forged requests are: neither
+	headers = await forge("/post", true);
+	expect(headers["sec-fetch-site"]).toBe("cross-site");
+	expect(headers.origin).toBe("null");
+	expect(names(headers.cookie)).toEqual(["plain"]);
+});
+
+test("a site's own page that hides its referrer still gets its own cookies (isolated)", async ({ page }) => {
+	await openIsolated(page);
+	await signIn(page, "https://httpbin.org");
+	const quiet =
+		"https://httpbin.org/response-headers?Content-Type=text/html&Referrer-Policy=no-referrer&x=" +
+		encodeURIComponent("<a id=link href=/headers>link</a><form id=form method=post action=/post><input name=a value=1></form>");
+	await open(page, quiet);
+	let headers = received(await bodyText(await follow(page, "link", "https://httpbin.org/headers")));
+	expect(headers["sec-fetch-site"]).toBe("same-origin");
+	expect(headers.referer).toBeUndefined();
+	expect(names(headers.cookie)).toEqual(["lax", "plain", "strict"]);
+	await open(page, quiet);
+	const sent = JSON.parse(await bodyText(await follow(page, "form", "https://httpbin.org/post")));
+	expect(sent.form).toEqual({ a: "1" });
+	expect(names(sent.headers.Cookie)).toEqual(["lax", "plain", "strict"]);
+});
+
+test("going back to a page typed into the bar is still the person's own request (isolated)", async ({ page }) => {
+	await openIsolated(page);
+	await signIn(page);
+	await open(page, ECHO + "/headers");
+	await open(page, "https://example.com/");
+	await page.waitForFunction(() => active.title === "Example Domain");
+	await page.click("#back");
+	const headers = await echoed(page, ECHO + "/headers");
+	expect(headers["sec-fetch-site"]).toBe("none");
+	expect(names(headers.cookie)).toEqual(["lax", "plain", "strict"]);
+});
+
+test("a site's cookies outlive its service worker being stopped", async ({ app, browserName }) => {
+	test.skip(browserName !== "chromium", "stops the worker through Chromium's DevTools protocol");
+	const cdp = await app.context().newCDPSession(app);
+	await cdp.send("ServiceWorker.enable");
+	const cookies = async (site) => JSON.parse(await bodyText(await open(app, site + "/cookies"))).cookies;
+	await open(app, `${ECHO}/response-headers?Set-Cookie=${encodeURIComponent("kept=1; Max-Age=3600")}&Set-Cookie=gone%3D1`);
+	await cdp.send("ServiceWorker.stopAllWorkers");
+	expect(await cookies(ECHO)).toEqual({ kept: "1", gone: "1" });
+	// signed out (Max-Age=0): gone, for good
+	await open(app, `${ECHO}/response-headers?Set-Cookie=${encodeURIComponent("gone=; Max-Age=0")}`);
+	await cdp.send("ServiceWorker.stopAllWorkers");
+	expect(await cookies(ECHO)).toEqual({ kept: "1" });
+	// a page's script setting one wakes the worker, and doesn't write over the others
+	const frame = await open(app, testPage("<!doctype html><title>sets</title>"));
+	await cdp.send("ServiceWorker.stopAllWorkers");
+	await frame.evaluate(() => (document.cookie = "script=1; path=/"));
+	await expect.poll(() => cookies("https://httpbin.org")).toEqual({ script: "1" });
+	expect(await cookies(ECHO)).toEqual({ kept: "1" });
 });

@@ -44,6 +44,7 @@ const star = $("star");
 const error = $("error");
 const sheet = $("sheet");
 const library = $("library");
+const downloadsPanel = $("downloads");
 const switcher = $("switcher");
 const suggestEl = $("suggest");
 
@@ -216,7 +217,7 @@ function forgetOrigin(origin) {
 
 // With a passphrase lock (see "passphrase lock" below) these live only in the
 // encrypted vault, decrypted in memory.
-const PRIVATE = new Set(["bios:history", "bios:bookmarks", "bios:tabs"]);
+const PRIVATE = new Set(["bios:history", "bios:bookmarks", "bios:tabs", "bios:downloads", "bios:zoom", "bios:permissions"]);
 let vault = null;
 
 function readList(name) {
@@ -251,6 +252,32 @@ async function frameUrlFor(url, tab) {
 	tab.siteOrigin = origin;
 	await ensureAnchor(origin);
 	return origin + path;
+}
+
+// A page the app loads itself (an address typed, a bookmark, reload, back)
+// is the person's own request. To the site's service worker it looks just
+// like a page sending its tab there without a referrer, which it takes for
+// another site's (shield.js, vouched): so the app tells it first, through
+// the site's anchor frame. `src`: the address the tab's frame is given.
+function markTyped(src) {
+	if (!isolated) return Promise.resolve();
+	const url = new URL(src);
+	const anchor = anchors.get(url.origin);
+	if (!anchor) return Promise.resolve();
+	return anchor.ready.then(
+		() =>
+			new Promise((resolve) => {
+				const channel = new MessageChannel();
+				const timer = setTimeout(resolve, 2000);
+				channel.port1.onmessage = () => {
+					clearTimeout(timer);
+					resolve();
+				};
+				anchor.frame.contentWindow.postMessage({ bios: "typed", path: url.pathname + url.search }, url.origin, [
+					channel.port2,
+				]);
+			})
+	);
 }
 
 // Isolation mode: one hidden /anchor.html frame per recently used site
@@ -332,8 +359,9 @@ function createTab(url = "", { after = null, lazy = false, title = "", select = 
 	// unique per tab: page.js aims links at its own tab's name
 	frame.name = `uvframe-${id}`;
 	frame.title = "Page";
-	frame.allow =
-		"autoplay; fullscreen; encrypted-media; picture-in-picture; clipboard-write";
+	// (the camera and microphone for a page the person let, through the app
+	// first and then the browser's own prompt: see "permissions")
+	frame.allow = "autoplay; fullscreen; encrypted-media; picture-in-picture; clipboard-write; camera *; microphone *";
 	// Phones and tablets: the browser itself keeps a page from opening a
 	// window or replacing the app (no allow-popups, no allow-top-navigation),
 	// which would load a site directly, around the proxy. page.js already
@@ -418,6 +446,12 @@ function closeTab(tab) {
 	if (split?.includes(tab)) split = null;
 	tabs.splice(i, 1);
 	tab.frame.remove();
+	// what it was watching or still asking about goes with it
+	stopWatching(tab);
+	if (asking.some((question) => question.tab === tab)) {
+		asking.splice(0, asking.length, ...asking.filter((question) => question.tab !== tab));
+		showAsk();
+	}
 	if (lastActive === tab) lastActive = null;
 	if (!tabs.length) createTab();
 	else if (tab === active) selectTab(tabs[Math.min(i, tabs.length - 1)]);
@@ -671,6 +705,7 @@ async function go(input, tab = active, record = true, cross = false) {
 				/\/scramjet\/([^#]*)/,
 				(_, page) => "/scramjet/__bios/cross?u=" + encodeURIComponent("/scramjet/" + page)
 			);
+		else await markTyped(src);
 		if (!tabs.includes(tab)) return;
 		if (record && tab.url && tab.url !== url && !tab.pending) {
 			pushStep(tab.back, tab.url);
@@ -882,6 +917,13 @@ async function onFrameMessage(event) {
 		return;
 	}
 
+	// Isolation mode: a site's anchor frame passing on a file its pages sent to save.
+	if (data?.bios === "download") {
+		for (const [origin, anchor] of anchors)
+			if (anchor.frame.contentWindow === event.source && event.origin === origin) noteDownload(data.download);
+		return;
+	}
+
 	if (data?.bios === "open") return openFromPage(event);
 	if (data?.bios === "go") return goFromPage(event);
 
@@ -947,10 +989,24 @@ async function onFrameMessage(event) {
 	const tab = tabFor(event.source);
 	if (!tab) return;
 
-	// the page's answer to the find bar
+	// the page's answer to the find bar: which match of how many
 	if (data?.bios === "found") {
-		if (tab === active && !findBar.hidden && data.text === findInput.value)
-			$("find-status").textContent = data.found || !data.text ? "" : "No matches";
+		if (tab !== active || findBar.hidden || data.text !== findInput.value) return;
+		const [index, count] = [data.index, data.count].map((n) => (Number.isInteger(n) && n >= 0 ? n : 0));
+		$("find-status").textContent = !data.text ? "" : data.found && count ? `${Math.min(index, count)} of ${count}` : "No matches";
+		return;
+	}
+
+	// the location, the camera or the microphone (see "permissions")
+	if (data?.bios === "ask") return askedFromPage(event);
+	if (data?.bios === "ask-done") {
+		if (Number.isInteger(data.id) && event.origin === (tab.siteOrigin || location.origin)) stopWatching(tab, data.id);
+		return;
+	}
+
+	// Ctrl/⌘ with +, - or 0, pressed in the page
+	if (data?.bios === "zoom-key") {
+		if (tab === active && event.origin === (tab.siteOrigin || location.origin)) zoomBy(data.step);
 		return;
 	}
 
@@ -984,12 +1040,17 @@ async function onFrameMessage(event) {
 		return;
 	}
 
-	// a new page in the tab: the frames of the one before are gone
-	if (typeof data.doc === "string" && data.doc !== tab.doc) {
+	// a new page in the tab: the frames of the one before are gone, and it
+	// gets its site's zoom
+	const fresh = typeof data.doc === "string" && data.doc !== tab.doc;
+	if (fresh) {
 		tab.doc = data.doc;
 		for (const [origin, at] of tab.frameOrigins) if (at < heard) tab.frameOrigins.delete(origin);
+		// the location the page before was watching, it watches no more
+		stopWatching(tab);
 	}
 	updateTab(tab, url.href, String(data.title || "").slice(0, 300));
+	if (fresh && zoomOf(url.href) !== 1) tellPage(tab, { cmd: "zoom", level: zoomOf(url.href) });
 }
 
 window.addEventListener("message", onFrameMessage);
@@ -1029,7 +1090,8 @@ function reload(tab = active) {
 		win.location.reload();
 	} catch {
 		frameUrlFor(tab.url, tab)
-			.then((src) => {
+			.then(async (src) => {
+				await markTyped(src);
 				const load = () => {
 					tab.landing = true;
 					setLoading(tab, true);
@@ -1059,7 +1121,7 @@ function step(dir, tab = active) {
 	if (!from.length) return;
 	const browsing = tabs.filter((t) => t.navigated);
 	if (tab.ownHistory && browsing.length === 1 && browsing[0] === tab)
-		return tabCommand(dir < 0 ? "back" : "forward", tab);
+		return markStep(from.at(-1)).then(() => tabCommand(dir < 0 ? "back" : "forward", tab));
 	// once the shell has stepped, the frame's history no longer matches
 	tab.ownHistory = false;
 	const url = from.pop();
@@ -1067,8 +1129,31 @@ function step(dir, tab = active) {
 	go(url, tab, false);
 }
 
-// Find in page. The page does the looking (page.js, with the browser's own
-// text search): the shell can't reach into a tab on another origin, and a
+// The page a step back or forward goes to is told it's the person's own
+// step (see markTyped): it may be another site's origin, which the page
+// taking the step can't speak for.
+async function markStep(url) {
+	if (!isolated) return;
+	try {
+		const origin = originFor(await BiosSiteKey.siteKey(new URL(url).hostname));
+		await ensureAnchor(origin);
+		await markTyped(origin + proxyPath(url));
+	} catch {
+		// not an address the app opens
+	}
+}
+
+// A command for the page in a tab (page.js does it: the shell can't reach
+// into a tab on another origin). The shell's own postMessage, applied to the
+// frame: without isolation the frame's is Scramjet's stand-in, which builds
+// a function from a string in the caller's window, and the shell's policy
+// forbids that here.
+function tellPage(tab, command) {
+	if (!tab?.url) return;
+	window.postMessage.call(tab.frame.contentWindow, { bios: "cmd", ...command }, tab.siteOrigin || location.origin);
+}
+
+// Find in page. The page does the looking and the counting (page.js): a
 // phone's home-screen app has no find of its own.
 const findBar = $("find");
 const findInput = $("find-input");
@@ -1076,15 +1161,7 @@ const findInput = $("find-input");
 // `again`: the next match (or the one before, with `back`) rather than the first
 function findInPage(text, back = false, again = false) {
 	$("find-status").textContent = "";
-	if (!active?.url) return;
-	// The shell's own postMessage, applied to the frame: without isolation
-	// the frame's is Scramjet's stand-in, which builds a function from a
-	// string in the caller's window, and the shell's policy forbids that here.
-	window.postMessage.call(
-		active.frame.contentWindow,
-		{ bios: "cmd", cmd: "find", text, back, again },
-		active.siteOrigin || location.origin
-	);
+	tellPage(active, { cmd: "find", text, back, again });
 }
 
 function openFind() {
@@ -1115,6 +1192,180 @@ $("find-prev").addEventListener("click", () => findInPage(findInput.value, true,
 $("find-close").addEventListener("click", closeFind);
 $("find-open").addEventListener("click", openFind);
 
+// Zoom, kept for each site (on this device, with history and bookmarks). The
+// page zooms itself (CSS zoom, page.js); the app's chrome stays as it is.
+const ZOOM = "bios:zoom";
+const ZOOM_STEPS = [0.5, 0.67, 0.75, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2, 2.5, 3];
+
+function zoomOf(url) {
+	try {
+		const levels = readList(ZOOM);
+		const level = levels?.[BiosSiteKey.siteOf(new URL(url).hostname)];
+		return ZOOM_STEPS.includes(level) ? level : 1;
+	} catch {
+		return 1;
+	}
+}
+
+// `step`: one step in (1) or out (-1), or back to 100% (0), for the active tab's site
+function zoomBy(step) {
+	if (!active?.url) return;
+	const site = BiosSiteKey.siteOf(new URL(active.url).hostname);
+	const now = ZOOM_STEPS.indexOf(zoomOf(active.url));
+	const level = step === 0 ? 1 : ZOOM_STEPS[Math.min(ZOOM_STEPS.length - 1, Math.max(0, now + Math.sign(step)))];
+	const levels = readList(ZOOM);
+	const kept = levels && typeof levels === "object" && !Array.isArray(levels) ? levels : {};
+	if (level === 1) delete kept[site];
+	else kept[site] = level;
+	saveEntries(ZOOM, kept);
+	// every open tab of the site
+	for (const tab of tabs)
+		if (tab.url && BiosSiteKey.siteOf(new URL(tab.url).hostname) === site) tellPage(tab, { cmd: "zoom", level });
+	showZoom();
+}
+
+function showZoom() {
+	$("zoom-level").textContent = Math.round(zoomOf(active?.url || "") * 100) + "%";
+}
+
+$("zoom-in").addEventListener("click", () => zoomBy(1));
+$("zoom-out").addEventListener("click", () => zoomBy(-1));
+
+// Reader view (page.js and reader.js) and printing: the page does them.
+function readerView() {
+	sheet.hidden = true;
+	tellPage(active, { cmd: "reader" });
+}
+function printPage() {
+	sheet.hidden = true;
+	tellPage(active, { cmd: "print" });
+}
+
+// Translation through Google Translate's own proxy for web pages
+// (example-com.translate.goog): Google fetches the page and translates it.
+// It sees the page's address and its words, as the menu says; it's only
+// ever asked for this way.
+function translated(url) {
+	const at = new URL(url);
+	if (at.hostname.endsWith(".translate.goog")) return null;
+	const wanted = (navigator.language || "en").toLowerCase();
+	const lang = /^zh-(tw|hk|hant)/.test(wanted) ? "zh-TW" : wanted.startsWith("zh") ? "zh-CN" : wanted.split("-")[0];
+	const out = new URL(`https://${at.hostname.replace(/-/g, "--").replace(/\./g, "-")}.translate.goog${at.pathname}${at.search}`);
+	for (const [name, value] of [["_x_tr_sl", "auto"], ["_x_tr_tl", lang], ["_x_tr_hl", lang]]) out.searchParams.set(name, value);
+	out.hash = at.hash;
+	return out.href;
+}
+function translatePage() {
+	sheet.hidden = true;
+	const to = active?.url && translated(active.url);
+	if (to) go(to);
+}
+
+$("reader-open").addEventListener("click", readerView);
+$("print-open").addEventListener("click", printPage);
+$("translate-open").addEventListener("click", translatePage);
+
+// ------------------------------------------------------------ permissions
+// A page asking for the location, the camera or the microphone (page.js).
+// The app asks the person first, naming the site from the tab's own verified
+// address, and keeps the answer for the site until site data is cleared. The
+// location the app reads itself and hands over: the site's address in the
+// proxy never gets a permission. For the camera and the microphone the page
+// then asks the browser, whose own prompt follows (a stream can't be handed
+// across windows).
+const PERMISSIONS = "bios:permissions";
+const KINDS = new Set(["location", "camera", "microphone"]);
+const asking = []; // { tab, site, kinds, answer }, the first one shown
+const watching = new Map(); // "<tab id> <question id>" -> the location watch
+
+function permissionsOf(site) {
+	const kept = readList(PERMISSIONS);
+	const all = kept && typeof kept === "object" && !Array.isArray(kept) ? kept : {};
+	return { all, here: all[site] && typeof all[site] === "object" ? all[site] : {} };
+}
+
+function askedFromPage(event) {
+	const tab = tabFor(event.source);
+	const { id, want, watch, high } = event.data;
+	// the tab's own page only (page.js asks for no frame inside it)
+	if (!tab?.url || !Number.isInteger(id) || typeof want !== "string") return;
+	if (event.origin !== (tab.siteOrigin || location.origin)) return;
+	const kinds = [...new Set(want.split(" "))].filter((kind) => KINDS.has(kind));
+	if (!kinds.length || (kinds.includes("location") && kinds.length > 1)) return;
+	const site = BiosSiteKey.siteOf(new URL(tab.url).hostname);
+	const reply = (answer) => tellPage(tab, { cmd: "answer", id, ...answer });
+	const answer = (allowed) => {
+		if (kinds[0] !== "location") return reply({ allowed });
+		if (!allowed) return reply({ code: 1, message: "User denied Geolocation" });
+		locate(tab, id, !!watch, !!high, reply);
+	};
+	const { here } = permissionsOf(site);
+	if (kinds.every((kind) => here[kind] === "allow")) return answer(true);
+	if (kinds.some((kind) => here[kind] === "deny")) return answer(false);
+	asking.push({ tab, site, kinds, answer });
+	if (asking.length === 1) showAsk();
+}
+
+function showAsk() {
+	const question = asking[0];
+	$("ask").hidden = !question;
+	if (!question) return;
+	$("ask-text").textContent = `${displayHost(question.tab.url)} wants to use your ${question.kinds.join(" and ")}.`;
+}
+
+function answerAsk(allowed) {
+	const question = asking.shift();
+	if (question) {
+		const { all, here } = permissionsOf(question.site);
+		for (const kind of question.kinds) here[kind] = allowed ? "allow" : "deny";
+		all[question.site] = here;
+		saveEntries(PERMISSIONS, all);
+		// (a tab closed while it asked has no page left to answer)
+		if (tabs.includes(question.tab)) question.answer(allowed);
+	}
+	showAsk();
+	if (!sheet.hidden) renderSheet();
+}
+
+$("ask-yes").addEventListener("click", () => answerAsk(true));
+$("ask-no").addEventListener("click", () => answerAsk(false));
+
+// The app's own reading of the location, for a page the person let.
+function locate(tab, id, watch, high, reply) {
+	const send = ({ coords, timestamp }) => {
+		const position = { timestamp };
+		for (const name of ["latitude", "longitude", "accuracy", "altitude", "altitudeAccuracy", "heading", "speed"])
+			position[name] = coords[name];
+		reply({ position });
+	};
+	const fail = (err) => reply({ code: err?.code || 2, message: String(err?.message || "Position unavailable") });
+	if (!navigator.geolocation) return fail();
+	const options = { enableHighAccuracy: high, timeout: 30_000, maximumAge: 60_000 };
+	if (!watch) return navigator.geolocation.getCurrentPosition(send, fail, options);
+	stopWatching(tab, id);
+	watching.set(`${tab.id} ${id}`, navigator.geolocation.watchPosition(send, fail, options));
+}
+
+// A watch the page let go of, or every watch of a tab whose page went (no `id`).
+function stopWatching(tab, id) {
+	for (const [key, watch] of watching)
+		if (key === `${tab.id} ${id}` || (id === undefined && key.startsWith(tab.id + " "))) {
+			navigator.geolocation?.clearWatch(watch);
+			watching.delete(key);
+		}
+}
+
+function forgetPermissions() {
+	const site = currentSite();
+	if (!site) return;
+	const { all } = permissionsOf(site);
+	delete all[site];
+	saveEntries(PERMISSIONS, all);
+	renderSheet();
+}
+
+$("allowed-forget").addEventListener("click", forgetPermissions);
+
 $("back").addEventListener("click", () => step(-1));
 $("forward").addEventListener("click", () => step(1));
 $("reload").addEventListener("click", () => reload());
@@ -1144,12 +1395,18 @@ barInput.addEventListener("blur", showAddress);
 // Cmd/Ctrl+K or +L: jump to the address bar (or the new tab's search box).
 document.addEventListener("keydown", (event) => {
 	if (event.key === "Escape") {
-		sheet.hidden = library.hidden = switcher.hidden = true;
+		sheet.hidden = library.hidden = downloadsPanel.hidden = switcher.hidden = true;
 		hideSuggest();
 		closeFind();
 		return;
 	}
 	if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
+	// the page's zoom, not the whole app's
+	const zoom = { "=": 1, "+": 1, "-": -1, 0: 0 }[event.key];
+	if (zoom !== undefined && active?.url) {
+		event.preventDefault();
+		return zoomBy(zoom);
+	}
 	const key = event.key.toLowerCase();
 	if (key !== "k" && key !== "l") return;
 	event.preventDefault();
@@ -1169,6 +1426,13 @@ const COMMANDS = [
 	{ name: "Close split view", when: () => !!split, run: toggleSplit },
 	{ name: "Reload page", when: () => !!active?.url, run: () => reload() },
 	{ name: "Find in page", when: () => !!active?.url, run: () => openFind() },
+	{ name: "Reader view", when: () => !!active?.url, run: readerView },
+	{ name: "Translate page", when: () => !!active?.url && !!translated(active.url), run: translatePage },
+	{ name: "Print", when: () => !!active?.url, run: printPage },
+	{ name: "Zoom in", when: () => !!active?.url, run: () => zoomBy(1) },
+	{ name: "Zoom out", when: () => !!active?.url, run: () => zoomBy(-1) },
+	{ name: "Actual size", when: () => !!active?.url && zoomOf(active.url) !== 1, run: () => zoomBy(0) },
+	{ name: "Downloads", run: () => openDownloads() },
 	{ name: "New identity", run: () => newIdentity() },
 	// opens Settings on the button rather than wiping from a typo
 	{
@@ -1352,7 +1616,15 @@ function renderSheet() {
 			"Address verified. This site runs walled off from other sites.";
 	else trust.textContent = "Encrypted connection.";
 
-	$("site-row").hidden = $("scripts-row").hidden = $("find-open").hidden = !site;
+	$("site-row").hidden = $("scripts-row").hidden = $("page-tools").hidden = $("zoom-row").hidden = !site;
+	$("translate-open").hidden = !site || !translated(active.url);
+	showZoom();
+	// what the person said to the site's asking (see "permissions")
+	const said = Object.entries(site ? permissionsOf(site).here : {}).filter(([kind]) => KINDS.has(kind));
+	$("allowed-row").hidden = !said.length;
+	$("allowed-text").textContent = said
+		.map(([kind, answer]) => `${kind[0].toUpperCase() + kind.slice(1)} ${answer === "allow" ? "allowed" : "not allowed"}`)
+		.join(" · ");
 	// only with isolation does a site have storage of its own to keep
 	$("keep-row").hidden = !site || !isolated;
 	$("site-toggle").checked = !settings.allow.includes(site);
@@ -1379,10 +1651,62 @@ function renderSheet() {
 			"Site isolation is off: all sites share one space, so a malicious site could read data from others. Set ISOLATION_DOMAIN on the server to turn it on.";
 }
 
+// The certificate of the site in the active tab, as the server sees it (the
+// app's own connection, on the device, checks the one it gets itself).
+async function showCertificate() {
+	const box = $("cert");
+	box.hidden = true;
+	if (!active?.url?.startsWith("https:")) return;
+	const url = new URL(active.url);
+	let cert = null;
+	try {
+		const res = await fetch("/api/cert", {
+			cache: "no-store",
+			headers: { "x-bios-host": url.hostname, "x-bios-https": url.port || "443" },
+		});
+		cert = (await res.json()).cert;
+	} catch {
+		// no answer: nothing to show
+	}
+	if (!cert || sheet.hidden || active?.url !== url.href) return;
+	const day = (iso) => new Date(iso).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+	$("cert-summary").textContent =
+		`Certificate: issued to ${cert.subject} by ${cert.issuer || "an unknown issuer"}, valid until ${day(cert.validTo)}` +
+		(cert.revoked ? ". Revoked." : "");
+	const rows = [
+		["Issued to", [cert.subject, cert.organization].filter(Boolean).join(", ")],
+		["For", cert.names.join(", ")],
+		["Issued by", cert.issuer],
+		["Valid", `${day(cert.validFrom)} to ${day(cert.validTo)}`],
+		[
+			"Revoked",
+			cert.revoked === true
+				? "Yes, by its issuer"
+				: cert.revoked === false
+					? "No (checked on the issuer's list)"
+					: "Not checked: no revocation list to look in",
+		],
+		["SHA-256", cert.fingerprint],
+		["Serial", cert.serial],
+	];
+	if (!cert.trusted) rows.unshift(["Problem", cert.problem || "not trusted"]);
+	$("cert-details").replaceChildren(
+		...rows.flatMap(([name, value]) => {
+			const dt = document.createElement("dt");
+			dt.textContent = name;
+			const dd = document.createElement("dd");
+			dd.textContent = value || "—";
+			return [dt, dd];
+		})
+	);
+	box.hidden = false;
+}
+
 async function openSheet() {
 	library.hidden = true;
 	sheet.hidden = false;
 	renderSheet();
+	showCertificate();
 	fetch("/filters/status", { cache: "no-store" })
 		.then((res) => res.json())
 		.then((status) => {
@@ -1408,7 +1732,7 @@ $("menu-btn").addEventListener("click", openSheet);
 $("sheet-close").addEventListener("click", () => {
 	sheet.hidden = true;
 });
-for (const panel of [sheet, library, switcher])
+for (const panel of [sheet, library, downloadsPanel, switcher])
 	panel.addEventListener("click", (event) => {
 		if (event.target === panel) panel.hidden = true;
 	});
@@ -1534,6 +1858,11 @@ function clearOrigin(origin, whole = false) {
 // their history), unless `everything` goes.
 async function clearAllSiteData(everything = false) {
 	saveEntries(HISTORY, []);
+	saveEntries(DOWNLOADS, []);
+	// what sites were let use, with their data
+	saveEntries(PERMISSIONS, {});
+	// New identity: the zoom kept for each site too, which names sites visited
+	if (everything) saveEntries(ZOOM, {});
 	split = null;
 	for (const tab of [...tabs]) closeTab(tab);
 	saveEntries(TABS, []);
@@ -1860,7 +2189,7 @@ function linkRow(item, detail) {
 	text.append(title, small);
 	open.append(markFor(item.url), text);
 	open.addEventListener("click", () => {
-		library.hidden = true;
+		library.hidden = downloadsPanel.hidden = true;
 		go(item.url);
 	});
 	li.append(open);
@@ -1928,6 +2257,61 @@ $("history-clear").addEventListener("click", () => {
 	saveEntries(HISTORY, []);
 	renderHistory();
 	if (!active?.url) renderNewTab();
+});
+
+// Files sites sent to save. The browser saves them as always; the service
+// worker tells the app (shield.js), which lists them like the history: on
+// this device only, and cleared with it.
+const DOWNLOADS = "bios:downloads";
+
+function noteDownload(download) {
+	if (!download || typeof download.url !== "string" || !/^https?:/.test(download.url)) return;
+	const entry = {
+		url: download.url.slice(0, 2000),
+		name: String(download.name || "").slice(0, 200) || displayHost(download.url),
+		size: Math.max(0, Math.floor(Number(download.size) || 0)),
+		at: Date.now(),
+	};
+	// (a file a page asks for twice at once is one download)
+	const list = readEntries(DOWNLOADS).filter((d) => !(d.url === entry.url && entry.at - d.at < 5000));
+	list.unshift(entry);
+	saveEntries(DOWNLOADS, list.slice(0, 200));
+	if (!downloadsPanel.hidden) renderDownloads();
+}
+
+function sizeText(bytes) {
+	if (bytes < 1000) return `${bytes} bytes`;
+	const [unit, value] = bytes < 1e6 ? ["KB", bytes / 1e3] : bytes < 1e9 ? ["MB", bytes / 1e6] : ["GB", bytes / 1e9];
+	return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${unit}`;
+}
+
+function renderDownloads() {
+	const list = readEntries(DOWNLOADS);
+	$("downloads-empty").hidden = list.length > 0;
+	$("downloads-clear").hidden = !list.length;
+	$("downloads-list").replaceChildren(
+		...list.map((d) =>
+			linkRow(
+				{ url: d.url, title: d.name },
+				[displayHost(d.url), d.size ? sizeText(d.size) : "", timeAgo(d.at)].filter(Boolean).join(" · ")
+			)
+		)
+	);
+}
+
+function openDownloads() {
+	sheet.hidden = true;
+	renderDownloads();
+	downloadsPanel.hidden = false;
+}
+
+$("downloads-open").addEventListener("click", openDownloads);
+$("downloads-close").addEventListener("click", () => {
+	downloadsPanel.hidden = true;
+});
+$("downloads-clear").addEventListener("click", () => {
+	saveEntries(DOWNLOADS, []);
+	renderDownloads();
 });
 
 // ---------------------------------------------------------------- new tab
@@ -2032,6 +2416,7 @@ function blockedThisWeek() {
 }
 
 navigator.serviceWorker?.addEventListener("message", (event) => {
+	if (event.data?.bios === "download") return noteDownload(event.data.download);
 	if (event.data?.bios !== "blocked") return;
 	addBlocked(event.data.count);
 	noteBlocked(event.data.hosts);

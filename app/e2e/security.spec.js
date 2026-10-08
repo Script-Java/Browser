@@ -61,6 +61,24 @@ test("pages get no WebRTC, which would reveal the real IP address", async ({ app
 	});
 });
 
+// The page script goes into HTML pages only, and the browser runs the scripts
+// in an SVG or XML document too: with WebRTC, and before anything can reach in.
+test("a document that isn't HTML (SVG, XHTML) runs none of its own scripts", async ({ app }) => {
+	const svg = `<svg xmlns="http://www.w3.org/2000/svg"><script>parent.document.title = "RAN " + typeof RTCPeerConnection</script></svg>`;
+	const xhtml = `<html xmlns="http://www.w3.org/1999/xhtml"><body><script>parent.document.title = "RAN " + typeof RTCPeerConnection</script></body></html>`;
+	for (const src of [
+		`data:image/svg+xml,${encodeURIComponent(svg)}`,
+		`data:application/xhtml+xml,${encodeURIComponent(xhtml)}`,
+		`https://httpbingo.org/base64/${Buffer.from(svg).toString("base64url")}?content-type=image/svg%2Bxml`,
+	]) {
+		const frame = await open(app, testPage(`<!doctype html><title>holder</title><iframe src="${src}"></iframe><p id="t">test</p>`));
+		await expect.poll(() => frame.locator("#t").textContent()).toBe("test");
+		await expect.poll(() => frame.evaluate(() => document.querySelector("iframe").contentDocument?.readyState)).toBe("complete");
+		await app.waitForTimeout(1000);
+		expect(await frame.title(), src.slice(0, 30)).toBe("holder");
+	}
+});
+
 test("a page can't get around the proxy through a frame of its own", async ({ app }) => {
 	// A fresh frame has the browser's own fetch, WebSocket and WebRTC, without
 	// Scramjet's hooks, and window[i] reaches it with no getter to hook. The
@@ -228,6 +246,19 @@ test("HTTPS-Only warns before a site without https, and continues on request", a
 	await expect.poll(() => frame.title()).toContain("HTTP Forever");
 });
 
+test("a site on a web port of its own opens; other ports stay shut", async ({ app }) => {
+	// (portquiz.net answers plain http on every port)
+	let frame = await open(app, "http://portquiz.net:8080/");
+	await expect.poll(() => frame.title()).toBe("This site isn't secure");
+	await expect(frame.locator("code")).toHaveText("portquiz.net:8080");
+	await frame.click("#go");
+	await expect(frame.locator("body")).toContainText("Port test successful");
+	// a database's port: the server won't connect there for anyone (and the
+	// person chose plain http for this site a moment ago, so no warning first)
+	frame = await open(app, "http://portquiz.net:3306/");
+	await expect(frame.locator("h1")).toHaveText("Couldn't open this page");
+});
+
 test("a link can't click through a warning for someone", async ({ app }) => {
 	// the warning's own button carries a token; this made-up address doesn't
 	const page = `${SHARED_URL}/scramjet/${encodeURIComponent("http://httpforever.com/")}`;
@@ -312,6 +343,33 @@ test("ad and tracker requests are blocked", async ({ app }) => {
 	await expect.poll(() => frame.title()).toBe("ads");
 	// the service worker reports what it blocked to the app every few seconds
 	await expect.poll(() => app.evaluate(() => blockedThisWeek()), { timeout: 20_000 }).toBeGreaterThan(0);
+});
+
+test("a tracker hidden behind a site's own subdomain (CNAME) is blocked as the tracker", async ({ app }) => {
+	await expect
+		.poll(async () => (await (await app.request.get(`${SHARED_URL}/filters/status`)).json()).updatedAt, {
+			message: "block lists downloaded",
+			timeout: 110_000,
+		})
+		.toBeTruthy();
+	// A bank's subdomain that its DNS makes another name for Eulerian's
+	// tracker: the lists know the tracker, but not this name for it.
+	const frame = await open(app, "https://particuliers.sg.fr/robots.txt");
+	await frame.evaluate(() => {
+		new Image().src = location.origin + "/scramjet/" + encodeURIComponent("https://1bva.sg.fr/col2/-/x.gif");
+	});
+	await app.waitForFunction(() => blockedOn.get(active.url)?.has("1bva.sg.fr"), null, { timeout: 20_000 });
+});
+
+test("a site on the phishing lists gets a warning before anything of it loads", async ({ app }) => {
+	// one on the server's own list (PHISHING_HOSTS in playwright.config.js):
+	// a reserved name, which no one can register or reach
+	const frame = await open(app, "https://phishing.badger-test.invalid/login");
+	await expect(frame.locator("h1")).toHaveText("Deceptive site ahead");
+	await expect(frame.locator("code")).toHaveText("phishing.badger-test.invalid");
+	// the list's word comes from the server, checked with every page opened
+	const status = await (await app.request.get(`${SHARED_URL}/filters/status`)).json();
+	expect(status.phishing).toBeGreaterThan(0);
 });
 
 test("an embedded player's ads get no tab and can't take the player's place", async ({ app }) => {
@@ -399,12 +457,26 @@ test("a site whose certificate is bad gets a warning with no way past it", async
 		["expired.badssl.com", "has expired"],
 		["wrong.host.badssl.com", "belongs to a different address"],
 		["self-signed.badssl.com", "isn't signed by an authority"],
+		// taken back by its issuer (on Let's Encrypt's list): the server looks (certs.js)
+		["revoked.badssl.com", "was revoked by whoever issued it"],
 	]) {
 		const frame = await open(app, `https://${host}/`);
 		await expect(frame.locator("body"), host).toContainText(problem);
 		await expect(frame.locator("body"), host).toContainText("wasn't opened");
 		await expect(frame.locator("#go"), host).toHaveCount(0);
 	}
+});
+
+test("the shield menu shows the site's certificate", async ({ app }) => {
+	await open(app, "https://revoked.badssl.com/");
+	await open(app, "https://example.com/");
+	await app.evaluate(() => openSheet());
+	await expect(app.locator("#cert-summary")).toContainText("Certificate: issued to");
+	await app.click("#cert-summary");
+	const details = app.locator("#cert-details");
+	await expect(details).toContainText("SHA-256");
+	await expect(details).toContainText("example.com");
+	await expect(details).not.toContainText("Yes, by its issuer");
 });
 
 test("a site that can't be reached says so, and offers to try again", async ({ app }) => {

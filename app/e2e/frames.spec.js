@@ -340,3 +340,46 @@ test("a site's rule against framing holds for a frame on its own origin (the ser
 	await page.waitForTimeout(3000);
 	for (const id of ["deny", "sameOrigin", "elsewhere"]) await expect(content(id), id).not.toContainText("FRAMED-CONTENT");
 });
+
+test("a site's rule against framing holds in a frame whose scripts are switched off (sandbox)", async ({ page, browserName }) => {
+	await openIsolated(page);
+	const frame = await host(page);
+	// a real frame first, so the origin kept for httpbin.org under example.com is in use
+	await embed(frame, testPage(`<!doctype html><title>widget</title><p id="ok">widget</p>`));
+	await expect(frame.frameLocator("#embedded").locator("#ok")).toHaveText("widget");
+	const labels = await page.evaluate(async () => {
+		const com = await BiosSiteKey.siteKey("example.com");
+		return { com, kept: await BiosSiteKey.frameKey(com, "httpbin.org") };
+	});
+	const enter = (url) =>
+		`${ISOLATED_URL.replace("://", `://${labels.kept}.`)}/scramjet/__bios/enter?u=${encodeURIComponent(proxiedPath(url))}&a=${labels.com}`;
+	const page1 = (rule) => `https://httpbin.org/response-headers?Content-Type=text/html${rule}&x=FRAMED-CONTENT`;
+	// Scramjet takes a frame's sandbox away; a page that got around its hooks keeps it,
+	// and then no script of ours runs in the frame either: only the service worker is left
+	await frame.evaluate(
+		(frames) => {
+			document.body.append(document.createElement("iframe"));
+			const untouched = window[window.length - 1];
+			for (const [id, sandbox, src] of frames) {
+				const sandboxed = document.createElement("iframe");
+				sandboxed.id = id;
+				untouched.Element.prototype.setAttribute.call(sandboxed, "sandbox", sandbox);
+				document.body.append(sandboxed);
+				untouched.Element.prototype.setAttribute.call(sandboxed, "src", src);
+			}
+		},
+		[
+			["control", "allow-same-origin", enter(page1(""))],
+			["deny", "allow-same-origin", enter(page1("&X-Frame-Options=DENY"))],
+			["elsewhere", "allow-same-origin", enter(page1("&Content-Security-Policy=" + encodeURIComponent("frame-ancestors https://example.org")))],
+			// with no origin of its own, a frame gets nothing of the proxy's at all
+			["opaque", "", enter(page1(""))],
+		]
+	);
+	const content = (id) => frame.frameLocator("#" + id).locator("html");
+	// (Safari lets no service worker answer for a sandboxed frame: there nothing of
+	// the proxy's reaches one, the page without a rule neither)
+	if (browserName === "chromium") await expect(content("control")).toContainText("FRAMED-CONTENT");
+	await page.waitForTimeout(browserName === "chromium" ? 2000 : 6000);
+	for (const id of ["deny", "elsewhere", "opaque"]) await expect(content(id), id).not.toContainText("FRAMED-CONTENT");
+});

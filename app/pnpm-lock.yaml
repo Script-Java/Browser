@@ -23,6 +23,9 @@ importers:
       '@mercuryworkshop/wisp-js':
         specifier: 0.5.0
         version: 0.5.0(utf-8-validate@6.0.6)
+      '@mozilla/readability':
+        specifier: ^0.6.0
+        version: 0.6.0
       esbuild:
         specifier: ^0.28.2
         version: 0.28.2
@@ -296,6 +299,10 @@ packages:
   '@mercuryworkshop/wisp-js@0.5.0':
     resolution: {integrity: sha512-YIPnONZdMYRXLdttL/zQM2PwjHQw3LfNPWTP54Lqhehs79lcORY8rwv5j7bGnuz9S31rZIh1OEzldubE9dtnoA==}
     hasBin: true
+
+  '@mozilla/readability@0.6.0':
+    resolution: {integrity: sha512-juG5VWh4qAivzTAeMzvY9xs9HY5rAcr2E4I7tiSSCokRFi7XIZCAu92ZkSTsIj1OPceCifL3cpfteP3pDT9/QQ==}
+    engines: {node: '>=14.0.0'}
 
   '@playwright/test@1.63.0':
     resolution: {integrity: sha512-oxMK4vllB9RK5NQ2l1pq1IfOf2AvnEuj/vYGDj0H2nMtmtZpKtCwt/l00GEO6xjGfpBNAvjovvYdCm50dRQkpQ==}
@@ -1124,6 +1131,8 @@ snapshots:
       ws: 8.22.0(bufferutil@4.1.0)(utf-8-validate@6.0.6)
     transitivePeerDependencies:
       - utf-8-validate
+
+  '@mozilla/readability@0.6.0': {}
 
   '@playwright/test@1.63.0':
     dependencies:

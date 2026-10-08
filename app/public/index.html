@@ -151,6 +151,15 @@
 
 		<div id="frames"></div>
 
+		<!-- a site asking for the location, the camera or the microphone (index.js, "permissions") -->
+		<div id="ask" role="alertdialog" aria-labelledby="ask-text" hidden>
+			<p id="ask-text"></p>
+			<div class="ask-buttons">
+				<button id="ask-no" type="button">Don't allow</button>
+				<button id="ask-yes" type="button">Allow</button>
+			</div>
+		</div>
+
 		<!-- phones: the controls in reach of a thumb (index.js moves back, forward and the menu in) -->
 		<nav id="dock" aria-label="Browser controls">
 			<button id="dock-new" class="icon-btn" type="button" aria-label="New tab">
@@ -167,12 +176,33 @@
 					<div>
 						<strong id="sheet-site" class="panel-title">Settings</strong>
 						<p id="sheet-trust" class="note"></p>
+						<details id="cert" class="note" hidden>
+							<summary id="cert-summary"></summary>
+							<dl id="cert-details"></dl>
+						</details>
 					</div>
 					<button id="sheet-close" class="panel-close" type="button">Done</button>
 				</div>
 
 				<button id="history-open" class="wide" type="button">History</button>
-				<button id="find-open" class="wide" type="button">Find in page</button>
+				<button id="downloads-open" class="wide" type="button">Downloads</button>
+				<div id="page-tools" class="tools">
+					<button id="find-open" type="button">Find in page</button>
+					<button id="reader-open" type="button">Reader view</button>
+					<button id="translate-open" type="button">Translate</button>
+					<button id="print-open" type="button">Print</button>
+				</div>
+				<div class="row" id="zoom-row">
+					<span>
+						Zoom
+						<small>For this site</small>
+					</span>
+					<span class="zoom">
+						<button id="zoom-out" type="button" aria-label="Zoom out">−</button>
+						<output id="zoom-level" aria-live="polite">100%</output>
+						<button id="zoom-in" type="button" aria-label="Zoom in">+</button>
+					</span>
+				</div>
 
 				<label class="row" id="site-row">
 					<span>
@@ -195,6 +225,14 @@
 					</span>
 					<input type="checkbox" id="keep-toggle" role="switch" />
 				</label>
+
+				<div class="row" id="allowed-row" hidden>
+					<span>
+						Permissions
+						<small id="allowed-text"></small>
+					</span>
+					<button id="allowed-forget" type="button" class="small">Forget</button>
+				</div>
 
 				<details id="blocked-here" class="note" hidden>
 					<summary></summary>
@@ -294,6 +332,19 @@
 				<ul id="history-list" class="links"></ul>
 				<p id="history-empty" class="note" hidden>No history yet.</p>
 				<button id="history-clear" class="wide" type="button">Clear history</button>
+			</div>
+		</div>
+
+		<div id="downloads" class="panel" hidden>
+			<div class="panel-card" role="dialog" aria-modal="true" aria-labelledby="downloads-title">
+				<div class="panel-head">
+					<strong id="downloads-title" class="panel-title">Downloads</strong>
+					<button id="downloads-close" class="panel-close" type="button">Done</button>
+				</div>
+				<p class="note">Files sites sent to save. The device keeps the files (on an iPhone, in Files); this list is kept on the device only, and goes with the history. Tap one to get it again.</p>
+				<ul id="downloads-list" class="links"></ul>
+				<p id="downloads-empty" class="note" hidden>No downloads yet.</p>
+				<button id="downloads-clear" class="wide" type="button">Clear the list</button>
 			</div>
 		</div>
 

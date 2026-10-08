@@ -2,10 +2,10 @@
 // The test browser is set somewhere unusual, so an answer that leaks shows.
 
 import { expect, test } from "./fixtures.js";
-import { open, setSettings, testPage } from "./fixtures.js";
+import { open, setSettings, tabFrame, testPage } from "./fixtures.js";
 
-// (a zone with one name and a half-hour offset)
-test.use({ timezoneId: "Asia/Tehran", locale: "de-DE" });
+// (a zone with one name and a half-hour offset, and a screen bigger than the window)
+test.use({ timezoneId: "Asia/Tehran", locale: "de-DE", screen: { width: 1920, height: 1200 } });
 
 // what a script can ask about the device, without drawing anything
 const ask = (frame) =>
@@ -104,8 +104,10 @@ const readBack = (frame) =>
 const differing = (a, b) => a.reduce((count, value, i) => count + (value !== b[i] ? 1 : 0), 0);
 
 test("Safer: what a canvas or a sound reads back can't be the device's signature", async ({ app }) => {
+	// (the device's own: Standard adds noise of its own while blocking is on)
+	await setSettings(app, { allow: ["httpbin.org"] });
 	const clean = await readBack(await open(app, testPage(DRAWS)));
-	await setSettings(app, { level: "safer" });
+	await setSettings(app, { allow: [], level: "safer" });
 	const first = await readBack(await open(app, testPage(DRAWS + "<!-- first -->")));
 	const second = await readBack(await open(app, testPage(DRAWS + "<!-- second -->")));
 
@@ -134,4 +136,93 @@ test("Safer: what a canvas or a sound reads back can't be the device's signature
 	// and different on the next page
 	expect(second.url).not.toBe(first.url);
 	if (clean.samples) expect(second.samples).not.toEqual(first.samples);
+});
+
+/** What a worker started from the page says about the device: one from a blob, one from a site. */
+const inWorkers = (frame) =>
+	frame.evaluate(async () => {
+		const code = `postMessage([navigator.language, navigator.hardwareConcurrency, Intl.DateTimeFormat().resolvedOptions().timeZone, new Date(0).getTimezoneOffset()].join())`;
+		const ask = (url) =>
+			new Promise((resolve) => {
+				const worker = new Worker(url);
+				worker.onmessage = (event) => resolve(event.data);
+				worker.onerror = (event) => resolve("error: " + event.message);
+			});
+		return [
+			await ask(URL.createObjectURL(new Blob([code], { type: "text/javascript" }))),
+			await ask(
+				`https://httpbingo.org/base64/${btoa(code).replace(/\+/g, "-").replace(/\//g, "_")}?content-type=text/javascript`
+			),
+		];
+	});
+
+test("Safer: a worker the page starts gets everyone's answers too", async ({ app }) => {
+	// (the control: the device's own zone; Playwright's language doesn't reach Chromium's workers)
+	const own = await inWorkers(await open(app, testPage("<!doctype html><title>own</title><p>page</p>")));
+	expect(own[0]).toMatch(/^[\w-]+,\d+,Asia\/Tehran,-210$/);
+	expect(own[1]).toBe(own[0]);
+	await setSettings(app, { level: "safer" });
+	expect(await inWorkers(await open(app, testPage("<!doctype html><title>everyone</title><p>page</p>")))).toEqual([
+		"en-US,4,UTC,0",
+		"en-US,4,UTC,0",
+	]);
+});
+
+// The screen, and the fonts installed: what measuring text and a canvas give away.
+const looks = (frame) =>
+	frame.evaluate(() => {
+		const width = (family) => {
+			const span = Object.assign(document.createElement("span"), { textContent: "mmmmmmmmmmlli" });
+			span.style.cssText = "font-size:72px";
+			span.style.fontFamily = family;
+			document.body.append(span);
+			const measured = span.offsetWidth;
+			span.remove();
+			return measured;
+		};
+		const context = document.createElement("canvas").getContext("2d");
+		context.font = "20px 'Times New Roman', serif";
+		return {
+			screen: screen.width === innerWidth && screen.height === innerHeight,
+			deviceQuery: matchMedia(`(device-width: ${innerWidth}px)`).matches,
+			widths: new Set(["monospace", "serif", "'Courier New', monospace", "'Arial Black', sans-serif"].map(width)).size,
+			canvasFont: context.font,
+		};
+	});
+
+test("Safer: the screen is the window, and the fonts on the device can't be told apart", async ({ app }) => {
+	// (the control; Chromium's emulation already answers the device's width with the window's)
+	const own = await looks(await open(app, testPage("<!doctype html><title>own</title><p>page</p>")));
+	expect(own.screen).toBe(false);
+	expect(own.widths).toBeGreaterThan(1);
+	await setSettings(app, { level: "safer" });
+	expect(await looks(await open(app, testPage("<!doctype html><title>everyone</title><p>page</p>")))).toEqual({
+		screen: true,
+		deviceQuery: true,
+		widths: 1,
+		canvasFont: "20px serif",
+	});
+});
+
+const gpuName = (frame) =>
+	frame.evaluate(() => {
+		const gl = document.createElement("canvas").getContext("webgl");
+		const info = gl?.getExtension("WEBGL_debug_renderer_info");
+		return info ? gl.getParameter(info.UNMASKED_RENDERER_WEBGL) : null;
+	});
+
+test("Standard: a canvas, a sound and WebGL give no signature either, unless blocking is off for the site", async ({ app }) => {
+	await setSettings(app, { allow: ["httpbin.org"] });
+	const clean = await readBack(await open(app, testPage(DRAWS)));
+	const realGpu = await gpuName(await tabFrame(app));
+	await setSettings(app, { allow: [] });
+	const first = await readBack(await open(app, testPage(DRAWS + "<!-- first -->")));
+	expect(first.url).not.toBe(clean.url);
+	expect(differing(first.pixels, clean.pixels)).toBeGreaterThan(20);
+	expect(differing(first.pixels, clean.pixels)).toBeLessThanOrEqual(120);
+	if (clean.samples) expect(first.samples).not.toEqual(clean.samples);
+	// the graphics chip goes unnamed (when this browser has WebGL to ask)
+	if (realGpu) expect(await gpuName(await tabFrame(app))).toBe("WebKit WebGL");
+	// and none of the device's own answers change at Standard
+	expect(await (await tabFrame(app)).evaluate(() => navigator.language)).toBe("de-DE");
 });

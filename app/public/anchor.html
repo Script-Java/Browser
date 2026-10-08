@@ -15,9 +15,12 @@
 			// service worker always has a page to ask for it.
 			// Pass the service worker's blocked-request counts on to the shell
 			// (new tab stats).
+			// And a file a page of this site sent to save, for the app's list of downloads.
 			navigator.serviceWorker.addEventListener("message", (event) => {
 				if (event.data?.bios === "blocked")
 					parent.postMessage({ bios: "blocked", count: event.data.count, hosts: event.data.hosts }, "*");
+				else if (event.data?.bios === "download")
+					parent.postMessage({ bios: "download", download: event.data.download }, "*");
 			});
 			navigator.serviceWorker.startMessages();
 
@@ -54,6 +57,28 @@
 				}
 				if (docs.length) parent.postMessage({ bios: "docs", docs }, "*");
 			}, 500);
+
+			// The app is about to load a page of this site itself (an address
+			// typed, a bookmark, reload, back: see markTyped in index.js). To
+			// this origin's service worker that would look like a page sending
+			// the tab here with no referrer, which it takes for another site's;
+			// so it's told first. Only the app's word counts.
+			const shell = location.protocol + "//" + location.host.replace(/^[^.]+\./, "");
+			addEventListener("message", (event) => {
+				if (event.origin === shell && event.source === parent && event.data?.bios === "typed" && event.ports[0])
+					tellWorker(String(event.data.path), event.ports[0]);
+			});
+			function tellWorker(path, reply) {
+				navigator.serviceWorker.getRegistration("/scramjet/").then(
+					(registration) => {
+						if (!registration?.active) return reply.postMessage("no worker");
+						const channel = new MessageChannel();
+						channel.port1.onmessage = () => reply.postMessage("noted");
+						registration.active.postMessage({ bios: "typed", path }, [channel.port2]);
+					},
+					() => reply.postMessage("no worker")
+				);
+			}
 
 			registerSW()
 				.then(setupTransport)

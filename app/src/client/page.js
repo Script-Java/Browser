@@ -8,6 +8,7 @@
 // real address, and the site's address comes from the Scramjet client.
 
 import { label } from "./label.js";
+import { ONE_FONT, everyday, safer, screenAndFonts } from "./unique.js";
 
 const SCRAMJET = Symbol.for("scramjet client global");
 // The window above, as the browser has it. Not win.parent: crossParent puts
@@ -44,7 +45,12 @@ function hook(win) {
 	hookFrames(win);
 	// before the Scramjet check, like the rest up here: a frame Scramjet
 	// hasn't hooked yet answers scripts too
-	if (pageFlags(win).safer) safer(win);
+	const flags = pageFlags(win);
+	if (flags.safer) {
+		safer(win);
+		screenAndFonts(win);
+		oneFont(win);
+	} else if (flags.fingerprint) everyday(win);
 	const client = win[SCRAMJET];
 	if (!client) return lockBare(win);
 	if (refusesFrame(client, win)) return;
@@ -293,6 +299,23 @@ function privacySignal(win) {
 }
 
 /**
+ * "Safer": all the page's text in the system's font, so measuring text set in
+ * one family or another doesn't tell which fonts the device has (unique.js).
+ * @param {Window} win
+ */
+function oneFont(win) {
+	try {
+		if (win.document.getElementById("bios-one-font")) return;
+		const style = win.document.createElement("style");
+		style.id = "bios-one-font";
+		style.textContent = ONE_FONT;
+		(win.document.head || win.document.documentElement).appendChild(style);
+	} catch {
+		// no document yet
+	}
+}
+
+/**
  * The page's settings from the service worker (shield.js, injectHtml). A frame
  * the page wrote itself (about:blank, srcdoc) has none of its own: the page's
  * apply to it.
@@ -309,292 +332,6 @@ function pageFlags(win) {
 		// another origin's window: the shell, or the page around a frame
 	}
 	return {};
-}
-
-/**
- * The "Safer" security level in a page: no WebGL or WebGPU, and the answers a
- * script gets about the device are everyone's.
- * @param {Window} win
- */
-function safer(win) {
-	if (win.__biosSafer) return;
-	Object.defineProperty(win, "__biosSafer", { value: true });
-	noGpu(win);
-	lessUnique(win);
-}
-
-// For the noise below: one draw for this page and the frames it writes. What
-// a script reads back stays the same within the page (reading twice doesn't
-// give the noise away) and is different on the next page.
-const NOISE = crypto.getRandomValues(new Uint32Array(1))[0];
-function mix(n) {
-	let h = Math.imul(NOISE ^ n, 0x85ebca6b);
-	h ^= h >>> 13;
-	h = Math.imul(h, 0xc2b2ae35);
-	return (h ^ (h >>> 16)) >>> 0;
-}
-
-/**
- * "Safer": less for a site to tell this device from others by. Scripts get
- * one language, a common processor count, and the time in UTC; what they read
- * back from a canvas or a sound buffer carries a little noise, so it can't
- * serve as the device's signature.
- * ponytail: page script against page script, like noWebRTC. Not covered: the
- * screen's size, the fonts installed, and anything read inside a worker,
- * which this script doesn't reach. Tor Browser does all of it in the browser.
- * @param {Window} win
- */
-function lessUnique(win) {
-	const answer = (object, name, value) => {
-		try {
-			Object.defineProperty(object, name, { get: () => value, enumerable: true, configurable: true });
-		} catch {
-			// not there, or locked
-		}
-	};
-	const nav = win.Navigator.prototype;
-	// the same as the Accept-Language shield.js sends
-	answer(nav, "language", "en-US");
-	answer(nav, "languages", Object.freeze(["en-US", "en"]));
-	answer(nav, "hardwareConcurrency", 4);
-	if ("deviceMemory" in nav) answer(nav, "deviceMemory", 8);
-	utcClock(win);
-	noisyCanvas(win);
-	noisySound(win);
-}
-
-/**
- * The time zone says where a device is. Every way a page can ask is answered
- * as in UTC, and in English: Date's local-time methods, its text forms and its
- * reading of times without a zone, and the defaults of Intl's formatters.
- * @param {Window} win
- */
-function utcClock(win) {
-	const RealDate = win.Date;
-	const proto = RealDate.prototype;
-	const realOffset = proto.getTimezoneOffset;
-	const utcText = proto.toUTCString;
-	const ZONE = "GMT+0000 (Coordinated Universal Time)";
-
-	for (const part of ["Date", "Day", "FullYear", "Hours", "Milliseconds", "Minutes", "Month", "Seconds"]) {
-		proto["get" + part] = proto["getUTC" + part];
-		if (proto["setUTC" + part]) proto["set" + part] = proto["setUTC" + part];
-	}
-	// 0, or NaN for an invalid date, as the real one answers
-	proto.getTimezoneOffset = function () {
-		return this.getTime() * 0 + 0;
-	};
-
-	// "Thu, 01 Jan 1970 00:00:00 GMT", taken apart
-	const parts = (date) => /^(\w+), (\d+) (\w+) (-?\d+) (\S+) GMT$/.exec(utcText.call(date));
-	proto.toDateString = function () {
-		const p = parts(this);
-		return p ? `${p[1]} ${p[3]} ${p[2]} ${p[4]}` : "Invalid Date";
-	};
-	proto.toTimeString = function () {
-		const p = parts(this);
-		return p ? `${p[5]} ${ZONE}` : "Invalid Date";
-	};
-	proto.toString = function () {
-		const p = parts(this);
-		return p ? `${p[1]} ${p[3]} ${p[2]} ${p[4]} ${p[5]} ${ZONE}` : "Invalid Date";
-	};
-
-	for (const name of ["toLocaleString", "toLocaleDateString", "toLocaleTimeString"]) {
-		const real = proto[name];
-		proto[name] = function (locales, options) {
-			return real.call(this, locales ?? "en-US", { timeZone: "UTC", ...options });
-		};
-	}
-	const numberText = win.Number.prototype.toLocaleString;
-	win.Number.prototype.toLocaleString = function (locales, options) {
-		return numberText.call(this, locales ?? "en-US", options);
-	};
-	// Intl.DateTimeFormat, NumberFormat and the rest: English unless the page
-	// names a language, and UTC unless it names a zone
-	for (const name of Object.getOwnPropertyNames(win.Intl || {})) {
-		const Real = win.Intl[name];
-		if (typeof Real !== "function" || typeof Real.prototype?.resolvedOptions !== "function") continue;
-		const withDefaults = ([locales, options]) => [
-			locales ?? "en-US",
-			name === "DateTimeFormat" ? { timeZone: "UTC", ...options } : options,
-		];
-		const stand = new win.Proxy(Real, {
-			construct: (target, args, newTarget) =>
-				Reflect.construct(target, withDefaults(args), newTarget === stand ? target : newTarget),
-			apply: (target, self, args) => Reflect.apply(target, self, withDefaults(args)),
-		});
-		Real.prototype.constructor = stand;
-		win.Intl[name] = stand;
-	}
-
-	// A time written without a zone is the device's: read it as UTC's
-	// instead. One with a zone ("…Z", "GMT+2", "10:00+05:30", "EST"), or a
-	// plain ISO date (UTC by the standard), is left as it is.
-	// ponytail: by the text's look; an unusual form with a zone the browser
-	// understands and this doesn't is read an offset out.
-	const ZONED = /Z\s*$|\b(?:GMT|UTC?)\b|:\d{2}(?:\.\d+)?\s*[+-]\d{2}(?::?\d{2})?|\b[ECMP][SD]T\b/i;
-	const DAY_ONLY = /^\s*\d{4}(?:-\d{2}){0,2}\s*$/;
-	const parse = (text) => {
-		text = String(text);
-		const ms = RealDate.parse(text);
-		if (Number.isNaN(ms) || ZONED.test(text) || DAY_ONLY.test(text)) return ms;
-		return ms - realOffset.call(new RealDate(ms)) * 60_000;
-	};
-	const StandDate = new win.Proxy(RealDate, {
-		construct(target, args, newTarget) {
-			// new Date(2026, 0, 1): the device's midnight, read as UTC's
-			if (args.length > 1) args = [RealDate.UTC(...args)];
-			else if (typeof args[0] === "string") args = [parse(args[0])];
-			return Reflect.construct(target, args, newTarget === StandDate ? target : newTarget);
-		},
-		apply: () => new StandDate().toString(),
-		get: (target, key, receiver) => (key === "parse" ? parse : Reflect.get(target, key, receiver)),
-	});
-	proto.constructor = StandDate;
-	win.Date = StandDate;
-	// the newer date API has its own ways to ask for the zone; pages still
-	// check for it before using it
-	try {
-		delete win.Temporal;
-	} catch {
-		// locked
-	}
-}
-
-/**
- * What a canvas draws differs by device (fonts, graphics chip, smoothing), so
- * reading it back gives a signature. Two pixels in every row are changed by
- * the smallest step before a script sees them: invisible, and enough to
- * change the signature from page to page.
- * @param {Window} win
- */
-function noisyCanvas(win) {
-	// by the pixel's place on the canvas, so two readings that overlap agree
-	const speckle = (image, left, top, canvas) => {
-		const { data, width, height } = image;
-		for (let row = 0; row < height; row++) {
-			const y = top + row;
-			if (y < 0 || y >= canvas.height) continue;
-			for (const salt of [0, 1]) {
-				const h = mix(y * 2 + salt);
-				const x = (h % canvas.width) - left;
-				if (x >= 0 && x < width) data[(row * width + x) * 4 + ((h >>> 20) % 3)] ^= 1;
-			}
-		}
-	};
-	const contexts = [win.CanvasRenderingContext2D, win.OffscreenCanvasRenderingContext2D].filter(Boolean);
-	const readers = new Map();
-	for (const Context of contexts) {
-		const real = Context.prototype.getImageData;
-		readers.set(Context, real);
-		Context.prototype.getImageData = function (sx, sy, sw, sh, ...rest) {
-			const image = real.call(this, sx, sy, sw, sh, ...rest);
-			// a negative width or height reads leftwards or upwards
-			speckle(image, Math.trunc(sw < 0 ? sx + sw : sx), Math.trunc(sh < 0 ? sy + sh : sy), this.canvas);
-			return image;
-		};
-	}
-	// The canvas as it is, speckled, on a canvas of its own: the picture a
-	// script takes away (toDataURL, toBlob) is of that one.
-	const twin = (canvas, blank) => {
-		if (!canvas.width || !canvas.height) return canvas;
-		const copy = blank(canvas.width, canvas.height);
-		const context = copy.getContext("2d");
-		const read = readers.get(Object.getPrototypeOf(context).constructor) || context.getImageData;
-		context.drawImage(canvas, 0, 0);
-		const image = read.call(context, 0, 0, copy.width, copy.height);
-		speckle(image, 0, 0, copy);
-		context.putImageData(image, 0, 0);
-		return copy;
-	};
-	const onPage = (width, height) => Object.assign(win.document.createElement("canvas"), { width, height });
-	const offPage = (width, height) => new win.OffscreenCanvas(width, height);
-	for (const [proto, names, blank] of [
-		[win.HTMLCanvasElement?.prototype, ["toDataURL", "toBlob"], onPage],
-		[win.OffscreenCanvas?.prototype, ["convertToBlob"], offPage],
-	])
-		for (const name of names) {
-			const real = proto?.[name];
-			if (typeof real !== "function") continue;
-			proto[name] = function (...args) {
-				return real.apply(twin(this, blank), args);
-			};
-		}
-}
-
-/**
- * The same for sound: how a device's audio code rounds its sums is a
- * signature. Samples a script reads back are moved by one part in ten
- * million, far below hearing.
- * @param {Window} win
- */
-function noisySound(win) {
-	const buffer = win.AudioBuffer?.prototype;
-	if (buffer) {
-		const real = buffer.getChannelData;
-		// once for each channel of each buffer: the samples are the buffer's own
-		const shaken = new WeakMap();
-		const shake = (sound, channel) => {
-			const data = real.call(sound, channel);
-			const done = shaken.get(sound) || new Set();
-			shaken.set(sound, done);
-			if (!done.has(channel)) {
-				done.add(channel);
-				for (let i = mix(channel) % 89; i < data.length; i += 89) data[i] += mix(i) & 1 ? 1e-7 : -1e-7;
-			}
-			return data;
-		};
-		buffer.getChannelData = function (channel) {
-			return shake(this, channel);
-		};
-		const copy = buffer.copyFromChannel;
-		if (copy)
-			buffer.copyFromChannel = function (destination, channel, ...rest) {
-				shake(this, channel);
-				return copy.call(this, destination, channel, ...rest);
-			};
-	}
-	const analyser = win.AnalyserNode?.prototype;
-	for (const name of ["getFloatFrequencyData", "getFloatTimeDomainData", "getByteFrequencyData", "getByteTimeDomainData"]) {
-		const real = analyser?.[name];
-		if (typeof real !== "function") continue;
-		const whole = name.includes("Byte");
-		analyser[name] = function (array) {
-			real.call(this, array);
-			for (let i = mix(1) % 13; i < array.length; i += 13) {
-				if (whole) array[i] ^= mix(i) & 1;
-				else array[i] += mix(i) & 1 ? 1e-4 : -1e-4;
-			}
-		};
-	}
-}
-
-/**
- * "Safer" security level: no WebGL or WebGPU. Both expose the graphics card
- * (a strong fingerprint) and are a common way into browser bugs.
- * ponytail: OffscreenCanvas inside a worker is out of reach here.
- * @param {Window} win
- */
-function noGpu(win) {
-	for (const ctor of [win.HTMLCanvasElement, win.OffscreenCanvas]) {
-		const proto = ctor?.prototype;
-		const real = proto?.getContext;
-		if (typeof real !== "function") continue;
-		Object.defineProperty(proto, "getContext", {
-			value: function getContext(type, ...rest) {
-				if (/webgl|webgpu/i.test(String(type))) return null;
-				return real.call(this, type, ...rest);
-			},
-			writable: true,
-			configurable: true,
-		});
-	}
-	try {
-		Object.defineProperty(win.navigator, "gpu", { value: undefined });
-	} catch {
-		// not configurable here
-	}
 }
 
 /**
@@ -708,6 +445,52 @@ function seen(other) {
 
 // A real tap or key press happened in this page (see noPopups).
 let tapped = false;
+// window -> the browser's own print(), for the app's "Print" (noPopups silences the page's)
+const printers = new WeakMap();
+
+// Questions for the app (a permission, see noPopups), by number, each with
+// what to do with its answer, which comes with the app's own messages to the
+// tab (reportToShell). A watch of the position keeps its number until the
+// page forgets it.
+const questions = new Map(); // number -> { win, answer, watch }
+let asked = 0;
+function askApp(win, question, answer) {
+	const id = ++asked;
+	questions.set(id, { win, answer, watch: !!question.watch });
+	try {
+		TOP.postMessage({ bios: "ask", id, ...question }, shellOrigin(win));
+	} catch {
+		questions.delete(id);
+		setTimeout(() => answer({ code: 2, message: "Position unavailable" }));
+	}
+	return id;
+}
+function forget(win, id) {
+	if (questions.get(id)?.win !== win) return;
+	questions.delete(id);
+	try {
+		TOP.postMessage({ bios: "ask-done", id }, shellOrigin(win));
+	} catch {
+		// the app is gone
+	}
+}
+function answered(win, data) {
+	const question = questions.get(data.id);
+	if (question?.win !== win) return;
+	if (!question.watch || !data.position) questions.delete(data.id);
+	question.answer(data);
+}
+// A position from the app as a page's script reads one.
+function positionOf(given) {
+	const number = (n) => (typeof n === "number" && Number.isFinite(n) ? n : null);
+	const coords = {};
+	for (const name of ["latitude", "longitude", "accuracy", "altitude", "altitudeAccuracy", "heading", "speed"])
+		coords[name] = number(given?.[name]);
+	const plain = { ...coords };
+	coords.toJSON = () => plain;
+	const timestamp = number(given?.timestamp) ?? Date.now();
+	return { coords, timestamp, toJSON: () => ({ coords: plain, timestamp }) };
+}
 
 /**
  * Asks the app to send the tab somewhere: only it can, from a frame on an
@@ -1152,6 +935,27 @@ function noPopups(client, win) {
 	const doc = win.document;
 	const SAFE_SCHEMES = ["http:", "https:", "javascript:", "about:", "blob:"];
 
+	// A page that hides its referrer (Referrer-Policy: no-referrer) leaves
+	// the service worker no way to tell its own navigations from another
+	// site's, and it takes them for another site's (shield.js, vouched). So
+	// the page says where it's going as it goes: `kind` "url", "path" (a GET
+	// form, whose fields replace the query) or "history".
+	function goingTo(kind, url = "") {
+		try {
+			const controller = client.descriptors.get("ServiceWorkerContainer.prototype.controller", client.serviceWorker);
+			if (controller)
+				client.natives.call("ServiceWorker.prototype.postMessage", controller, {
+					bios: "own",
+					kind,
+					url: kind === "history" ? "" : new URL(String(url), client.url).href,
+				});
+		} catch {
+			// no service worker here, or no address
+		}
+	}
+	// whether a link or a form aimed at `target` loads in this window
+	const staysHere = (target) => !target || /^_self$/i.test(target) || target === win.name;
+
 	// Scramjet leaves mailto: URLs unproxied, so `location.href = "mailto:..."`
 	// would hand off to the Mail app. Drop navigations to other apps' schemes
 	// (tel:, sms:, etc. are proxied into a harmless error page already).
@@ -1160,16 +964,29 @@ function noPopups(client, win) {
 	Object.defineProperty(client, "url", {
 		get: urlAccessor.get,
 		set(url) {
-			if (!toOtherApp(url)) urlAccessor.set.call(this, url);
+			if (toOtherApp(url)) return;
+			goingTo("url", url);
+			urlAccessor.set.call(this, url);
 		},
 		configurable: true,
 	});
 	const fakeLocation = client.locationProxy;
-	for (const name of ["assign", "replace"]) {
+	for (const name of ["assign", "replace", "reload"]) {
 		const real = fakeLocation?.[name];
 		if (typeof real === "function")
 			fakeLocation[name] = function (url) {
-				if (!toOtherApp(url)) return real.apply(this, arguments);
+				if (name !== "reload" && toOtherApp(url)) return;
+				goingTo("url", name === "reload" ? client.url.href : url);
+				return real.apply(this, arguments);
+			};
+	}
+	const steps = win.History?.prototype;
+	for (const name of ["back", "forward", "go"]) {
+		const real = steps?.[name];
+		if (typeof real === "function")
+			steps[name] = function () {
+				goingTo("history");
+				return real.apply(this, arguments);
 			};
 	}
 
@@ -1370,7 +1187,10 @@ function noPopups(client, win) {
 			if (fixed === VIA_APP) {
 				event.preventDefault();
 				sendTab(realUrl(link.href));
-			} else if (fixed) link.setAttribute("target", fixed);
+				return;
+			}
+			if (fixed) link.setAttribute("target", fixed);
+			if (!event.defaultPrevented && staysHere(fixed || target)) goingTo("url", realUrl(link.href));
 		},
 		true
 	);
@@ -1430,6 +1250,17 @@ function noPopups(client, win) {
 		}
 	}
 
+	// A form about to load in this window (see goingTo).
+	function formGoes(form, submitter) {
+		const target =
+			(submitter?.hasAttribute("formtarget") && submitter.getAttribute("formtarget")) ||
+			(form.hasAttribute("target") ? form.getAttribute("target") : baseTarget());
+		const method = (submitter?.getAttribute("formmethod") || form.getAttribute("method") || "get").toLowerCase();
+		if (method === "dialog" || !staysHere(target)) return;
+		const action = realUrl(submitter?.hasAttribute("formaction") ? submitter.formAction : actionOf(form));
+		goingTo(method === "post" ? "url" : "path", action);
+	}
+
 	win.addEventListener(
 		"submit",
 		(event) => {
@@ -1442,7 +1273,7 @@ function noPopups(client, win) {
 			if (fixForm(form, event.submitter)) {
 				event.preventDefault();
 				sendForm(form, event.submitter);
-			}
+			} else if (!event.defaultPrevented) formGoes(form, event.submitter);
 		},
 		true
 	);
@@ -1453,6 +1284,7 @@ function noPopups(client, win) {
 	formProto.submit = function () {
 		if (!isSafeScheme(actionOf(this))) return;
 		if (fixForm(this)) return sendForm(this);
+		formGoes(this);
 		return realSubmit.call(this);
 	};
 
@@ -1593,7 +1425,13 @@ function noPopups(client, win) {
 	quiet("prompt", function (message, value) {
 		return userGesture() ? nativePrompt.call(win, message, value) : null;
 	});
-	quiet("print", function () {});
+	// The print sheet too: after a tap in the page (its "Print" button), or
+	// when the app's menu asks.
+	const nativePrint = win.print;
+	printers.set(win, () => nativePrint.call(win));
+	quiet("print", function () {
+		if (userGesture()) nativePrint.call(win);
+	});
 
 	// Permission prompts and system sheets.
 	const denied = (message = "Blocked") =>
@@ -1612,25 +1450,27 @@ function noPopups(client, win) {
 	};
 
 	const nav = win.navigator;
+	// Location: the app asks the person, naming the site, and if they let it
+	// the app reads the position and hands it over (asks, in reportToShell).
+	// The site's own address in the proxy gets no permission at all. Only the
+	// tab's own page may ask, as a browser only lets frames that were let.
 	if (win.Geolocation) {
-		const geoError = (cb) =>
+		const failed = (cb, code = 1, message = "User denied Geolocation") =>
 			typeof cb === "function" &&
-			setTimeout(() =>
-				cb({
-					code: 1,
-					message: "User denied Geolocation",
-					PERMISSION_DENIED: 1,
-					POSITION_UNAVAILABLE: 2,
-					TIMEOUT: 3,
-				})
-			);
-		patch(win.Geolocation.prototype, "getCurrentPosition", (ok, err) =>
-			geoError(err)
-		);
-		patch(win.Geolocation.prototype, "watchPosition", (ok, err) => {
-			geoError(err);
-			return 0;
-		});
+			setTimeout(() => cb({ code, message, PERMISSION_DENIED: 1, POSITION_UNAVAILABLE: 2, TIMEOUT: 3 }));
+		const ask = (ok, err, options, watch) => {
+			if (!isTab(win) || typeof ok !== "function") {
+				failed(err);
+				return 0;
+			}
+			return askApp(win, { want: "location", watch, high: !!options?.enableHighAccuracy }, (answer) => {
+				if (answer.position) ok(positionOf(answer.position));
+				else failed(err, answer.code || 1, answer.message || undefined);
+			});
+		};
+		patch(win.Geolocation.prototype, "getCurrentPosition", (ok, err, options) => void ask(ok, err, options, false));
+		patch(win.Geolocation.prototype, "watchPosition", (ok, err, options) => ask(ok, err, options, true));
+		patch(win.Geolocation.prototype, "clearWatch", (id) => forget(win, id));
 	}
 	if (win.Notification) {
 		patch(win.Notification, "requestPermission", (cb) => {
@@ -1646,12 +1486,26 @@ function noPopups(client, win) {
 			// ignore
 		}
 	}
+	// The camera and the microphone: the app asks the person first, naming
+	// the site; then the page asks the browser, whose own prompt follows (a
+	// stream can't be handed across). Only the tab's own page, as above.
+	const media = win.MediaDevices?.prototype.getUserMedia;
 	if (win.MediaDevices)
-		patch(win.MediaDevices.prototype, "getUserMedia", () => denied());
+		patch(win.MediaDevices.prototype, "getUserMedia", function (constraints) {
+			const want = [constraints?.video && "camera", constraints?.audio && "microphone"].filter(Boolean);
+			if (!isTab(win) || typeof media !== "function" || !want.length) return denied();
+			return new win.Promise((resolve, reject) =>
+				askApp(win, { want: want.join(" ") }, (answer) =>
+					answer.allowed ? media.call(this, constraints).then(resolve, reject) : denied().catch(reject)
+				)
+			);
+		});
 	patch(nav, "getUserMedia", (c, ok, err) => err && err(new Error("Blocked")));
 	patch(nav, "webkitGetUserMedia", (c, ok, err) => err && err(new Error("Blocked")));
 	patch(nav, "share", () => denied());
 	patch(nav, "canShare", () => false);
+	// the fonts installed on the device: a fingerprint, behind a prompt
+	patch(win, "queryLocalFonts", () => denied());
 	if (win.CredentialsContainer) {
 		patch(win.CredentialsContainer.prototype, "get", () => denied());
 		patch(win.CredentialsContainer.prototype, "create", () => denied());
@@ -1903,41 +1757,148 @@ function skipVideoAds(win, setRepeat, whenReady) {
 	whenReady(() => setRepeat(check, 250));
 }
 
+// Where text can be found: not in scripts, styles, or anything not shown.
+const UNSEARCHED = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "HEAD", "TITLE", "IFRAME", "OBJECT", "SVG"]);
+// Elements that run on with the text around them: a match may cross them
+// ("foo <b>bar</b>"), never the edge of a paragraph, a cell or the like.
+const INLINE = new Set(
+	"A ABBR B BDI BDO BIG CITE CODE DATA DFN EM FONT I KBD LABEL MARK Q S SAMP SMALL SPAN STRONG SUB SUP TIME TT U VAR".split(" ")
+);
+const MAX_MATCHES = 1000;
+
 /**
- * Find in page, for the app's find bar: the browser's own text search
- * (window.find), which selects the next match and scrolls to it. The match
- * also gets a CSS highlight: the selection of a frame that doesn't have the
- * focus (the find bar has it) is drawn faint, and on phones not at all.
- * ponytail: no count of matches, and frames inside the page aren't searched;
- * window.find offers neither.
+ * Every match for `text` in the page's text, case aside, as Ranges in the
+ * order they read. A match may run across elements ("foo <b>bar</b>").
  * @param {Window} win
- * @param {string} text Empty to clear the last match.
+ */
+function matchesOf(win, text) {
+	const doc = win.document;
+	const nodes = [];
+	let all = "";
+	const walker = doc.createTreeWalker(doc.body || doc.documentElement, win.NodeFilter.SHOW_TEXT, {
+		acceptNode(node) {
+			if (!node.data) return 2;
+			for (let el = node.parentElement; el; el = el.parentElement) if (UNSEARCHED.has(el.tagName.toUpperCase())) return 2;
+			// shown at all (display: none has no boxes)
+			return node.parentElement?.getClientRects().length ? 1 : 2;
+		},
+	});
+	const blockOf = (node) => {
+		let el = node.parentElement;
+		while (el && INLINE.has(el.tagName.toUpperCase()) && el.parentElement) el = el.parentElement;
+		return el;
+	};
+	let block = null;
+	for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+		// (a line break between two blocks' text, which no search has in it)
+		const here = blockOf(node);
+		if (block && here !== block) all += "\n";
+		block = here;
+		nodes.push([all.length, node]);
+		all += node.data;
+	}
+	// one character for one, so a match's place in `all` is its place in the page
+	const fold = (s) => Array.from(s, (c) => (c.toLowerCase().length === c.length ? c.toLowerCase() : c)).join("");
+	const haystack = fold(all);
+	const needle = fold(text);
+	// the text node a place in `all` falls in, and the place within it
+	const at = (offset, end) => {
+		let lo = 0;
+		let hi = nodes.length - 1;
+		while (lo < hi) {
+			const mid = (lo + hi + 1) >> 1;
+			if (nodes[mid][0] < offset || (!end && nodes[mid][0] === offset)) lo = mid;
+			else hi = mid - 1;
+		}
+		return [nodes[lo][1], offset - nodes[lo][0]];
+	};
+	const ranges = [];
+	for (let i = haystack.indexOf(needle); i !== -1 && needle && ranges.length < MAX_MATCHES; i = haystack.indexOf(needle, i + needle.length)) {
+		const range = doc.createRange();
+		range.setStart(...at(i, false));
+		range.setEnd(...at(i + needle.length, true));
+		ranges.push(range);
+	}
+	return ranges;
+}
+
+const finding = new WeakMap(); // window -> { text, ranges, at }
+
+/**
+ * Find in page, for the app's find bar: every match in the page, counted
+ * and marked, the current one selected and scrolled to. A CSS highlight shows
+ * them: the selection of a frame that doesn't have the focus (the find bar
+ * has it) is drawn faint, and on phones not at all.
+ * ponytail: frames inside the page aren't searched.
+ * @param {Window} win
+ * @param {string} text Empty to clear the last search.
  * @param {boolean} back The match before instead of the next one.
- * @param {boolean} again Past the current match, rather than from where it began.
- * @returns {boolean} whether a match was found
+ * @param {boolean} again The next (or last) match, rather than the first from where the last search was.
+ * @returns {{ found: boolean, index: number, count: number }} index counts from 1
  */
 function findInPage(win, text, back, again) {
 	const selection = win.getSelection();
 	const marks = win.CSS?.highlights;
 	marks?.delete("bios-find");
+	marks?.delete("bios-found");
+	const last = finding.get(win);
 	if (!text) {
+		finding.delete(win);
 		selection?.removeAllRanges();
-		return false;
+		return { found: false, index: 0, count: 0 };
 	}
-	// a word still being typed matches where the shorter one did, if it can
-	if (!again && selection?.rangeCount) selection.collapseToStart();
-	const found = win.find(text, false, back, true);
-	if (found && marks && selection?.rangeCount) {
+	let state;
+	if (again && last?.text === text && last.ranges.length) {
+		state = last;
+		state.at = (state.at + (back ? -1 : 1) + state.ranges.length) % state.ranges.length;
+	} else {
+		// (the page may have changed since: looked for again each time)
+		const ranges = matchesOf(win, text);
+		// a word still being typed stays where the shorter one was, if it can
+		const from = last?.ranges[last.at];
+		let at = from ? ranges.findIndex((range) => range.compareBoundaryPoints(win.Range.START_TO_START, from) >= 0) : 0;
+		if (at === -1) at = 0;
+		state = { text, ranges, at };
+	}
+	finding.set(win, state);
+	const current = state.ranges[state.at];
+	if (!current) {
+		selection?.removeAllRanges();
+		return { found: false, index: 0, count: 0 };
+	}
+	selection?.removeAllRanges();
+	selection?.addRange(current.cloneRange());
+	const shown = current.startContainer.parentElement;
+	shown?.scrollIntoView({ block: "center", inline: "nearest" });
+	if (marks) {
 		const doc = win.document;
 		if (!doc.getElementById("bios-find")) {
 			const style = doc.createElement("style");
 			style.id = "bios-find";
-			style.textContent = "::highlight(bios-find){background:#ffd24d;color:#000}";
+			style.textContent =
+				"::highlight(bios-found){background:#fff1a8;color:#000}::highlight(bios-find){background:#ff9d2e;color:#000}";
 			(doc.head || doc.documentElement).appendChild(style);
 		}
-		marks.set("bios-find", new win.Highlight(selection.getRangeAt(0).cloneRange()));
+		marks.set("bios-found", new win.Highlight(...state.ranges));
+		marks.set("bios-find", new win.Highlight(current));
 	}
-	return found;
+	return { found: true, index: state.at + 1, count: state.ranges.length };
+}
+
+/**
+ * Reader view, for the app's menu: the page's article alone (reader.js,
+ * loaded into the page the first time it's asked for). Asked again, it goes.
+ * @param {object} client The Scramjet client for this window.
+ * @param {Window} win
+ */
+function reader(client, win) {
+	const show = () => win.BiosReader?.toggle(win, client);
+	if (win.BiosReader) return show();
+	const script = win.document.createElement("script");
+	// (the browser's own setAttribute: Scramjet's would take the address for the site's)
+	client.natives.call("Element.prototype.setAttribute", script, "src", self.location.origin + "/bios/reader.js");
+	script.addEventListener("load", show);
+	(win.document.head || win.document.documentElement).append(script);
 }
 
 /**
@@ -1972,6 +1933,24 @@ function reportToShell(client, win, setRepeat, whenReady) {
 	win.addEventListener("load", send);
 	setRepeat(send, 500);
 
+	// Ctrl/⌘ with +, - or 0 zooms the page, as in a browser, not the whole app:
+	// the app does it (the page's zoom is kept for its site).
+	win.addEventListener(
+		"keydown",
+		(event) => {
+			if (!event.isTrusted || !(event.ctrlKey || event.metaKey) || event.altKey) return;
+			const step = { "=": 1, "+": 1, "-": -1, 0: 0 }[event.key];
+			if (step === undefined) return;
+			event.preventDefault();
+			try {
+				parentOf(win).postMessage({ bios: "zoom-key", step }, target);
+			} catch {
+				// shell gone
+			}
+		},
+		true
+	);
+
 	win.addEventListener(
 		"message",
 		(event) => {
@@ -1990,8 +1969,15 @@ function reportToShell(client, win, setRepeat, whenReady) {
 			else if (data.cmd === "find") {
 				const text = String(data.text ?? "").slice(0, 200);
 				const found = findInPage(win, text, !!data.back, !!data.again);
-				parentOf(win).postMessage({ bios: "found", text, found }, target);
-			} else if (data.cmd === "post" && Array.isArray(data.fields)) {
+				parentOf(win).postMessage({ bios: "found", text, ...found }, target);
+			} else if (data.cmd === "zoom") {
+				// the page's own zoom (CSS zoom): the app's chrome stays as it is
+				const level = Math.min(5, Math.max(0.25, Number(data.level) || 1));
+				win.document.documentElement.style.zoom = level === 1 ? "" : String(level);
+			} else if (data.cmd === "print") printers.get(win)?.();
+			else if (data.cmd === "reader") reader(client, win);
+			else if (data.cmd === "answer") answered(win, data);
+			else if (data.cmd === "post" && Array.isArray(data.fields)) {
 				// A form from a frame inside this page, for the tab (a frame on
 				// another origin can't post it here itself: see sendForm). This
 				// page posts it, but it isn't this page's request: the service

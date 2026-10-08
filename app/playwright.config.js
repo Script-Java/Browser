@@ -15,7 +15,14 @@ export default defineConfig({
 	reporter: process.env.CI ? "list" : [["list"], ["html", { open: "never" }]],
 	// Safari's engine at a phone's size is what the home-screen app runs on.
 	projects: [
-		{ name: "chromium", use: { browserName: "chromium" } },
+		{
+			name: "chromium",
+			use: {
+				browserName: "chromium",
+				// a camera and a microphone that make up their picture and sound (permissions.spec.js)
+				launchOptions: { args: ["--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream"] },
+			},
+		},
 		{ name: "iphone", use: { ...devices["iPhone 15"] } },
 	],
 	use: {
@@ -36,7 +43,12 @@ export default defineConfig({
 			// shared mode, no sign-in: most tests
 			command: "node src/index.js",
 			url: `http://localhost:${SHARED}/healthz`,
-			env: { PORT: String(SHARED), FILTER_CACHE_DIR: ".e2e/filters-shared" },
+			env: {
+				PORT: String(SHARED),
+				FILTER_CACHE_DIR: ".e2e/filters-shared",
+				// a reserved name the warning tests can open (.invalid never resolves)
+				PHISHING_HOSTS: "phishing.badger-test.invalid",
+			},
 			timeout: 60_000,
 		},
 		{

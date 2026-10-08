@@ -15,6 +15,8 @@ import { CHALLENGE_BITS, createAuth, parseCookies, seal, unseal } from "./auth.j
 import { Filters } from "./filters.js";
 import { serveMedia } from "./media.js";
 import { clientKey, createLimits } from "./limits.js";
+import { createCnames } from "./cname.js";
+import { createCerts } from "./certs.js";
 import { DEFAULT_SETTINGS, cleanSettings } from "./settings.js";
 
 const publicPath = resolve(import.meta.dirname, "..", "public");
@@ -69,6 +71,8 @@ const filters = new Filters({
 	cacheDir: process.env.FILTER_CACHE_DIR || resolve(tmpdir(), "browser-ios-filters"),
 	refreshHours: Number(process.env.FILTER_REFRESH_HOURS) || 24,
 });
+const cnames = createCnames();
+const certs = createCerts();
 
 // ----------------------------------------------------------------- helpers
 
@@ -159,7 +163,9 @@ const bundles = Promise.all([
 	bundle("sw/shield.js", "BiosShield"),
 	bundle("client/sitekey.js", "BiosSiteKey"),
 	bundle("client/page.js"),
-]).then(([shield, sitekey, page]) => ({ shield, sitekey, page }));
+	bundle("client/worker.js"),
+	bundle("client/reader.js", "BiosReader"),
+]).then(([shield, sitekey, page, worker, reader]) => ({ shield, sitekey, page, worker, reader }));
 
 // `auth`: whether the shield menu offers Lock (only useful with a password).
 const clientConfig = JSON.stringify({ isolation: ISOLATION || null, auth: auth.mode === "password" });
@@ -228,9 +234,16 @@ app.use((req, res, next) => {
 	res.setHeader("Cross-Origin-Resource-Policy", "same-site");
 	res.setHeader("Referrer-Policy", "same-origin");
 	res.setHeader("X-Content-Type-Options", "nosniff");
-	// No page, the app's or a site's inside it, gets these. page.js refuses
-	// them too, but this is the browser's own rule.
-	res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=(), display-capture=()");
+	// The camera and microphone only for the sites' pages, which ask the
+	// person through the app first (page.js), and then the browser asks too;
+	// the location only for the app itself, which reads it and hands it over.
+	// The rest no page gets: page.js refuses them too, but this is the
+	// browser's own rule.
+	const sites = ISOLATION ? ` "${req.protocol}://*.${ISOLATION}${portOf(req)}"` : "";
+	res.setHeader(
+		"Permissions-Policy",
+		`camera=(self${sites}), microphone=(self${sites}), geolocation=(self), payment=(), usb=(), display-capture=()`
+	);
 	// keeps the proxy out of search results
 	res.setHeader("X-Robots-Tag", "noindex, nofollow");
 	// Only the app frames its own pages (tabs, anchors, wipers), so another
@@ -249,7 +262,7 @@ app.use((req, res, next) => {
 
 // Site origins only serve what the proxy needs, never the shell: if the shell
 // ran on a site origin, that site could reach into it.
-const SITE_PATHS = /^\/(scramjet\/|scram\/|bios\/(shield|page)\.js$|baremux\/|epoxy\/|filters\/|scramjet-sw\.js$|register-sw\.js$|wipe\.html$|anchor\.html$)/;
+const SITE_PATHS = /^\/(scramjet\/|scram\/|bios\/(shield|page|worker|reader)\.js$|baremux\/|epoxy\/|filters\/|scramjet-sw\.js$|register-sw\.js$|wipe\.html$|anchor\.html$)/;
 app.use((req, res, next) => {
 	const kind = hostKind(req);
 	if (kind === "stray" || (kind === "site" && !SITE_PATHS.test(req.path))) {
@@ -304,14 +317,17 @@ function siteCors(req, res, next) {
 		res.setHeader("Access-Control-Allow-Origin", req.headers.origin);
 		res.setHeader("Access-Control-Allow-Credentials", "true");
 		if (req.method === "OPTIONS") {
-			res.setHeader("Access-Control-Allow-Headers", "x-bios-host, if-none-match");
+			res.setHeader("Access-Control-Allow-Headers", "x-bios-host, x-bios-https, if-none-match");
 			res.setHeader("Access-Control-Max-Age", "86400");
 			return res.status(204).end();
 		}
 	}
 	next();
 }
-app.use(["/filters/engine.bin", "/filters/notices.bin", "/api/nav", "/api/settings"], siteCors);
+app.use(
+	["/filters/engine.bin", "/filters/notices.bin", "/filters/debounce.json", "/api/nav", "/api/settings", "/api/cname"],
+	siteCors
+);
 
 app.use(auth.gate);
 
@@ -328,6 +344,17 @@ app.get("/bios/shield.js", async (req, res) => {
 app.get("/bios/page.js", async (req, res) => {
 	res.type("text/javascript").setHeader("Cache-Control", "no-cache");
 	res.send(withConfig((await bundles).page));
+});
+// Reader view, loaded into a page when the app's menu asks for it (page.js).
+app.get("/bios/reader.js", async (req, res) => {
+	res.type("text/javascript").setHeader("Cache-Control", "no-cache");
+	res.send((await bundles).reader);
+});
+// For the top of a proxied page's workers (shield.js): what the page has on.
+app.get("/bios/worker.js", async (req, res) => {
+	res.type("text/javascript").setHeader("Cache-Control", "no-cache");
+	const flags = { safer: req.query.safer === "1", fingerprint: req.query.fingerprint === "1" };
+	res.send(`self.__biosWorker = ${JSON.stringify(flags)};\n${(await bundles).worker}`);
 });
 app.get("/sitekey.js", async (req, res) => {
 	res.type("text/javascript").setHeader("Cache-Control", "no-cache");
@@ -351,6 +378,8 @@ const serveEngine = (pick) => (req, res) => {
 app.get("/filters/engine.bin", serveEngine(() => filters.engine));
 // the cookie-notice lists, for service workers of people who switched them on
 app.get("/filters/notices.bin", serveEngine(() => filters.notices));
+// addresses that only bounce a click on to the real one (sw/debounce.js)
+app.get("/filters/debounce.json", serveEngine(() => filters.debounce));
 
 app.get("/filters/status", (req, res) => {
 	res.setHeader("Cache-Control", "no-store");
@@ -383,10 +412,33 @@ app.post("/api/settings", express.json({ limit: "16kb" }), (req, res) => {
 
 // The service worker calls this once per page load. The site's hostname comes
 // in a header, not the URL, so it never shows up in the host's request logs.
-app.get("/api/nav", (req, res) => {
+app.get("/api/nav", async (req, res) => {
 	res.setHeader("Cache-Control", "no-store");
 	const host = String(req.headers["x-bios-host"] || "");
-	res.json({ settings: readSettings(req), threat: host ? filters.threat(host) : null });
+	// An https page (x-bios-https: its port): has its certificate been
+	// revoked (certs.js)? Asked before the page's request goes out, so a key
+	// in someone else's hands never sees it. A site's answer is kept for
+	// hours; the first one waits at most a moment and is otherwise for the
+	// next page.
+	const port = Number(req.headers["x-bios-https"]);
+	const cert = host && port ? await Promise.race([certs.about(host, port), new Promise((r) => setTimeout(r, 1500, null))]) : null;
+	res.json({ settings: readSettings(req), threat: host ? filters.threat(host) : null, revoked: cert?.revoked === true });
+});
+
+// The certificate viewer in the shield menu: the site's certificate as the
+// server sees it. The shell's own, like the settings.
+app.get("/api/cert", async (req, res) => {
+	res.setHeader("Cache-Control", "no-store");
+	if (!fromShell(req)) return res.status(403).json({ error: "forbidden" });
+	const host = String(req.headers["x-bios-host"] || "");
+	res.json({ cert: host ? await certs.about(host, Number(req.headers["x-bios-https"]) || 443) : null });
+});
+
+// The names a host stands for (CNAME uncloaking, cname.js), for the service
+// worker, which can't look them up. In a header too, never in the URL.
+app.get("/api/cname", async (req, res) => {
+	res.setHeader("Cache-Control", "no-store");
+	res.json({ names: await cnames.chain(String(req.headers["x-bios-host"] || "")) });
 });
 
 app.use(express.static(publicPath, staticOptions));

@@ -47,6 +47,7 @@ test("wisp refuses private addresses, other ports and UDP", async (t) => {
 		["localhost", 443], // resolves to loopback
 		["169.254.169.254", 80], // cloud metadata
 		["example.com", 22],
+		["example.com", 3306],
 		["1.1.1.1", 53, "udp"],
 	])
 		assert.notEqual(await refused(host, port, type), "connected", `${host}:${port}`);

@@ -12,6 +12,8 @@ import { parse } from "tldts";
 import { siteOf, siteKey, frameKey } from "../client/sitekey.js";
 import { DEFAULT_SETTINGS } from "../settings.js";
 import { PREFIX, decodeUrl, encodeUrl } from "../codec.js";
+import { expiresFromMaxAge } from "./cookies.js";
+import { OWN_RULES, compile, debounce } from "./debounce.js";
 
 const FILTER_CACHE = "bios-filters";
 const ENGINE_RECHECK_MS = 6 * 3_600_000;
@@ -182,17 +184,80 @@ export function createShield(scramjet, configStored) {
 		}
 	};
 
-	// "Clear all site data" deleted Scramjet's cookie database; forget the
-	// copy this worker keeps in memory too.
+	// ------------------------------------------------------------- cookies
+
+	// Scramjet keeps the sites' cookies in its database, but its worker
+	// never reads them back (they come out as an object, and its load() only
+	// takes text), and saves only the ones a page's script sets. So every
+	// time the browser stopped this worker (Chrome does after half a minute
+	// without requests), the cookies sites had sent were gone: signed out.
+	// This worker reads them back when it starts, and saves them after
+	// every change. (Scramjet's database, as storeConfig made it.)
+	function cookieJar(mode, use) {
+		return new Promise((resolve, reject) => {
+			const open = indexedDB.open("$scramjet");
+			// not made here: storeConfig makes it, with all its tables
+			open.onupgradeneeded = () => open.transaction.abort();
+			open.onerror = () => reject(open.error);
+			open.onsuccess = () => {
+				const db = open.result;
+				try {
+					const tx = db.transaction("cookies", mode);
+					const req = use(tx.objectStore("cookies"));
+					tx.oncomplete = () => {
+						db.close();
+						resolve(req.result);
+					};
+					tx.onerror = tx.onabort = () => {
+						db.close();
+						reject(tx.error);
+					};
+				} catch (err) {
+					db.close();
+					reject(err);
+				}
+			};
+		});
+	}
+	const savedCookies = configStored
+		.then(() => cookieJar("readonly", (store) => store.get("cookies")))
+		.then((saved) => {
+			if (typeof saved === "string") saved = JSON.parse(saved);
+			if (!saved || typeof saved !== "object") return;
+			// what this worker has heard since it started is newer
+			scramjet.cookieStore.load(JSON.stringify({ ...saved, ...JSON.parse(scramjet.cookieStore.dump()) }));
+		})
+		.catch((err) => console.warn("bios: couldn't read the saved cookies:", err));
+	// one write at a time, each with the jar as it is then
+	let cookieWrites = Promise.resolve();
+	let cookiesChanged = false;
+	function saveCookies() {
+		cookiesChanged = false;
+		cookieWrites = cookieWrites
+			.then(() => savedCookies)
+			.then(() => cookieJar("readwrite", (store) => store.put(JSON.parse(scramjet.cookieStore.dump()), "cookies")))
+			.catch((err) => console.warn("bios: couldn't save the cookies:", err));
+		return cookieWrites;
+	}
+
+	// Messages from this origin's own pages (scramjet-sw.js drops the rest).
 	self.addEventListener("message", (event) => {
 		if (event.origin !== location.origin) return;
-		if (event.data?.bios !== "wipe") return;
+		if (event.data?.bios === "wipe") wipe(event);
+		else if (event.data?.bios === "typed" || event.data?.bios === "own") vouch(event);
+	});
+
+	// "Clear all site data" deleted Scramjet's cookie database; forget the
+	// copy this worker keeps in memory too.
+	function wipe(event) {
 		scramjet.cookieStore.load("{}");
+		// (and a write of the old jar still on its way lands before this one)
+		event.waitUntil(saveCookies());
 		// New Identity: forget the warnings the person clicked through too
 		for (const set of [bypassed, plainHttp, allowOnce]) set.clear();
 		// (the page that clears this origin's data deleted what was written down)
 		home = null;
-	});
+	}
 
 	// Isolation: what this origin is for. A site's own origin (its label is
 	// the site's key) needs nothing written down. An origin made for a
@@ -345,6 +410,25 @@ export function createShield(scramjet, configStored) {
 		]);
 	}
 
+	// Addresses that only bounce a click on (debounce.js): the app's own rules
+	// at once, and Brave's list from the server once it's here.
+	const DEBOUNCE_URL = ENGINE_URL.replace("engine.bin", "debounce.json");
+	let bounces = compile(OWN_RULES);
+	let bouncesLoad = null;
+	function loadBounces() {
+		bouncesLoad ||= fetch(DEBOUNCE_URL, { credentials: "include", cache: "no-cache" })
+			.then(async (res) => {
+				if (!res.ok) throw new Error(`bounce list HTTP ${res.status}`);
+				bounces = compile([...OWN_RULES, ...(await res.json())]);
+				setTimeout(() => (bouncesLoad = null), ENGINE_RECHECK_MS);
+			})
+			.catch((err) => {
+				console.warn("bios: bounce list unavailable:", err);
+				setTimeout(() => (bouncesLoad = null), 30_000);
+			});
+		return bouncesLoad;
+	}
+
 	// What the block lists say about a request for `target` from the page `source`.
 	function listed(target, source, type) {
 		const request = FilterRequest.fromRawDetails({
@@ -359,6 +443,38 @@ export function createShield(scramjet, configStored) {
 			if (answer.match || answer.redirect) break;
 		}
 		return answer;
+	}
+
+	// CNAME uncloaking (cname.js): a site's own subdomain can be another name
+	// for a tracker's server, which the lists know only by the tracker's own
+	// name. The server says what a name stands for; a request the lists would
+	// block under one of those names is blocked here too. Asked only for the
+	// subdomains of the page's own site: that's where trackers hide.
+	const cnames = new Map(); // host -> Promise<string[]>
+	function namesFor(host) {
+		if (!cnames.has(host)) {
+			// ponytail: forgets everything at 500
+			if (cnames.size > 500) cnames.clear();
+			cnames.set(
+				host,
+				shellFetch("/api/cname", { cache: "no-store", headers: { "x-bios-host": host } })
+					.then((res) => (res.ok ? res.json() : { names: [] }))
+					.then(
+						({ names }) => (Array.isArray(names) ? names.filter((name) => typeof name === "string").slice(0, 6) : []),
+						() => []
+					)
+			);
+		}
+		return cnames.get(host);
+	}
+	/** The tracker's name `target` stands for, when the lists block that one. */
+	async function cloaked(target, page, type) {
+		const site = siteOf(target.hostname);
+		if (!page || page.hostname === target.hostname || siteOf(page.hostname) !== site) return null;
+		// (a slow answer lets the request go: the next one is checked)
+		const names = await Promise.race([namesFor(target.hostname), new Promise((resolve) => setTimeout(resolve, 800, []))]);
+		// a name of the site's own is still the site's; only its host is asked about, as uBlock does
+		return names.find((name) => siteOf(name) !== site && listed(new URL(`${target.protocol}//${name}/`), page, type).match) || null;
 	}
 
 	// The rules that hide parts of a page, and its scriptlets, from each of `lists`.
@@ -399,19 +515,20 @@ export function createShield(scramjet, configStored) {
 	// One round trip per page load: fresh settings plus the threat verdict,
 	// so a switch flipped in the shield menu applies to the very next page
 	// (on every site origin in isolation mode, too).
-	async function checkNavigation(hostname) {
+	// And for an https page, whether its certificate was revoked (the server
+	// looks: certs.js). { threat, revoked }
+	async function checkNavigation(target) {
 		try {
-			const res = await shellFetch("/api/nav", {
-				cache: "no-store",
-				headers: { "x-bios-host": hostname },
-			});
+			const headers = { "x-bios-host": target.hostname };
+			if (target.protocol === "https:") headers["x-bios-https"] = target.port || "443";
+			const res = await shellFetch("/api/nav", { cache: "no-store", headers });
 			if (!res.ok) throw new Error(`HTTP ${res.status}`);
 			const data = await res.json();
 			applySettings(data.settings);
-			return data.threat;
+			return { threat: data.threat, revoked: data.revoked === true };
 		} catch {
 			await getSettings();
-			return null;
+			return { threat: null, revoked: false };
 		}
 	}
 
@@ -489,6 +606,8 @@ export function createShield(scramjet, configStored) {
 		[/InvalidCertificate\(NotValidYet/, "Its security certificate isn't valid yet."],
 		[/InvalidCertificate\(NotValidForName/, "Its security certificate belongs to a different address."],
 		[/InvalidCertificate\((UnknownIssuer|BadSignature)/, "Its security certificate isn't signed by an authority this app trusts."],
+		// (the server's word: certs.js)
+		[/^Revoked$/, "Its security certificate was revoked by whoever issued it."],
 		[/./, "Its security certificate isn't valid."],
 	];
 
@@ -614,7 +733,14 @@ function go(key) {
 	}
 	if (targets.sub) return go("sub");
 	if (at === "top") return targets.shell && location.replace(targets.shell);
-	if (at === "tab") return go("tab");
+	// The tab, on to another site's own origin: that origin's proxy
+	// connection first. A site not opened yet would otherwise answer from
+	// the server, whose page starts it and reloads, and a form's fields
+	// don't survive that.
+	if (at === "tab") {
+		if (targets.tab) await needAnchor(new URL(targets.tab).origin, function () { return Promise.resolve(); });
+		return go("tab");
+	}
 	// A frame inside a page, bound for another site: to the origin kept for
 	// that site in this frame's place. A frame of this origin's own page is
 	// its child; one whose parent is another origin's page is moving on from
@@ -861,6 +987,56 @@ function go(key) {
 		method: "GET",
 	};
 
+	// Navigations with no referrer at all (see whoAsks), and what was said
+	// about them before they came: the app's word that it is loading an
+	// address itself (typed, a bookmark, reload, back), which comes through
+	// this origin's anchor frame; and the word of this origin's own pages
+	// that they are going somewhere (page.js), for pages that hide their
+	// referrer. No page of another origin can speak to this worker.
+	// ponytail: the last 50 of each, for 30 seconds
+	const typedNext = new Map(); // proxied page URL -> when the app said so
+	let ownNext = []; // { kind: "url" | "path" | "history", url, from, at }
+	const TYPED = Symbol("typed");
+	// (a message from a page of this origin)
+	function vouch({ data, source, ports }) {
+		if (data.bios === "typed" && typeof data.path === "string" && source?.url === location.origin + "/anchor.html") {
+			if (typedNext.size > 50) typedNext.clear();
+			typedNext.set(pageKey(location.origin + data.path), Date.now());
+			ports[0]?.postMessage("noted");
+		} else if (data.bios === "own" && ["url", "path", "history"].includes(data.kind)) {
+			// the page's address as the browser has it, not its word for it
+			const from = decode(source?.url);
+			let url = null;
+			try {
+				if (data.kind !== "history") url = new URL(String(data.url));
+			} catch {
+				return;
+			}
+			if (from) ownNext = [...ownNext.slice(-49), { kind: data.kind, url, from, at: Date.now() }];
+		}
+	}
+	async function vouched(url, target, request) {
+		// the browser's own back, forward or reload (Chromium says which): the person's
+		if (!home && (request.isHistoryNavigation || request.isReloadNavigation)) return TYPED;
+		const find = () => {
+			const now = Date.now();
+			const typed = typedNext.get(pageKey(url));
+			typedNext.delete(pageKey(url));
+			if (typed && now - typed < 30_000) return TYPED;
+			const at = ownNext.findIndex(
+				({ kind, url: to, at }) =>
+					now - at < 30_000 &&
+					(kind === "history" ||
+						(kind === "path"
+							? to.origin + to.pathname === target.origin + target.pathname
+							: pageKey(to.href) === pageKey(target.href)))
+			);
+			return at === -1 ? null : ownNext.splice(at, 1)[0].from;
+		};
+		// a page's word comes as it goes, and may arrive just after its navigation
+		return find() || (await new Promise((resolve) => setTimeout(resolve, 50)), find());
+	}
+
 	/**
 	 * Who is asking for `target`: { site, from, quiet, brief, nav, framed,
 	 * carried, mode, method }, or null when there's no telling (Scramjet's
@@ -908,6 +1084,20 @@ function go(key) {
 		}
 		if (ref) who.site = relation(ref, target);
 		else if (fromAnotherSite(request.referrer)) who.site = "cross-site";
+		else if (isolated && !request.referrer) {
+			// No referrer at all. In a browser that's the person's own request
+			// (an address typed), and so it was here, with all their cookies.
+			// But a page that gets around the proxy's hooks can send its tab
+			// here without a referrer too, and its forged request would come
+			// as theirs: SameSite cookies and all. So it's another site's,
+			// unless someone who can tell vouched for it (see `typedNext`).
+			const said = await vouched(url, target, request);
+			if (said === TYPED) who.site = "none";
+			else if (said) {
+				who.from = said;
+				who.site = relation(said, target);
+			} else who.site = "cross-site";
+		}
 		return who;
 	}
 
@@ -980,12 +1170,17 @@ function go(key) {
 	// A cookie that doesn't say goes everywhere, as in Safari. (Scramjet's
 	// jar files it under Lax, which would keep it home with the ones that
 	// asked to stay; Chrome does that, with exceptions sign-ins depend on.)
+	// And its Max-Age counts (see cookies.js).
 	const setCookies = scramjet.cookieStore.setCookies.bind(scramjet.cookieStore);
-	scramjet.cookieStore.setCookies = (cookies, url) =>
-		setCookies(
-			cookies.map((cookie) => (/;\s*samesite\s*=/i.test(cookie) ? cookie : cookie + "; SameSite=None")),
+	scramjet.cookieStore.setCookies = (cookies, url) => {
+		cookiesChanged = true;
+		return setCookies(
+			cookies.map((cookie) =>
+				expiresFromMaxAge(/;\s*samesite\s*=/i.test(cookie) ? cookie : cookie + "; SameSite=None")
+			),
 			url
 		);
+	};
 
 	// Query parameters that only exist to follow a person from one site to
 	// the next: click ids and campaign tags (Brave's and DuckDuckGo's lists).
@@ -1074,6 +1269,32 @@ function go(key) {
 		}, 3000);
 	}
 
+	// A page load that is a file to save (sent as an attachment, or of a kind
+	// browsers don't show), for the app's list of downloads: the browser saves
+	// it as usual, and the app's pages are told, as they are of what's blocked.
+	const SHOWN = new Set(["application/json", "application/pdf", "application/xml", "application/javascript"]);
+	async function noteDownload(event) {
+		const disposition = String(event.responseHeaders["content-disposition"] || "");
+		const type = String(event.responseHeaders["content-type"] || "").split(";")[0].trim().toLowerCase();
+		const attachment = /^\s*attachment/i.test(disposition);
+		const shown = !type || SHOWN.has(type) || /^(text|image|video|audio|font)\//.test(type);
+		if (!attachment && (shown || /^\s*inline/i.test(disposition))) return;
+		let name = /filename\*?=(?:utf-8'')?["']?([^"';]+)/i.exec(disposition)?.[1] || event.url.pathname.split("/").pop();
+		try {
+			name = decodeURIComponent(name);
+		} catch {
+			// as it was written
+		}
+		const download = {
+			name: String(name || event.url.hostname).slice(0, 200),
+			type: type.slice(0, 100),
+			size: Number(event.responseHeaders["content-length"]) || 0,
+			url: event.url.href.slice(0, 2000),
+		};
+		const pages = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+		for (const page of pages) if (!page.url.startsWith(prefix)) page.postMessage({ bios: "download", download });
+	}
+
 	// The tab's page a request belongs to: a frame inside a page answers for
 	// the page around it.
 	const pageFor = (referrer, source) => framed.get(pageKey(referrer || "")) || source?.href;
@@ -1140,7 +1361,7 @@ function go(key) {
 	// http:// requests: the https address instead (307 keeps a form POST), or
 	// for a page with no https, a warning. Subresources are just upgraded,
 	// unless their page is one the person chose to open over http.
-	async function httpsOnly(request, target, isPage, url) {
+	async function httpsOnly(request, target, isPage, url, who) {
 		if (target.protocol !== "http:") return null;
 		const host = target.hostname.toLowerCase();
 		if (plainHttp.has(siteOf(host))) return null;
@@ -1152,14 +1373,14 @@ function go(key) {
 			const page = decode(request.referrer);
 			if (page && plainHttp.has(siteOf(page.hostname.toLowerCase()))) return null;
 		}
-		if (isPage && !(await speaksHttps(host)))
-			return interstitial({ kind: "http", host: target.hostname, url });
+		// (on a port of its own, it's that port that would have to speak https)
+		if (isPage && !(await speaksHttps(target.host.toLowerCase())))
+			return interstitial({ kind: "http", host: target.host, url });
 		const secure = new URL(target.href);
 		secure.protocol = "https:";
 		const to = location.origin + encodeUrl(secure.href);
 		// whoever began the navigation is still the one asking
-		const hop = isPage && hops.get(pageKey(url));
-		if (hop) keep(hops, pageKey(to), { ...hop, redirect: true });
+		if (isPage && who) keep(hops, pageKey(to), { who, redirect: true, at: Date.now() });
 		return redirect(to);
 	}
 
@@ -1184,6 +1405,19 @@ function go(key) {
 		(!!url && settings.noScripts.includes(siteOf(url.hostname)));
 
 	const SCRIPTED = new Set(["script", "worker", "sharedworker", "serviceworker"]);
+	// what loads as a document of its own: pages, and what <object> and <embed> show
+	const DOCUMENTS = new Set(["document", "iframe", "frame", "object", "embed"]);
+	const WORKERS = new Set(["worker", "sharedworker"]);
+
+	// A worker's code (as Scramjet rewrote it) with worker.js at its top, so it
+	// gives the same answers about the device as the page that started it.
+	// Ahead of Scramjet's own lines, with the browser's own importScripts.
+	function workerPrelude(code, page) {
+		if (typeof code !== "string") return code;
+		const flags = `safer=${hardened() ? 1 : 0}&fingerprint=${settings.ads && !isAllowed(page?.hostname) ? 1 : 0}`;
+		const url = `${location.origin}/bios/worker.js?${flags}`;
+		return (code.startsWith("import ") ? `import "${url}";\n` : `importScripts("${url}");\n`) + code;
+	}
 
 	function saferBlock(destination, source) {
 		if (hardened() && destination === "font") return blocked(destination);
@@ -1196,14 +1430,24 @@ function go(key) {
 	// handleResponse event, so the policy and our page script go on here.
 	async function inline(event, destination, isPage) {
 		await getSettings();
-		const noScripts = noSiteScripts(decode(event.request.referrer));
+		const holder = decode(event.request.referrer);
+		const noScripts = noSiteScripts(holder);
 		if (noScripts && SCRIPTED.has(destination)) return blocked(destination);
 		const res = await scramjet.fetch(event);
-		const page = isPage && { cosmetic: false, videoAds: false, safer: hardened(), noScripts };
+		const page = isPage && {
+			cosmetic: false,
+			videoAds: false,
+			safer: hardened(),
+			fingerprint: settings.ads && !isAllowed(holder?.hostname),
+			noScripts,
+		};
 		const resHeaders = new Headers(res.headers);
-		resHeaders.set("content-security-policy", policyFor(page));
-		const html = page && /^text\/html/i.test(resHeaders.get("content-type") || "");
-		return new Response(html ? injectHtml(await res.text(), page) : res.body, {
+		const html = /^text\/html/i.test(resHeaders.get("content-type") || "");
+		resHeaders.set("content-security-policy", policyFor(page, (isPage || DOCUMENTS.has(destination)) && !html));
+		let body = res.body;
+		if (page && html) body = injectHtml(await res.text(), page);
+		else if (WORKERS.has(destination)) body = workerPrelude(await res.text(), holder);
+		return new Response(body, {
 			status: res.status,
 			statusText: res.statusText,
 			headers: resHeaders,
@@ -1258,10 +1502,26 @@ function go(key) {
 		const empty = await emptyAttribute(event, target, destination);
 		if (empty) return empty;
 
-		const upgraded = await httpsOnly(request, target, isPage, url);
+		const who = await whoAsks(event, url, target, isPage);
+
+		const upgraded = await httpsOnly(request, target, isPage, url, who);
 		if (upgraded) return upgraded;
 
-		const who = await whoAsks(event, url, target, isPage);
+		// A tracker's address on the way to the real one (bounce tracking):
+		// straight on to the real one, so the tracker never hears of it. Off
+		// with the rest of the blocking, for one site too.
+		if (isPage && safe(request.method)) {
+			// (Brave's list for the next page, if it isn't here yet)
+			if (!bouncesLoad) loadBounces();
+			const real = debounce(bounces, target);
+			if (real) settingsAt = 0;
+			if (real && (await getSettings()).ads && !isAllowed(target.hostname)) {
+				countBlocked(pageFor(request.referrer, decode(request.referrer)), target.hostname);
+				const to = location.origin + encodeUrl(real.href);
+				if (who) keep(hops, pageKey(to), { who, redirect: true, at: Date.now() });
+				return redirect(to);
+			}
+		}
 
 		// An address typed or pasted, or a link from another site, loses the
 		// parameters that follow people between sites; a site's own links
@@ -1335,13 +1595,16 @@ function go(key) {
 				}
 			}
 
-			const threat = await checkNavigation(target.hostname);
+			const { threat, revoked } = await checkNavigation(target);
 			if (
 				threat &&
 				settings.threats &&
 				!bypassed.has(target.hostname.toLowerCase())
 			)
 				return interstitial({ kind: threat, host: target.hostname, url });
+			// Its issuer took its certificate back: as with any other bad
+			// certificate, no way past (whoever holds the key may not be the site).
+			if (revoked) return interstitial({ kind: "cert", host: target.hostname, url, why: "Revoked" });
 		} else {
 			await getSettings();
 		}
@@ -1381,6 +1644,11 @@ function go(key) {
 					countBlocked(pageFor(request.referrer, source), target.hostname);
 					return blocked(destination);
 				}
+				// not on the lists by its own name, but by the tracker's it stands for
+				if (!isPage && (await cloaked(target, who?.from || source, REQUEST_TYPES[destination] || "other"))) {
+					countBlocked(pageFor(request.referrer, source), target.hostname);
+					return blocked(destination);
+				}
 			}
 		}
 
@@ -1391,6 +1659,8 @@ function go(key) {
 			notices: blocking && settings.notices,
 			videoAds: settings.videoAds && !isAllowed(target.hostname),
 			safer: hardened(),
+			// noise in what a canvas and the like read back (unique.js), with the blocking
+			fingerprint: blocking,
 			// "Safest", or "Safer" on a plain http page: none of the page's own scripts run
 			noScripts: noSiteScripts(target),
 		};
@@ -1401,7 +1671,10 @@ function go(key) {
 		// page for its client, whose address Scramjet would take for a site's.
 		const client = isPage && event.clientId ? await self.clients.get(event.clientId) : null;
 		const ours = !!client && client.url.startsWith(prefix + "__bios/");
+		await savedCookies;
 		const response = await scramjet.fetch(ours ? { request: event.request, clientId: "" } : event);
+		// the site set a cookie: write it down before this worker can be stopped
+		if (cookiesChanged) event.waitUntil(saveCookies());
 		// The site's own rule about who may frame it (the response hook read
 		// it into `page`), for a page on an origin kept for frames: the pages
 		// above it are other origins', which the page script can't see into.
@@ -1444,6 +1717,7 @@ function go(key) {
 			cosmetic: page.cosmetic || page.notices,
 			videoAds: page.videoAds,
 			safer: page.safer,
+			fingerprint: page.fingerprint,
 			// left out when the site has no framing rule
 			ancestors: page.ancestors || undefined,
 			// What this origin is for, which a window of another origin can
@@ -1533,10 +1807,17 @@ function go(key) {
 	}
 
 	// The policy for a proxied response; `page` is set for the pages we inject.
-	function policyFor(page) {
+	// `inert`: a document that isn't HTML (an SVG, XML). The browser runs the
+	// scripts in it too, but our page script never goes in, and Scramjet
+	// doesn't rewrite them: they'd run with nothing of the proxy's around
+	// them (WebRTC, the browser's own location). None of its own start; eval
+	// stays, which only a page reaching in can call, and Scramjet hooks such
+	// a document with it.
+	function policyFor(page, inert = false) {
 		// "Safer": no web fonts. handle() refuses them too, but a font the
 		// browser kept from an earlier visit never gets there to be refused.
 		const lock = (page ? framers() : "") + (page?.safer ? `font-src 'none'; ${NETWORK_LOCK}` : NETWORK_LOCK);
+		if (inert) return `script-src 'unsafe-eval' 'wasm-unsafe-eval'; ${lock}`;
 		if (!page?.noScripts) return lock;
 		// Its inline scripts and handlers don't run; Scramjet's own scripts
 		// (its folder, and its data: one, which injectHtml gives the nonce)
@@ -1555,8 +1836,15 @@ function go(key) {
 		// servers itself, around the proxy (and Scramjet garbles their URLs).
 		delete event.responseHeaders.link;
 		const page = pages.get(pageKey(event.url.href));
-		event.responseHeaders["content-security-policy"] = policyFor(page);
+		const html = typeof event.responseBody === "string" && /^text\/html/i.test(event.responseHeaders["content-type"] || "");
+		const document = !!page || DOCUMENTS.has(event.destination);
+		event.responseHeaders["content-security-policy"] = policyFor(page, document && !html);
+		if (WORKERS.has(event.destination)) event.responseBody = workerPrelude(event.responseBody, decode(event.client?.url));
+		// The site's length is of what it sent, and a body Scramjet and this
+		// worker rewrote is longer: Safari cut a worker's code off at it.
+		if (typeof event.responseBody === "string") delete event.responseHeaders["content-length"];
 		if (!page) return;
+		if (!html && event.status >= 200 && event.status < 300) noteDownload(event).catch(() => {});
 		pages.delete(pageKey(event.url.href));
 		// A page carries its protection with it (the policy above, the page
 		// script's settings, its cookies). Safari shows one its site said it
@@ -1566,8 +1854,7 @@ function go(key) {
 		delete event.responseHeaders.expires;
 		// lets the page load in the app's frame across subdomains
 		event.responseHeaders["cross-origin-resource-policy"] = "same-site";
-		const type = event.responseHeaders["content-type"] || "";
-		if (typeof event.responseBody === "string" && /^text\/html/i.test(type)) {
+		if (html) {
 			page.ancestors = framingRule(event.rawResponse?.rawHeaders);
 			event.responseBody = injectHtml(event.responseBody, page);
 		}
@@ -1576,6 +1863,25 @@ function go(key) {
 	loadEngine();
 
 	return {
+		/**
+		 * A page's script set a cookie (document.cookie). Scramjet would save
+		 * its jar for it, and right after this worker started that is a jar
+		 * without the cookies saved before: scramjet-sw.js hands these here.
+		 * @param {ExtendableMessageEvent} event
+		 */
+		pageCookie(event) {
+			const { cookie, url } = event.data;
+			event.waitUntil(
+				savedCookies.then(() => {
+					try {
+						scramjet.cookieStore.setCookies([String(cookie)], new URL(url));
+					} catch {
+						return;
+					}
+					return saveCookies();
+				})
+			);
+		},
 		handle(event) {
 			// A check that broke must not wave the request through unchecked.
 			return handle(event).catch((err) => {

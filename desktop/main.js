@@ -26,9 +26,27 @@ function ours(url) {
 	}
 }
 
-// What a page may use without asking. No prompt UI exists, so camera,
-// microphone, location, notifications and the rest are refused.
+// What a page may use without asking. The camera, the microphone and the
+// location are asked about (askFor); notifications and the rest are refused.
 const ALLOWED_PERMISSIONS = new Set(["fullscreen", "clipboard-sanitized-write", "pointerLock"]);
+
+// The app's own prompt named the site before the page asked; this is the
+// browser's, which a page that gets around the app's can't skip.
+async function askFor(contents, permission, details) {
+	const kinds =
+		permission === "geolocation"
+			? ["your location"]
+			: (details.mediaTypes || []).map((type) => (type === "video" ? "the camera" : "the microphone"));
+	const { response } = await dialog.showMessageBox(BrowserWindow.fromWebContents(contents), {
+		type: "question",
+		message: `Let this tab use ${kinds.join(" and ") || "the camera or microphone"}?`,
+		detail: "Badger asked you about the site in the tab first. Video calls don't work through Badger; photos, scanning and recording do.",
+		buttons: ["Don't allow", "Allow"],
+		defaultId: 0,
+		cancelId: 0,
+	});
+	return response === 1;
+}
 
 async function lockDown() {
 	const ses = session.defaultSession;
@@ -43,9 +61,11 @@ async function lockDown() {
 	ses.webRequest.onBeforeRequest((details, callback) => {
 		callback({ cancel: /^(https?|wss?):/.test(details.url) && !ours(details.url) });
 	});
-	ses.setPermissionRequestHandler((contents, permission, callback) =>
-		callback(ALLOWED_PERMISSIONS.has(permission))
-	);
+	ses.setPermissionRequestHandler((contents, permission, callback, details) => {
+		if (ALLOWED_PERMISSIONS.has(permission)) return callback(true);
+		if ((permission !== "media" && permission !== "geolocation") || !ours(details.requestingUrl)) return callback(false);
+		askFor(contents, permission, details).then(callback, () => callback(false));
+	});
 	ses.setPermissionCheckHandler((contents, permission) => ALLOWED_PERMISSIONS.has(permission));
 
 	app.on("web-contents-created", (event, contents) => {

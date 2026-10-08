@@ -31,6 +31,30 @@ test("typed addresses and links from other sites lose their tracking parameters"
 	expect(await args(await open(app, `${ECHO}/get?fbclid=abc&keep=1`))).toEqual(["fbclid", "keep"]);
 });
 
+test("a link through a tracker's address goes straight to where it points", async ({ app }) => {
+	// a search engine's link wrapper (the app's own rules), which otherwise
+	// shows a page of its own on the way
+	await open(app, "https://www.google.com/url?q=https://example.com/&sa=D");
+	await app.waitForFunction(() => active.url === "https://example.com/" && !active.loading);
+	// one from Brave's list, which the server fetches with the block lists
+	await expect
+		.poll(async () => (await (await app.request.get(`${SHARED_URL}/filters/status`)).json()).debounceRules, {
+			message: "bounce list downloaded",
+			timeout: 110_000,
+		})
+		.toBeGreaterThan(0);
+	await expect
+		.poll(async () => {
+			await open(app, "https://www.google.com/amp/s/example.org/");
+			return app.evaluate(() => active.url);
+		})
+		.toBe("https://example.org/");
+	// the per-site switch turns it off with the rest of the blocking
+	await setSettings(app, { allow: ["google.com"] });
+	await open(app, "https://www.google.com/url?q=https://example.net/&sa=D");
+	expect(await app.evaluate(() => new URL(active.url).hostname)).toBe("www.google.com");
+});
+
 test("sites are asked not to sell or share data, and aren't told the device's languages", async ({ app }) => {
 	const frame = await open(
 		app,

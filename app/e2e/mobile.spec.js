@@ -91,16 +91,25 @@ const selected = (frame) =>
 test("find in page goes from match to match", async ({ app }) => {
 	const frame = await open(
 		app,
-		testPage(`<!doctype html><title>words</title><p>alpha beta</p><p style="margin-top:3000px">gamma beta</p>`)
+		testPage(`<!doctype html><title>words</title><p>alpha beta</p><p style="margin-top:3000px">gamma beta</p><p>one <b>two</b></p>`)
 	);
 	await app.evaluate(() => openFind());
 	const input = app.locator("#find-input");
+	const status = app.locator("#find-status");
 	await input.fill("beta");
 	await expect.poll(() => selected(frame)).toEqual({ text: "beta", around: "alpha beta", marked: true, scrolled: false });
+	await expect(status).toHaveText("1 of 2");
 	await input.press("Enter");
 	await expect.poll(() => selected(frame)).toEqual({ text: "beta", around: "gamma beta", marked: true, scrolled: true });
+	await expect(status).toHaveText("2 of 2");
 	await input.press("Shift+Enter");
 	await expect.poll(async () => (await selected(frame)).around).toBe("alpha beta");
+	await expect(status).toHaveText("1 of 2");
+	// a match across elements, in any case; never across two paragraphs
+	await input.fill("ONE TWO");
+	await expect(status).toHaveText("1 of 1");
+	await input.fill("betagamma");
+	await expect(status).toHaveText("No matches");
 
 	await input.fill("zebra");
 	await expect(app.locator("#find-status")).toHaveText("No matches");

@@ -35,11 +35,18 @@ async function publicLookup(hostname) {
 	return allowed[0].address;
 }
 
+// Web traffic only, so the server can't be used for mail spam, logging in to
+// other people's servers (SSH, databases) or UDP floods: the web's own ports,
+// and the ones sites commonly run on besides (development servers, control
+// panels, home servers).
+// ponytail: a site on a port not listed here doesn't load; add it here.
+export const WEB_PORTS = [
+	80, 443, 81, 591, 2082, 2083, 2086, 2087, 2095, 2096, 3000, 4443, 5000, 5001, 7080, 7443, 8000, 8001, 8008, 8080,
+	8081, 8088, 8443, 8880, 8888, 9000, 9080, 9443, 10443,
+];
+
 Object.assign(wisp.options, {
-	// Web traffic only, so the server can't be used for mail spam, port scans
-	// or UDP floods.
-	// ponytail: sites on other ports (e.g. :8080) won't load; extend the list if that matters.
-	port_whitelist: [80, 443],
+	port_whitelist: WEB_PORTS,
 	allow_udp_streams: false,
 	allow_private_ips: false,
 	allow_loopback_ips: false,

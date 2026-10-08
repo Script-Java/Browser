@@ -7,9 +7,15 @@ importScripts("/bios/shield.js");
 // Before Scramjet's and shield.js's listeners: drop messages from anywhere
 // but this origin's pages, and config posts. Scramjet takes its config from
 // pages that post it; ours never changes and shield.js stores it itself.
+// A cookie a page's script set goes to shield.js, which keeps the saved
+// ones (Scramjet would save its jar over them; see pageCookie).
 self.addEventListener("message", (event) => {
 	if (event.origin !== location.origin || event.data?.scramjet$type === "loadConfig")
 		event.stopImmediatePropagation();
+	else if (event.data?.scramjet$type === "cookie" && !("scramjet$token" in event.data)) {
+		event.stopImmediatePropagation();
+		shield.pageCookie(event);
+	}
 });
 
 // before Scramjet opens its database (see storeConfig)

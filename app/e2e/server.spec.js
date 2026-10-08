@@ -41,7 +41,9 @@ test("the app's pages run only their own scripts and can't be framed by others",
 	expect(csp).toContain("frame-ancestors 'self'");
 	expect(page.headers()["x-content-type-options"]).toBe("nosniff");
 	expect(page.headers()["referrer-policy"]).toBe("same-origin");
-	expect(page.headers()["permissions-policy"]).toContain("camera=()");
+	// the camera only for pages that asked the person (page.js), nothing for payments or USB
+	expect(page.headers()["permissions-policy"]).toContain("camera=(self)");
+	expect(page.headers()["permissions-policy"]).toContain("payment=()");
 
 	// workers run Scramjet's WebAssembly, so they only get the framing rule
 	const worker = await request.get(`${SHARED_URL}/scramjet-sw.js`, {

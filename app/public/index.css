@@ -784,6 +784,121 @@ body:not(.browsing) #frames {
 	opacity: 0.6;
 }
 
+/* the certificate viewer in the shield menu */
+#cert summary {
+	cursor: pointer;
+}
+
+#cert dl {
+	display: grid;
+	grid-template-columns: auto 1fr;
+	gap: 4px 10px;
+	margin: 8px 0 0;
+}
+
+#cert dt {
+	color: var(--muted);
+}
+
+#cert dd {
+	margin: 0;
+	overflow-wrap: anywhere;
+	font-family: var(--mono);
+	font-size: 12px;
+}
+
+/* a site asking for the location, the camera or the microphone */
+#ask {
+	position: fixed;
+	z-index: 30;
+	top: calc(var(--chrome-h, 90px) + 8px);
+	left: 50%;
+	transform: translateX(-50%);
+	width: min(440px, calc(100% - 24px));
+	padding: 14px 16px 12px;
+	border: 1px solid var(--line);
+	border-radius: 14px;
+	background: var(--surface);
+	color: var(--ink);
+	box-shadow: 0 10px 30px rgba(0, 0, 0, 0.18);
+}
+
+#ask[hidden] {
+	display: none;
+}
+
+#ask p {
+	margin: 0 0 10px;
+	font-size: 15px;
+}
+
+#ask .ask-buttons {
+	display: flex;
+	justify-content: flex-end;
+	gap: 8px;
+}
+
+#ask button,
+.panel button.small {
+	min-height: 34px;
+	padding: 0 14px;
+	border: 1px solid var(--line);
+	border-radius: 9px;
+	background: var(--toolbar);
+	color: var(--ink);
+	font-weight: 500;
+}
+
+#ask #ask-yes {
+	background: var(--ink);
+	color: var(--surface);
+	border-color: var(--ink);
+}
+
+/* the page's tools: find, reader view, translate, print */
+.panel .tools {
+	display: grid;
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+	gap: 8px;
+	margin-top: 10px;
+}
+
+.panel .tools[hidden] {
+	display: none;
+}
+
+.panel .tools button {
+	min-height: 40px;
+	border: 1px solid var(--line);
+	border-radius: 9px;
+	background: var(--toolbar);
+	color: var(--ink);
+	font-weight: 500;
+}
+
+.panel .zoom {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+}
+
+.panel .zoom button {
+	width: 36px;
+	height: 32px;
+	border: 1px solid var(--line);
+	border-radius: 7px;
+	background: var(--surface);
+	color: var(--ink);
+	font-size: 18px;
+	line-height: 1;
+}
+
+.panel .zoom output {
+	min-width: 3.4em;
+	text-align: center;
+	font-variant-numeric: tabular-nums;
+}
+
 .panel .note {
 	margin: 6px 0 0;
 	color: var(--muted);
