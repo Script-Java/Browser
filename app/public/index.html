@@ -30,6 +30,11 @@
 	<body class="shell">
 		<header id="chrome">
 			<div id="tabstrip">
+				<button id="ws-btn" type="button" aria-haspopup="dialog">
+					<span class="ws-dot"></span>
+					<span id="ws-name"></span>
+					<svg viewBox="0 0 24 24"><path d="M7 10l5 5 5-5" /></svg>
+				</button>
 				<div id="tabs" role="tablist" aria-label="Tabs"></div>
 				<button id="new-tab" class="icon-btn" type="button" aria-label="New tab">
 					<svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" /></svg>
@@ -72,6 +77,12 @@
 						aria-label="Address"
 						placeholder="Search or type a URL"
 					/>
+					<button id="key-btn" type="button" aria-label="Sign in with a saved password" hidden>
+						<svg viewBox="0 0 24 24">
+							<circle cx="8" cy="15" r="4" />
+							<path d="M11 12l8-8M16 7l3 3M14 9l2 2" />
+						</svg>
+					</button>
 					<button id="star" type="button" aria-label="Bookmark this page" aria-pressed="false" hidden>
 						<svg viewBox="0 0 24 24">
 							<path d="M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.3-4.1 5.9-.9z" />
@@ -167,12 +178,35 @@
 					<div>
 						<strong id="sheet-site" class="panel-title">Settings</strong>
 						<p id="sheet-trust" class="note"></p>
+						<button id="cert-open" class="text-btn" type="button" hidden>Certificate</button>
 					</div>
 					<button id="sheet-close" class="panel-close" type="button">Done</button>
 				</div>
 
-				<button id="history-open" class="wide" type="button">History</button>
-				<button id="find-open" class="wide" type="button">Find in page</button>
+				<div class="tools">
+					<button id="history-open" type="button">History</button>
+					<button id="downloads-open" type="button">Downloads</button>
+					<button id="passwords-open" type="button">Passwords</button>
+				</div>
+				<div id="page-tools" class="tools">
+					<button id="reader-open" type="button">Reader view</button>
+					<button id="find-open" type="button">Find in page</button>
+					<button id="print-page" type="button">Print</button>
+					<button id="translate-page" type="button">Translate</button>
+				</div>
+				<div class="row" id="zoom-row">
+					<span>Zoom <small>For this site</small></span>
+					<span class="stepper">
+						<button id="zoom-out" type="button" aria-label="Zoom out">−</button>
+						<output id="zoom-level" aria-live="polite">100%</output>
+						<button id="zoom-in" type="button" aria-label="Zoom in">+</button>
+					</span>
+				</div>
+				<p id="consent-here" class="note" hidden></p>
+				<details id="permissions-here" class="note" hidden>
+					<summary>Permissions for this site</summary>
+					<ul id="permissions-list" class="links"></ul>
+				</details>
 
 				<label class="row" id="site-row">
 					<span>
@@ -209,6 +243,13 @@
 				<label class="row">
 					<span>Hide ad boxes and overlays</span>
 					<input type="checkbox" data-setting="cosmetic" role="switch" />
+				</label>
+				<label class="row">
+					<span>
+						Answer cookie notices
+						<small>Says no to tracking for you, where the notice offers that, and hides it</small>
+					</span>
+					<input type="checkbox" data-setting="consent" role="switch" />
 				</label>
 				<label class="row">
 					<span>
@@ -270,6 +311,8 @@
 				</label>
 				<button id="vault-set" class="wide" type="button">Lock history and bookmarks with a passphrase</button>
 				<button id="vault-off" class="wide" type="button" hidden>Turn off the passphrase lock</button>
+				<button id="tor-tab" class="wide" type="button" hidden>New Tor tab</button>
+				<button id="sync-open" class="wide" type="button">Sync with another device</button>
 				<button id="new-identity" class="wide" type="button">New identity</button>
 				<button id="wipe-now" class="wide" type="button">Clear history and site data now</button>
 				<form id="lock-form" method="post" action="/logout" hidden>
@@ -297,18 +340,145 @@
 			</div>
 		</div>
 
+		<div id="downloads" class="panel" hidden>
+			<div class="panel-card" role="dialog" aria-modal="true" aria-labelledby="downloads-title">
+				<div class="panel-head">
+					<strong id="downloads-title" class="panel-title">Downloads</strong>
+					<button id="downloads-close" class="panel-close" type="button">Done</button>
+				</div>
+				<p class="note">Kept only on this device, in the app. Save one to Files (or share it) to use it elsewhere.</p>
+				<ul id="downloads-list" class="links"></ul>
+				<p id="downloads-empty" class="note" hidden>Nothing downloaded yet.</p>
+				<button id="downloads-clear" class="wide" type="button">Delete all downloads</button>
+			</div>
+		</div>
+
+		<div id="cert" class="panel" hidden>
+			<div class="panel-card" role="dialog" aria-modal="true" aria-labelledby="cert-title">
+				<div class="panel-head">
+					<div>
+						<strong id="cert-title" class="panel-title">Certificate</strong>
+						<p id="cert-host" class="note"></p>
+					</div>
+					<button id="cert-close" class="panel-close" type="button">Done</button>
+				</div>
+				<p id="cert-status" class="note" role="status"></p>
+				<dl id="cert-details" class="facts"></dl>
+				<p class="note">As the server sees it: the server opens a connection of its own to read the certificate and check that it hasn't been revoked. Your device checks the connection's certificate by itself as well.</p>
+			</div>
+		</div>
+
+		<div id="ask" class="panel" hidden>
+			<form id="ask-form" class="panel-card" role="alertdialog" aria-modal="true" aria-labelledby="ask-title">
+				<strong id="ask-title" class="panel-title"></strong>
+				<p id="ask-note" class="note"></p>
+				<label class="row">
+					<span>Remember for this site</span>
+					<input type="checkbox" id="ask-remember" role="switch" />
+				</label>
+				<div class="tools">
+					<button id="ask-deny" type="button">Don't allow</button>
+					<button id="ask-allow" type="submit">Allow</button>
+				</div>
+				<button id="ask-approximate" class="wide" type="button" hidden>Allow approximate location</button>
+			</form>
+		</div>
+
+		<div id="passwords" class="panel" hidden>
+			<div class="panel-card" role="dialog" aria-modal="true" aria-labelledby="passwords-title">
+				<div class="panel-head">
+					<strong id="passwords-title" class="panel-title">Passwords and passkeys</strong>
+					<button id="passwords-close" class="panel-close" type="button">Done</button>
+				</div>
+				<p id="passwords-note" class="note"></p>
+				<h3>Passwords</h3>
+				<ul id="logins-list" class="links"></ul>
+				<p id="logins-empty" class="note" hidden>None saved yet. After you sign in to a site, the app offers to keep the password.</p>
+				<h3>Passkeys</h3>
+				<ul id="passkeys-list" class="links"></ul>
+				<p id="passkeys-empty" class="note" hidden>None yet. When a site offers to make a passkey, the app can keep it.</p>
+			</div>
+		</div>
+
+		<div id="workspaces" class="panel" hidden>
+			<div class="panel-card" role="dialog" aria-modal="true" aria-labelledby="workspaces-title">
+				<div class="panel-head">
+					<strong id="workspaces-title" class="panel-title">Workspaces</strong>
+					<button id="workspaces-close" class="panel-close" type="button">Done</button>
+				</div>
+				<p class="note">Keep each task's tabs together. Switching workspaces shows only that workspace's tabs.</p>
+				<ul id="ws-list" class="links"></ul>
+				<button id="ws-new" class="wide" type="button">New workspace</button>
+			</div>
+		</div>
+
+		<div id="choice" class="panel" hidden>
+			<div class="panel-card" role="alertdialog" aria-modal="true" aria-labelledby="choice-title">
+				<strong id="choice-title" class="panel-title"></strong>
+				<p id="choice-note" class="note"></p>
+				<ul id="choice-list" class="links"></ul>
+				<div class="tools">
+					<button id="choice-cancel" type="button">Cancel</button>
+					<button id="choice-ok" type="button" hidden></button>
+				</div>
+			</div>
+		</div>
+
+		<div id="offer" role="dialog" aria-labelledby="offer-text" hidden>
+			<span id="offer-text"></span>
+			<span class="offer-actions"></span>
+		</div>
+
+		<div id="sync" class="panel" hidden>
+			<div class="panel-card" role="dialog" aria-modal="true" aria-labelledby="sync-title">
+				<div class="panel-head">
+					<strong id="sync-title" class="panel-title">Sync with another device</strong>
+					<button id="sync-close" class="panel-close" type="button">Done</button>
+				</div>
+				<p class="note">Bookmarks, history, passwords and passkeys go both ways and are merged. They're encrypted with the code before they leave this device: the server passes them on without being able to read them, and keeps nothing.</p>
+				<div id="sync-start" class="tools">
+					<button id="sync-show" type="button">Show a code</button>
+					<button id="sync-enter" type="button">Enter a code</button>
+				</div>
+				<p id="sync-code" class="sync-code" hidden></p>
+				<form id="sync-form" hidden>
+					<input id="sync-input" type="text" autocomplete="off" autocapitalize="characters" spellcheck="false" aria-label="Code from the other device" placeholder="XXXX-XXXX-XXXX-XXXX" />
+					<button class="wide" type="submit">Sync</button>
+				</form>
+				<p id="sync-status" class="note" role="status"></p>
+			</div>
+		</div>
+
+		<div id="toast" role="status" hidden><span id="toast-text"></span><button id="toast-action" type="button"></button></div>
+
 		<div id="switcher" class="panel" hidden>
 			<div class="panel-card" role="dialog" aria-modal="true" aria-labelledby="switcher-title">
 				<div class="panel-head">
 					<strong id="switcher-title" class="panel-title">Tabs</strong>
 					<button id="switcher-close" class="panel-close" type="button">Done</button>
 				</div>
+				<div id="ws-chips" aria-label="Workspaces"></div>
 				<ul id="tab-list" class="links"></ul>
 				<button id="switcher-new" class="wide" type="button">New tab</button>
 			</div>
 		</div>
 
 		<ul id="suggest" role="listbox" aria-label="Suggestions" hidden></ul>
+
+		<div id="reader" class="panel" hidden>
+			<div class="panel-card" role="dialog" aria-modal="true" aria-labelledby="reader-title">
+				<div class="panel-head">
+					<div>
+						<small id="reader-site" class="note"></small>
+						<strong id="reader-title" class="panel-title">Reader view</strong>
+						<small id="reader-byline" class="note"></small>
+					</div>
+					<button id="reader-close" class="panel-close" type="button">Done</button>
+				</div>
+				<article id="reader-article"></article>
+				<p id="reader-status" class="note" role="status"></p>
+			</div>
+		</div>
 
 		<div id="vault" class="panel" hidden>
 			<form id="vault-form" class="panel-card" role="dialog" aria-modal="true" aria-labelledby="vault-title">

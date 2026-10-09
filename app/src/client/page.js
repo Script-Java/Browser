@@ -7,6 +7,9 @@
 // This code is not rewritten by Scramjet: `location` here is the proxy's
 // real address, and the site's address comes from the Scramjet client.
 
+import { protect } from "./fingerprint.js";
+import { fillLogin, passkeys, watchLogins } from "./logins.js";
+
 const SCRAMJET = Symbol.for("scramjet client global");
 // The shell's window, for each tab window that ownParent has changed.
 const shells = new WeakMap();
@@ -15,8 +18,206 @@ function parentOf(win) {
 }
 // Server settings: { isolation: "<domain>" | null, auth: boolean }.
 const bios = self.__biosConfig || {};
+// The browser's own print(), per window: pages get a silent one, the app's
+// menu the real one.
+const realPrint = new WeakMap();
+
+/**
+ * Asks the app (its own prompt, outside the page) about `kind`, for this
+ * page's tab. Resolves with the app's answer, or null.
+ * @param {Window} win
+ * @param {string} kind "location", "camera", "microphone", "camera+microphone"
+ * @param {object} [details]
+ */
+function askApp(win, kind, details = {}) {
+	return new Promise((resolve) => {
+		const id = crypto.randomUUID();
+		const top = win.top;
+		const onAnswer = (event) => {
+			const data = event.data;
+			if (event.source !== top || data?.bios !== "answer" || data.id !== id) return;
+			win.removeEventListener("message", onAnswer, true);
+			resolve(data);
+		};
+		win.addEventListener("message", onAnswer, true);
+		try {
+			top.postMessage({ bios: "ask", kind, id, ...details }, "*");
+		} catch {
+			resolve(null);
+		}
+	});
+}
 // The service worker's own endpoints (shield.js).
 const API = self.location.origin + "/scramjet/__bios/";
+
+// This page is a frame's own origin (f… or g…, see shield.js inFrame): the
+// page around it is on another origin, walled off by the browser.
+const FRAME_ORIGIN = !!bios.isolation && /^[fg][a-z2-7]{25}\./.test(self.location.hostname);
+// What a message carries for whom it's meant (see standInWindow).
+const MEANT_FOR = "$bios$target";
+
+const crossOrigin = (win) => {
+	try {
+		void win.location.href;
+		return false;
+	} catch {
+		return true;
+	}
+};
+
+const standIns = new WeakMap(); // a window on another origin -> its stand-in
+const aroundFrame = new WeakSet(); // frames whose parent (the page around them) is on another origin
+
+/**
+ * A stand-in for a window on another origin (a frame of another site, or the
+ * page a frame is in), as page scripts would use one: messages, and little
+ * else, as a browser allows across origins. A site's message goes in
+ * Scramjet's envelope, so the receiving page learns the sender's real
+ * origin, with the origin it's meant for, which the receiver holds it to
+ * (the browser only knows the proxy's origins). The tab's page is the top:
+ * the app above it doesn't exist for a site.
+ * @param {Window} real
+ * @param {Window} from the window whose site sends what's posted through it
+ */
+function standInWindow(real, from) {
+	if (!real) return real;
+	let stand = standIns.get(real);
+	if (stand) return stand;
+	const isTabPage = () => {
+		try {
+			return real.parent !== real && real.parent === real.top;
+		} catch {
+			return false;
+		}
+	};
+	const refused = () => {
+		throw new from.DOMException("Blocked a frame from accessing a cross-origin frame.", "SecurityError");
+	};
+	const navigate = (url) => {
+		// only the tab's page may be sent elsewhere by a frame, and only by the app, after a tap
+		if (!isTabPage()) return;
+		try {
+			const target = new URL(String(url), from[SCRAMJET]?.url || undefined);
+			if (/^https?:$/.test(target.protocol)) from.top.postMessage({ bios: "navigate", url: target.href }, "*");
+		} catch {
+			// not an address
+		}
+	};
+	const location = Object.freeze({
+		assign: navigate,
+		replace: navigate,
+		reload() {},
+		toString: refused,
+		get href() {
+			return refused();
+		},
+		set href(url) {
+			navigate(url);
+		},
+	});
+	const target = {
+		postMessage(data, targetOrigin, transfer) {
+			if (targetOrigin && typeof targetOrigin === "object") {
+				transfer = targetOrigin.transfer;
+				targetOrigin = targetOrigin.targetOrigin;
+			}
+			const own = from[SCRAMJET]?.url?.origin || "null";
+			let meant = targetOrigin === undefined ? "/" : String(targetOrigin);
+			if (meant === "/") meant = own;
+			else if (meant !== "*")
+				try {
+					meant = new URL(meant).origin;
+				} catch {
+					throw new from.DOMException(`Invalid target origin '${meant}' in a call to 'postMessage'.`, "SyntaxError");
+				}
+			real.postMessage(
+				{ $scramjet$messagetype: "window", $scramjet$origin: own, $scramjet$data: data, [MEANT_FOR]: meant },
+				"*",
+				transfer || []
+			);
+		},
+		focus() {
+			try {
+				real.focus();
+			} catch {
+				// not allowed
+			}
+		},
+		blur() {},
+		close() {},
+		get closed() {
+			return real.closed;
+		},
+		get length() {
+			return real.length;
+		},
+		get parent() {
+			return isTabPage() || real.parent === real ? stand : standInWindow(real.parent, from);
+		},
+		get top() {
+			let w = real;
+			try {
+				while (w.parent !== w && w.parent !== w.top) w = w.parent;
+			} catch {
+				// as far as it goes
+			}
+			return standInWindow(w, from);
+		},
+		get self() {
+			return stand;
+		},
+		get window() {
+			return stand;
+		},
+		get frames() {
+			return stand;
+		},
+		get opener() {
+			return null;
+		},
+		get location() {
+			return location;
+		},
+		set location(url) {
+			navigate(url);
+		},
+		get document() {
+			return refused();
+		},
+		// Scramjet's own walk up the frames asks whether a window has a client
+		[SCRAMJET]: undefined,
+		[Symbol.toStringTag]: "Window",
+	};
+	stand = new Proxy(target, {
+		get(object, prop) {
+			// a frame inside it, by its index or (below) its name: itself when
+			// it's on this page's own origin, its stand-in when not
+			const own = (child) => (crossOrigin(child) ? standInWindow(child, from) : child);
+			if (typeof prop === "string" && /^\d+$/.test(prop)) return real[Number(prop)] && own(real[Number(prop)]);
+			if (prop in object) return Reflect.get(object, prop, stand);
+			// what a browser answers with nothing rather than refuse (so that
+			// awaiting a window, or asking what it is, doesn't throw)
+			if (prop === "then" || prop === Symbol.hasInstance || prop === Symbol.isConcatSpreadable) return undefined;
+			// a frame inside it, by its name (widgets find their siblings so):
+			// the browser allows that across origins too
+			if (typeof prop === "string")
+				try {
+					const child = real[prop];
+					if (child && child === child.window) return own(child);
+				} catch {
+					// not a frame's name
+				}
+			return refused();
+		},
+		has: (object, prop) => prop in object || (typeof prop === "string" && /^\d+$/.test(prop) && Number(prop) < real.length),
+		set: (object, prop, value) => {
+			if (prop === "location") navigate(value);
+			return true;
+		},
+	});
+	standIns.set(real, stand);
+	return stand;
+}
 
 /** @param {Window} win */
 function hook(win) {
@@ -27,11 +228,14 @@ function hook(win) {
 	hookFrames(win);
 	// before the Scramjet check, like the rest up here: a frame Scramjet
 	// hasn't hooked yet answers scripts too
-	if (pageFlags(win).safer) safer(win);
+	const flags = pageFlags(win);
+	if (flags.safer) protect(win, "safer");
+	else if (flags.farble) protect(win, "standard");
 	const client = win[SCRAMJET];
 	if (!client) return lockBare(win);
 	if (refusesFrame(client, win)) return;
 	frameNames(client, win);
+	acrossOrigins(client, win);
 	ownParent(win);
 	blobSources(client, win);
 	noPopups(client, win);
@@ -142,7 +346,24 @@ function hookFrames(win) {
 			Object.defineProperty(proto, prop, {
 				...desc,
 				get() {
-					const value = desc.get.call(this);
+					let value;
+					try {
+						value = desc.get.call(this);
+					} catch (err) {
+						// Scramjet's own hook reaches into the frame, which throws
+						// for one on another origin: the browser's answer instead
+						// (no document, as a browser gives across origins)
+						let real = null;
+						try {
+							real = win[SCRAMJET]?.descriptors.get(`${name}.prototype.contentWindow`, this);
+						} catch {
+							// no such frame
+						}
+						if (!real || !crossOrigin(real)) throw err;
+						return prop === "contentWindow" ? standInWindow(real, win) : null;
+					}
+					// a frame of another site, on its own origin: its stand-in
+					if (prop === "contentWindow" && value && crossOrigin(value)) return standInWindow(value, win);
 					try {
 						const child = prop === "contentWindow" ? value : value?.defaultView;
 						if (child && !child.__noPopups) hook(child);
@@ -263,292 +484,6 @@ function pageFlags(win) {
 }
 
 /**
- * The "Safer" security level in a page: no WebGL or WebGPU, and the answers a
- * script gets about the device are everyone's.
- * @param {Window} win
- */
-function safer(win) {
-	if (win.__biosSafer) return;
-	Object.defineProperty(win, "__biosSafer", { value: true });
-	noGpu(win);
-	lessUnique(win);
-}
-
-// For the noise below: one draw for this page and the frames it writes. What
-// a script reads back stays the same within the page (reading twice doesn't
-// give the noise away) and is different on the next page.
-const NOISE = crypto.getRandomValues(new Uint32Array(1))[0];
-function mix(n) {
-	let h = Math.imul(NOISE ^ n, 0x85ebca6b);
-	h ^= h >>> 13;
-	h = Math.imul(h, 0xc2b2ae35);
-	return (h ^ (h >>> 16)) >>> 0;
-}
-
-/**
- * "Safer": less for a site to tell this device from others by. Scripts get
- * one language, a common processor count, and the time in UTC; what they read
- * back from a canvas or a sound buffer carries a little noise, so it can't
- * serve as the device's signature.
- * ponytail: page script against page script, like noWebRTC. Not covered: the
- * screen's size, the fonts installed, and anything read inside a worker,
- * which this script doesn't reach. Tor Browser does all of it in the browser.
- * @param {Window} win
- */
-function lessUnique(win) {
-	const answer = (object, name, value) => {
-		try {
-			Object.defineProperty(object, name, { get: () => value, enumerable: true, configurable: true });
-		} catch {
-			// not there, or locked
-		}
-	};
-	const nav = win.Navigator.prototype;
-	// the same as the Accept-Language shield.js sends
-	answer(nav, "language", "en-US");
-	answer(nav, "languages", Object.freeze(["en-US", "en"]));
-	answer(nav, "hardwareConcurrency", 4);
-	if ("deviceMemory" in nav) answer(nav, "deviceMemory", 8);
-	utcClock(win);
-	noisyCanvas(win);
-	noisySound(win);
-}
-
-/**
- * The time zone says where a device is. Every way a page can ask is answered
- * as in UTC, and in English: Date's local-time methods, its text forms and its
- * reading of times without a zone, and the defaults of Intl's formatters.
- * @param {Window} win
- */
-function utcClock(win) {
-	const RealDate = win.Date;
-	const proto = RealDate.prototype;
-	const realOffset = proto.getTimezoneOffset;
-	const utcText = proto.toUTCString;
-	const ZONE = "GMT+0000 (Coordinated Universal Time)";
-
-	for (const part of ["Date", "Day", "FullYear", "Hours", "Milliseconds", "Minutes", "Month", "Seconds"]) {
-		proto["get" + part] = proto["getUTC" + part];
-		if (proto["setUTC" + part]) proto["set" + part] = proto["setUTC" + part];
-	}
-	// 0, or NaN for an invalid date, as the real one answers
-	proto.getTimezoneOffset = function () {
-		return this.getTime() * 0 + 0;
-	};
-
-	// "Thu, 01 Jan 1970 00:00:00 GMT", taken apart
-	const parts = (date) => /^(\w+), (\d+) (\w+) (-?\d+) (\S+) GMT$/.exec(utcText.call(date));
-	proto.toDateString = function () {
-		const p = parts(this);
-		return p ? `${p[1]} ${p[3]} ${p[2]} ${p[4]}` : "Invalid Date";
-	};
-	proto.toTimeString = function () {
-		const p = parts(this);
-		return p ? `${p[5]} ${ZONE}` : "Invalid Date";
-	};
-	proto.toString = function () {
-		const p = parts(this);
-		return p ? `${p[1]} ${p[3]} ${p[2]} ${p[4]} ${p[5]} ${ZONE}` : "Invalid Date";
-	};
-
-	for (const name of ["toLocaleString", "toLocaleDateString", "toLocaleTimeString"]) {
-		const real = proto[name];
-		proto[name] = function (locales, options) {
-			return real.call(this, locales ?? "en-US", { timeZone: "UTC", ...options });
-		};
-	}
-	const numberText = win.Number.prototype.toLocaleString;
-	win.Number.prototype.toLocaleString = function (locales, options) {
-		return numberText.call(this, locales ?? "en-US", options);
-	};
-	// Intl.DateTimeFormat, NumberFormat and the rest: English unless the page
-	// names a language, and UTC unless it names a zone
-	for (const name of Object.getOwnPropertyNames(win.Intl || {})) {
-		const Real = win.Intl[name];
-		if (typeof Real !== "function" || typeof Real.prototype?.resolvedOptions !== "function") continue;
-		const withDefaults = ([locales, options]) => [
-			locales ?? "en-US",
-			name === "DateTimeFormat" ? { timeZone: "UTC", ...options } : options,
-		];
-		const stand = new win.Proxy(Real, {
-			construct: (target, args, newTarget) =>
-				Reflect.construct(target, withDefaults(args), newTarget === stand ? target : newTarget),
-			apply: (target, self, args) => Reflect.apply(target, self, withDefaults(args)),
-		});
-		Real.prototype.constructor = stand;
-		win.Intl[name] = stand;
-	}
-
-	// A time written without a zone is the device's: read it as UTC's
-	// instead. One with a zone ("…Z", "GMT+2", "10:00+05:30", "EST"), or a
-	// plain ISO date (UTC by the standard), is left as it is.
-	// ponytail: by the text's look; an unusual form with a zone the browser
-	// understands and this doesn't is read an offset out.
-	const ZONED = /Z\s*$|\b(?:GMT|UTC?)\b|:\d{2}(?:\.\d+)?\s*[+-]\d{2}(?::?\d{2})?|\b[ECMP][SD]T\b/i;
-	const DAY_ONLY = /^\s*\d{4}(?:-\d{2}){0,2}\s*$/;
-	const parse = (text) => {
-		text = String(text);
-		const ms = RealDate.parse(text);
-		if (Number.isNaN(ms) || ZONED.test(text) || DAY_ONLY.test(text)) return ms;
-		return ms - realOffset.call(new RealDate(ms)) * 60_000;
-	};
-	const StandDate = new win.Proxy(RealDate, {
-		construct(target, args, newTarget) {
-			// new Date(2026, 0, 1): the device's midnight, read as UTC's
-			if (args.length > 1) args = [RealDate.UTC(...args)];
-			else if (typeof args[0] === "string") args = [parse(args[0])];
-			return Reflect.construct(target, args, newTarget === StandDate ? target : newTarget);
-		},
-		apply: () => new StandDate().toString(),
-		get: (target, key, receiver) => (key === "parse" ? parse : Reflect.get(target, key, receiver)),
-	});
-	proto.constructor = StandDate;
-	win.Date = StandDate;
-	// the newer date API has its own ways to ask for the zone; pages still
-	// check for it before using it
-	try {
-		delete win.Temporal;
-	} catch {
-		// locked
-	}
-}
-
-/**
- * What a canvas draws differs by device (fonts, graphics chip, smoothing), so
- * reading it back gives a signature. Two pixels in every row are changed by
- * the smallest step before a script sees them: invisible, and enough to
- * change the signature from page to page.
- * @param {Window} win
- */
-function noisyCanvas(win) {
-	// by the pixel's place on the canvas, so two readings that overlap agree
-	const speckle = (image, left, top, canvas) => {
-		const { data, width, height } = image;
-		for (let row = 0; row < height; row++) {
-			const y = top + row;
-			if (y < 0 || y >= canvas.height) continue;
-			for (const salt of [0, 1]) {
-				const h = mix(y * 2 + salt);
-				const x = (h % canvas.width) - left;
-				if (x >= 0 && x < width) data[(row * width + x) * 4 + ((h >>> 20) % 3)] ^= 1;
-			}
-		}
-	};
-	const contexts = [win.CanvasRenderingContext2D, win.OffscreenCanvasRenderingContext2D].filter(Boolean);
-	const readers = new Map();
-	for (const Context of contexts) {
-		const real = Context.prototype.getImageData;
-		readers.set(Context, real);
-		Context.prototype.getImageData = function (sx, sy, sw, sh, ...rest) {
-			const image = real.call(this, sx, sy, sw, sh, ...rest);
-			// a negative width or height reads leftwards or upwards
-			speckle(image, Math.trunc(sw < 0 ? sx + sw : sx), Math.trunc(sh < 0 ? sy + sh : sy), this.canvas);
-			return image;
-		};
-	}
-	// The canvas as it is, speckled, on a canvas of its own: the picture a
-	// script takes away (toDataURL, toBlob) is of that one.
-	const twin = (canvas, blank) => {
-		if (!canvas.width || !canvas.height) return canvas;
-		const copy = blank(canvas.width, canvas.height);
-		const context = copy.getContext("2d");
-		const read = readers.get(Object.getPrototypeOf(context).constructor) || context.getImageData;
-		context.drawImage(canvas, 0, 0);
-		const image = read.call(context, 0, 0, copy.width, copy.height);
-		speckle(image, 0, 0, copy);
-		context.putImageData(image, 0, 0);
-		return copy;
-	};
-	const onPage = (width, height) => Object.assign(win.document.createElement("canvas"), { width, height });
-	const offPage = (width, height) => new win.OffscreenCanvas(width, height);
-	for (const [proto, names, blank] of [
-		[win.HTMLCanvasElement?.prototype, ["toDataURL", "toBlob"], onPage],
-		[win.OffscreenCanvas?.prototype, ["convertToBlob"], offPage],
-	])
-		for (const name of names) {
-			const real = proto?.[name];
-			if (typeof real !== "function") continue;
-			proto[name] = function (...args) {
-				return real.apply(twin(this, blank), args);
-			};
-		}
-}
-
-/**
- * The same for sound: how a device's audio code rounds its sums is a
- * signature. Samples a script reads back are moved by one part in ten
- * million, far below hearing.
- * @param {Window} win
- */
-function noisySound(win) {
-	const buffer = win.AudioBuffer?.prototype;
-	if (buffer) {
-		const real = buffer.getChannelData;
-		// once for each channel of each buffer: the samples are the buffer's own
-		const shaken = new WeakMap();
-		const shake = (sound, channel) => {
-			const data = real.call(sound, channel);
-			const done = shaken.get(sound) || new Set();
-			shaken.set(sound, done);
-			if (!done.has(channel)) {
-				done.add(channel);
-				for (let i = mix(channel) % 89; i < data.length; i += 89) data[i] += mix(i) & 1 ? 1e-7 : -1e-7;
-			}
-			return data;
-		};
-		buffer.getChannelData = function (channel) {
-			return shake(this, channel);
-		};
-		const copy = buffer.copyFromChannel;
-		if (copy)
-			buffer.copyFromChannel = function (destination, channel, ...rest) {
-				shake(this, channel);
-				return copy.call(this, destination, channel, ...rest);
-			};
-	}
-	const analyser = win.AnalyserNode?.prototype;
-	for (const name of ["getFloatFrequencyData", "getFloatTimeDomainData", "getByteFrequencyData", "getByteTimeDomainData"]) {
-		const real = analyser?.[name];
-		if (typeof real !== "function") continue;
-		const whole = name.includes("Byte");
-		analyser[name] = function (array) {
-			real.call(this, array);
-			for (let i = mix(1) % 13; i < array.length; i += 13) {
-				if (whole) array[i] ^= mix(i) & 1;
-				else array[i] += mix(i) & 1 ? 1e-4 : -1e-4;
-			}
-		};
-	}
-}
-
-/**
- * "Safer" security level: no WebGL or WebGPU. Both expose the graphics card
- * (a strong fingerprint) and are a common way into browser bugs.
- * ponytail: OffscreenCanvas inside a worker is out of reach here.
- * @param {Window} win
- */
-function noGpu(win) {
-	for (const ctor of [win.HTMLCanvasElement, win.OffscreenCanvas]) {
-		const proto = ctor?.prototype;
-		const real = proto?.getContext;
-		if (typeof real !== "function") continue;
-		Object.defineProperty(proto, "getContext", {
-			value: function getContext(type, ...rest) {
-				if (/webgl|webgpu/i.test(String(type))) return null;
-				return real.call(this, type, ...rest);
-			},
-			writable: true,
-			configurable: true,
-		});
-	}
-	try {
-		Object.defineProperty(win.navigator, "gpu", { value: undefined });
-	} catch {
-		// not configurable here
-	}
-}
-
-/**
  * Origin of the app shell. In isolation mode proxied pages live on
  * <site>.<domain> and the shell on <domain>; otherwise they share an origin.
  * @param {Window} win
@@ -602,15 +537,66 @@ function frameNames(client, win) {
  */
 function ownParent(win) {
 	const shell = win.parent;
-	if (shell === win || shells.has(win)) return;
+	if (shell === win || shells.has(win) || standIns.has(shell)) return;
 	try {
 		void shell[SCRAMJET];
 		return;
 	} catch {
-		// cross-origin parent: the shell
+		// cross-origin parent: the shell, or the page around a frame
+	}
+	// A frame on its own origin (FRAME_ORIGIN), inside a page: its parent is
+	// that page, which it may only message (standInWindow).
+	if (FRAME_ORIGIN && shell !== win.top) {
+		const page = standInWindow(shell, win);
+		aroundFrame.add(win);
+		Object.defineProperty(win, "parent", { get: () => page, set() {}, configurable: true });
+		return;
 	}
 	shells.set(win, shell);
 	Object.defineProperty(win, "parent", { get: () => win, set() {}, configurable: true });
+}
+
+/**
+ * Messages between pages on different origins (a page and a frame of
+ * another site, each on its own: see standInWindow). A message meant for
+ * another origin than this page's real one never reaches its listeners, as
+ * a browser holds it; and the window a message came from, when it's on
+ * another origin, is that window's stand-in, so an answer reaches it.
+ * @param {object} client
+ * @param {Window} win
+ */
+function acrossOrigins(client, win) {
+	if (win.__biosAcross) return;
+	Object.defineProperty(win, "__biosAcross", { value: true });
+	const listen = client.natives?.store?.["EventTarget.prototype.addEventListener"] || win.EventTarget.prototype.addEventListener;
+	listen.call(
+		win,
+		"message",
+		(event) => {
+			const data = event.data;
+			if (!data || typeof data !== "object" || !(MEANT_FOR in data)) return;
+			const meant = data[MEANT_FOR];
+			let own = "null";
+			try {
+				own = client.url.origin;
+			} catch {
+				// between pages
+			}
+			if (meant !== "*" && meant !== own) event.stopImmediatePropagation();
+		},
+		true
+	);
+	const proto = win.MessageEvent?.prototype;
+	const source = proto && Object.getOwnPropertyDescriptor(proto, "source");
+	if (source?.get && source.configurable)
+		Object.defineProperty(proto, "source", {
+			...source,
+			get() {
+				const real = source.get.call(this);
+				// (the app, above everything, answers our own questions as itself)
+				return real && real !== win && real !== win.top && crossOrigin(real) ? standInWindow(real, win) : real;
+			},
+		});
 }
 
 /**
@@ -924,11 +910,20 @@ function noPopups(client, win) {
 			);
 			if (!link) return;
 
+			// <a download>: the file goes to the app's download list (a page
+			// that saves what it made, like an export, often as a data: or
+			// blob: address). Only right after a tap, so a page can't drop
+			// files on anyone by itself.
+			if (link.hasAttribute("download") && !event.defaultPrevented && /^(https?|blob|data):/i.test(link.href)) {
+				event.preventDefault();
+				if (userGesture()) saveLink(link);
+				return;
+			}
+
 			if (!isSafeScheme(link.href)) {
 				event.preventDefault();
 				return;
 			}
-
 			link.removeAttribute("download");
 
 			const target = link.hasAttribute("target")
@@ -946,11 +941,46 @@ function noPopups(client, win) {
 					return;
 				}
 			}
+			// A frame on its own origin can't reach the tab's page: a link
+			// meant for it goes through the app, after a tap.
+			const lower = String(target || "").trim().toLowerCase();
+			// (_parent leaves it only when the parent is the page around the frame)
+			const leaves = lower === "_top" || (lower === "_parent" && aroundFrame.has(win));
+			if (FRAME_ORIGIN && !isTab(win) && leaves) {
+				event.preventDefault();
+				if (userGesture()) {
+					const to = realUrl(link.href);
+					if (/^https?:/.test(to)) win.top.postMessage({ bios: "navigate", url: to }, "*");
+				}
+				return;
+			}
 			const fixed = fixTarget(target);
 			if (fixed) link.setAttribute("target", fixed);
 		},
 		true
 	);
+
+	// The file behind an <a download>, fetched here (through the proxy, so a
+	// blob: the page made is this origin's too) and handed to the app.
+	function saveLink(link) {
+		const fetchHere = client.natives?.store?.fetch;
+		// the address as the browser has it: Scramjet's proxied form
+		const proxied = client.natives.call("Element.prototype.getAttribute", link, "href");
+		if (!fetchHere || !proxied) return;
+		let name = String(link.getAttribute("download") || "").trim();
+		fetchHere
+			.call(win, new URL(proxied, win.location.href).href)
+			.then(async (res) => {
+				if (!res.ok) return;
+				const blob = await res.blob();
+				if (!name) {
+					const real = realUrl(link.href);
+					name = /^https?:/.test(real) ? decodeURIComponent(new URL(real).pathname.split("/").pop() || "") : "";
+				}
+				win.top.postMessage({ bios: "download", name: name || "download", type: blob.type, blob }, "*");
+			})
+			.catch(() => {});
+	}
 
 	// Middle click: open the link in a background tab.
 	win.addEventListener(
@@ -1120,6 +1150,7 @@ function noPopups(client, win) {
 	// anything agreed to unseen.
 	const nativeConfirm = win.confirm;
 	const nativePrompt = win.prompt;
+	realPrint.set(win, win.print);
 	quiet("alert", function () {});
 	quiet("confirm", function (message) {
 		return userGesture() ? nativeConfirm.call(win, message) : false;
@@ -1146,7 +1177,14 @@ function noPopups(client, win) {
 	};
 
 	const nav = win.navigator;
+	// Location, camera and microphone: the app asks the person first (its own
+	// prompt, which a page can't draw or answer), then the browser's own
+	// prompt follows the first time on a phone.
 	if (win.Geolocation) {
+		const proto = win.Geolocation.prototype;
+		const realGet = proto.getCurrentPosition;
+		const realWatch = proto.watchPosition;
+		const realClear = proto.clearWatch;
 		const geoError = (cb) =>
 			typeof cb === "function" &&
 			setTimeout(() =>
@@ -1158,12 +1196,46 @@ function noPopups(client, win) {
 					TIMEOUT: 3,
 				})
 			);
-		patch(win.Geolocation.prototype, "getCurrentPosition", (ok, err) =>
-			geoError(err)
-		);
-		patch(win.Geolocation.prototype, "watchPosition", (ok, err) => {
-			geoError(err);
-			return 0;
+		// "Approximate": about a kilometre, as a phone's own approximate location
+		const blur = (position, approximate) => {
+			if (!approximate) return position;
+			const c = position.coords;
+			const round = (n) => Math.round(n * 100) / 100;
+			const coords = {
+				latitude: round(c.latitude),
+				longitude: round(c.longitude),
+				accuracy: Math.max(c.accuracy || 0, 1500),
+				altitude: null,
+				altitudeAccuracy: null,
+				heading: null,
+				speed: null,
+			};
+			return { coords: { ...coords, toJSON: () => coords }, timestamp: position.timestamp, toJSON: () => ({ coords, timestamp: position.timestamp }) };
+		};
+		const watches = new Map(); // our id -> the browser's, once allowed
+		let nextWatch = 1;
+		patch(proto, "getCurrentPosition", function (ok, err, options) {
+			const geo = this;
+			askApp(win, "location").then((answer) => {
+				if (!answer?.allow) return geoError(err);
+				realGet.call(geo, (position) => typeof ok === "function" && ok(blur(position, answer.approximate)), err, options);
+			});
+		});
+		patch(proto, "watchPosition", function (ok, err, options) {
+			const geo = this;
+			const id = nextWatch++;
+			watches.set(id, null);
+			askApp(win, "location").then((answer) => {
+				if (!watches.has(id)) return;
+				if (!answer?.allow) return geoError(err);
+				watches.set(id, realWatch.call(geo, (position) => typeof ok === "function" && ok(blur(position, answer.approximate)), err, options));
+			});
+			return id;
+		});
+		patch(proto, "clearWatch", function (id) {
+			const real = watches.get(id);
+			watches.delete(id);
+			if (real != null) realClear.call(this, real);
 		});
 	}
 	if (win.Notification) {
@@ -1180,16 +1252,24 @@ function noPopups(client, win) {
 			// ignore
 		}
 	}
-	if (win.MediaDevices)
-		patch(win.MediaDevices.prototype, "getUserMedia", () => denied());
+	if (win.MediaDevices) {
+		const realMedia = win.MediaDevices.prototype.getUserMedia;
+		patch(win.MediaDevices.prototype, "getUserMedia", function (constraints) {
+			const kinds = [constraints?.video && "camera", constraints?.audio && "microphone"].filter(Boolean);
+			if (!kinds.length || !realMedia) return realMedia ? realMedia.call(this, constraints) : denied();
+			const devices = this;
+			return askApp(win, kinds.join("+")).then((answer) =>
+				answer?.allow ? realMedia.call(devices, constraints) : denied("Permission denied")
+			);
+		});
+	}
 	patch(nav, "getUserMedia", (c, ok, err) => err && err(new Error("Blocked")));
 	patch(nav, "webkitGetUserMedia", (c, ok, err) => err && err(new Error("Blocked")));
 	patch(nav, "share", () => denied());
 	patch(nav, "canShare", () => false);
-	if (win.CredentialsContainer) {
-		patch(win.CredentialsContainer.prototype, "get", () => denied());
-		patch(win.CredentialsContainer.prototype, "create", () => denied());
-	}
+	// Passkeys go to the app, which keeps them (logins.js); password and
+	// other stored credentials are refused.
+	passkeys(win, (kind, details) => askApp(win, kind, details), isTab(win));
 	if (win.Clipboard) {
 		// reading the clipboard shows iOS's "Paste" callout
 		patch(win.Clipboard.prototype, "read", () => denied());
@@ -1247,11 +1327,50 @@ function pageShield(client, win) {
 	const setTimer = win.setTimeout.bind(win);
 	const setRepeat = win.setInterval.bind(win);
 
+	// The tab's window (what a site takes for the top), for scripts of ours
+	// that Scramjet doesn't rewrite (consent.js).
+	let tabWin = win;
+	try {
+		while (parentOf(tabWin) !== tabWin && !isTab(tabWin)) tabWin = parentOf(tabWin);
+	} catch {
+		// cross-origin ancestor: this is as high as a page of ours goes
+	}
+	Object.defineProperty(win, "__biosTabWindow", { value: tabWin, configurable: true });
+
 	function whenReady(fn) {
 		if (win.document.readyState === "loading")
 			win.document.addEventListener("DOMContentLoaded", fn, { once: true });
 		else fn();
 	}
+
+	// The service worker borrows a connection to this origin's proxy (bare-mux's
+	// shared worker) from an open page: any page of ours lends one, not only
+	// an anchor frame, so the worker never waits on a page that has gone.
+	// The browser's own SharedWorker and postMessage: Scramjet wraps both.
+	try {
+		const listen = client.natives?.store?.["EventTarget.prototype.addEventListener"];
+		if (client.serviceWorker && listen)
+			listen.call(client.serviceWorker, "message", (event) => {
+				if (event.data?.type !== "getPort" || !event.data.port) return;
+				try {
+					const shared = client.natives.construct("SharedWorker", win.location.origin + "/baremux/worker.js", "bare-mux-worker");
+					client.natives.call("MessagePort.prototype.postMessage", event.data.port, shared.port, [shared.port]);
+				} catch {
+					// another page answers
+				}
+			});
+	} catch {
+		// no service worker here
+	}
+
+	// A frame's own origin tells the app it exists, so clearing site data
+	// reaches it too (the app can't work out which ones there are).
+	if (FRAME_ORIGIN && !isTab(win))
+		try {
+			win.top.postMessage({ bios: "frame-origin" }, "*");
+		} catch {
+			// no app above
+		}
 
 	// Scramjet keeps the fetch it replaced; ours must reach the service
 	// worker, not be sent on to the site.
@@ -1285,12 +1404,23 @@ function hideGenericAds(client, win, nativeFetch, setTimer) {
 	const endpoint = API + "cosmetic";
 	const seenClasses = new Set();
 	const seenIds = new Set();
+	const seenHrefs = new Set();
 	let classes = [];
 	let ids = [];
+	let hrefs = [];
 	let timer = 0;
 	let style = null;
 
 	function note(el) {
+		// a link's real address (Scramjet's getter undoes its rewriting), for
+		// rules that hide links to ad networks
+		if (el.localName === "a" && hrefs.length < 2000) {
+			const href = el.href;
+			if (href && !seenHrefs.has(href)) {
+				seenHrefs.add(href);
+				hrefs.push(href);
+			}
+		}
 		const id = el.id;
 		if (id && typeof id === "string" && !seenIds.has(id)) {
 			seenIds.add(id);
@@ -1310,20 +1440,22 @@ function hideGenericAds(client, win, nativeFetch, setTimer) {
 	function scan(root) {
 		if (!root || root.nodeType !== 1) return;
 		note(root);
-		const found = root.querySelectorAll("[id],[class]");
+		const found = root.querySelectorAll("[id],[class],a[href]");
 		for (let i = 0; i < found.length; i++) note(found[i]);
 	}
 
 	function flush() {
 		timer = 0;
-		if (!classes.length && !ids.length) return;
+		if (!classes.length && !ids.length && !hrefs.length) return;
 		const body = JSON.stringify({
 			url: client.url.href,
 			classes,
 			ids,
+			hrefs,
 		});
 		classes = [];
 		ids = [];
+		hrefs = [];
 		nativeFetch
 			.call(win, endpoint, { method: "POST", body })
 			.then((res) => res.json())
@@ -1442,36 +1574,151 @@ function skipVideoAds(win, setRepeat, whenReady) {
  * (window.find), which selects the next match and scrolls to it. The match
  * also gets a CSS highlight: the selection of a frame that doesn't have the
  * focus (the find bar has it) is drawn faint, and on phones not at all.
- * ponytail: no count of matches, and frames inside the page aren't searched;
- * window.find offers neither.
+ * Every other match gets a fainter one, and the bar says "3 of 12".
+ * ponytail: frames inside the page aren't searched; window.find can't.
  * @param {Window} win
  * @param {string} text Empty to clear the last match.
  * @param {boolean} back The match before instead of the next one.
  * @param {boolean} again Past the current match, rather than from where it began.
- * @returns {boolean} whether a match was found
+ * @returns {{ found: boolean, index: number, total: number }} index counts from 1
  */
 function findInPage(win, text, back, again) {
 	const selection = win.getSelection();
 	const marks = win.CSS?.highlights;
 	marks?.delete("bios-find");
+	marks?.delete("bios-find-all");
 	if (!text) {
 		selection?.removeAllRanges();
-		return false;
+		return { found: false, index: 0, total: 0 };
 	}
 	// a word still being typed matches where the shorter one did, if it can
 	if (!again && selection?.rangeCount) selection.collapseToStart();
 	const found = win.find(text, false, back, true);
-	if (found && marks && selection?.rangeCount) {
+	if (!found || !selection?.rangeCount) return { found, index: 0, total: 0 };
+	const current = selection.getRangeAt(0).cloneRange();
+	const { ranges, index } = allMatches(win, text, current);
+	if (marks) {
 		const doc = win.document;
 		if (!doc.getElementById("bios-find")) {
 			const style = doc.createElement("style");
 			style.id = "bios-find";
-			style.textContent = "::highlight(bios-find){background:#ffd24d;color:#000}";
+			style.textContent =
+				"::highlight(bios-find-all){background:#ffe9a6;color:inherit}::highlight(bios-find){background:#ffb000;color:#000}";
 			(doc.head || doc.documentElement).appendChild(style);
 		}
-		marks.set("bios-find", new win.Highlight(selection.getRangeAt(0).cloneRange()));
+		if (ranges.length) marks.set("bios-find-all", new win.Highlight(...ranges));
+		marks.set("bios-find", new win.Highlight(current));
 	}
-	return found;
+	return { found, index, total: Math.max(ranges.length, 1) };
+}
+
+/**
+ * Every visible match of `text` in the page (up to 1000, ignoring case, also
+ * across element boundaries as window.find matches), and which of them is
+ * `current`, counting from 1.
+ * @param {Window} win
+ * @param {string} text
+ * @param {Range} current
+ */
+function allMatches(win, text, current) {
+	const doc = win.document;
+	const root = doc.body || doc.documentElement;
+	const hidden = new Map();
+	const shown = (el) => {
+		if (!hidden.has(el))
+			hidden.set(el, el.checkVisibility ? !el.checkVisibility({ visibilityProperty: true }) : !el.getClientRects().length);
+		return !hidden.get(el);
+	};
+	const walker = doc.createTreeWalker(root, win.NodeFilter.SHOW_TEXT, {
+		acceptNode(node) {
+			const el = node.parentElement;
+			if (!el || /^(script|style|noscript|template|textarea|select)$/i.test(el.localName) || !shown(el))
+				return win.NodeFilter.FILTER_REJECT;
+			return win.NodeFilter.FILTER_ACCEPT;
+		},
+	});
+	const nodes = [];
+	let full = "";
+	while (walker.nextNode() && full.length < 5_000_000) {
+		nodes.push({ node: walker.currentNode, at: full.length });
+		full += walker.currentNode.data;
+	}
+	// a position in the joined text -> [text node, offset]
+	const locate = (pos) => {
+		let lo = 0;
+		let hi = nodes.length - 1;
+		while (lo < hi) {
+			const mid = (lo + hi + 1) >> 1;
+			if (nodes[mid].at <= pos) lo = mid;
+			else hi = mid - 1;
+		}
+		return [nodes[lo].node, pos - nodes[lo].at];
+	};
+	const haystack = full.toLowerCase();
+	const needle = text.toLowerCase();
+	const ranges = [];
+	let index = 0;
+	for (let pos = haystack.indexOf(needle); pos !== -1 && ranges.length < 1000; pos = haystack.indexOf(needle, pos + needle.length)) {
+		const range = doc.createRange();
+		try {
+			range.setStart(...locate(pos));
+			range.setEnd(...locate(pos + needle.length - 1));
+			range.setEnd(range.endContainer, range.endOffset + 1);
+		} catch {
+			continue;
+		}
+		ranges.push(range);
+		if (!index && range.compareBoundaryPoints(win.Range.START_TO_START, current) >= 0) index = ranges.length;
+	}
+	return { ranges, index: index || ranges.length };
+}
+
+// The page's markup as the page itself sees it (Scramjet's getter undoes its
+// rewriting), for the app's reader view. Capped, so a huge page can't stall it.
+function readerSource(client, win) {
+	const doc = win.document;
+	let html = "";
+	try {
+		html = doc.documentElement.outerHTML;
+	} catch {
+		// the document is gone
+	}
+	return { html: html.length > 5_000_000 ? "" : html, url: client.url.href, title: String(doc.title || "") };
+}
+
+/**
+ * Images for the reader view, fetched here, through the proxy and its ad
+ * blocking, and handed over as data: addresses (the app loads nothing itself).
+ * @param {Function} nativeFetch Scramjet's copy of the browser's fetch
+ * @param {Window} win
+ * @param {string[]} urls real addresses
+ */
+async function readerImages(nativeFetch, win, urls) {
+	const MAX_BYTES = 3 * 1024 * 1024;
+	const out = [];
+	await Promise.all(
+		urls.slice(0, 40).map(async (url) => {
+			try {
+				const target = new URL(url);
+				if (target.protocol !== "http:" && target.protocol !== "https:") return;
+				const res = await nativeFetch.call(win, win.location.origin + "/scramjet/" + encodeURIComponent(target.href));
+				const type = res.headers.get("content-type") || "";
+				if (!res.ok || !/^image\//i.test(type)) return;
+				const blob = await res.blob();
+				if (blob.size > MAX_BYTES) return;
+				const data = await new Promise((resolve, reject) => {
+					const reader = new win.FileReader();
+					reader.onload = () => resolve(reader.result);
+					reader.onerror = reject;
+					reader.readAsDataURL(blob);
+				});
+				if (/^data:image\//i.test(data)) out.push([url, data]);
+			} catch {
+				// left out
+			}
+		})
+	);
+	return out;
 }
 
 /**
@@ -1503,6 +1750,19 @@ function reportToShell(client, win, setRepeat, whenReady) {
 	win.addEventListener("load", send);
 	setRepeat(send, 500);
 
+	// for consent.js: what it answered on this page
+	const tell = (message) => {
+		try {
+			parentOf(win).postMessage(message, target);
+		} catch {
+			// shell gone
+		}
+	};
+	Object.defineProperty(win, "__biosReport", { value: tell, configurable: true });
+	// sign-in forms, for the app's password filling (logins.js)
+	watchLogins(win, tell);
+
+	const nativeFetch = client.natives?.store?.fetch;
 	win.addEventListener("message", (event) => {
 		// Scramjet reports this page's own site as every message's origin, so
 		// check the sender instead: only the shell is the tab's parent, and
@@ -1514,8 +1774,20 @@ function reportToShell(client, win, setRepeat, whenReady) {
 		else if (data.cmd === "forward") win.history.forward();
 		else if (data.cmd === "find") {
 			const text = String(data.text ?? "").slice(0, 200);
-			const found = findInPage(win, text, !!data.back, !!data.again);
-			parentOf(win).postMessage({ bios: "found", text, found }, target);
+			tell({ bios: "found", text, ...findInPage(win, text, !!data.back, !!data.again) });
+		} else if (data.cmd === "zoom") {
+			// the page's own size, as a browser's zoom: text, boxes and images alike
+			const level = Math.min(Math.max(Number(data.level) || 100, 30), 300);
+			win.document.documentElement.style.zoom = level === 100 ? "" : level + "%";
+		} else if (data.cmd === "print") {
+			realPrint.get(win)?.call(win);
+		} else if (data.cmd === "reader") {
+			tell({ bios: "reader-source", ...readerSource(client, win) });
+		} else if (data.cmd === "fill" && typeof data.password === "string") {
+			// the login the person picked in the app, for this page's site
+			fillLogin(win, String(data.username || ""), data.password);
+		} else if (data.cmd === "images" && Array.isArray(data.urls) && nativeFetch) {
+			readerImages(nativeFetch, win, data.urls.map(String)).then((images) => tell({ bios: "images", images }));
 		}
 	});
 }

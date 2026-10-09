@@ -26,9 +26,12 @@ function ours(url) {
 	}
 }
 
-// What a page may use without asking. No prompt UI exists, so camera,
-// microphone, location, notifications and the rest are refused.
+// What a page may use without asking. Notifications and the rest are refused.
 const ALLOWED_PERMISSIONS = new Set(["fullscreen", "clipboard-sanitized-write", "pointerLock"]);
+// What a page may use once the person said yes in the app's own prompt
+// (page.js asks the shell before it calls the browser): location, camera and
+// microphone, for the server's own addresses only.
+const ASKED_PERMISSIONS = new Set(["geolocation", "media"]);
 
 async function lockDown() {
 	const ses = session.defaultSession;
@@ -43,10 +46,16 @@ async function lockDown() {
 	ses.webRequest.onBeforeRequest((details, callback) => {
 		callback({ cancel: /^(https?|wss?):/.test(details.url) && !ours(details.url) });
 	});
-	ses.setPermissionRequestHandler((contents, permission, callback) =>
-		callback(ALLOWED_PERMISSIONS.has(permission))
+	ses.setPermissionRequestHandler((contents, permission, callback, details) =>
+		callback(
+			ALLOWED_PERMISSIONS.has(permission) ||
+				(ASKED_PERMISSIONS.has(permission) && ours(details?.requestingUrl || ""))
+		)
 	);
-	ses.setPermissionCheckHandler((contents, permission) => ALLOWED_PERMISSIONS.has(permission));
+	ses.setPermissionCheckHandler(
+		(contents, permission, requestingOrigin) =>
+			ALLOWED_PERMISSIONS.has(permission) || (ASKED_PERMISSIONS.has(permission) && ours(requestingOrigin))
+	);
 
 	app.on("web-contents-created", (event, contents) => {
 		// WebRTC's UDP goes around the network lock above and would show

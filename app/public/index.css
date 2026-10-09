@@ -976,6 +976,180 @@ body:not(.browsing) #frames {
 	background: rgba(255, 255, 255, 0.55);
 }
 
+/* ------------------------------------------------------------ workspaces */
+
+.ws-dot {
+	flex: none;
+	width: 10px;
+	height: 10px;
+	border-radius: 50%;
+	background: var(--muted);
+}
+
+#ws-btn {
+	flex: none;
+	align-self: center;
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	max-width: 170px;
+	height: 28px;
+	margin-right: 2px;
+	padding: 0 4px 0 9px;
+	border: 0;
+	border-radius: 7px;
+	background: none;
+	color: var(--ink);
+	font-size: 12.5px;
+	font-weight: 600;
+}
+
+#ws-btn:hover {
+	background: rgba(0, 0, 0, 0.06);
+}
+
+#ws-name {
+	min-width: 0;
+	overflow: hidden;
+	white-space: nowrap;
+	text-overflow: ellipsis;
+}
+
+#ws-btn svg {
+	flex: none;
+	width: 14px;
+	height: 14px;
+	color: var(--muted);
+}
+
+/* desktop: drops from the workspace button, at the left */
+@media (min-width: 720px) {
+	#workspaces.panel {
+		justify-content: flex-start;
+		padding-top: calc(var(--safe-top) + var(--tab-h) + 4px);
+	}
+}
+
+.links .ws-dot {
+	width: 12px;
+	height: 12px;
+	margin: 0 6px;
+}
+
+/* phones: the workspaces as chips above the tab list, wrapping so the new
+   and edit chips stay in sight */
+#ws-chips {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	margin-bottom: 4px;
+	padding: 2px 0 8px;
+}
+
+.ws-chip {
+	flex: none;
+	display: inline-flex;
+	align-items: center;
+	gap: 7px;
+	min-height: 38px;
+	padding: 0 14px 0 12px;
+	border: 1px solid var(--line);
+	border-radius: 999px;
+	background: var(--toolbar);
+	color: var(--ink);
+	font-size: 14px;
+}
+
+.ws-chip-name {
+	max-width: 140px;
+	overflow: hidden;
+	white-space: nowrap;
+	text-overflow: ellipsis;
+}
+
+.ws-chip small {
+	color: var(--muted);
+	font: 600 12px/1 var(--mono);
+}
+
+.ws-chip[aria-pressed="true"] {
+	border-color: var(--ink);
+	background: var(--ink);
+	color: #fff;
+}
+
+.ws-chip[aria-pressed="true"] small {
+	color: rgba(255, 255, 255, 0.7);
+}
+
+.ws-chip.ws-icon {
+	justify-content: center;
+	width: 38px;
+	padding: 0;
+	color: var(--muted);
+}
+
+.ws-chip .glyph,
+.ws-chip .glyph svg {
+	display: block;
+	width: 16px;
+	height: 16px;
+}
+
+/* renaming and recoloring, in place of the workspace's row */
+.links li.ws-edit form {
+	flex: 1;
+	display: grid;
+	gap: 12px;
+	padding: 12px 0;
+}
+
+.ws-edit input[type="text"] {
+	width: 100%;
+	min-height: 40px;
+	padding: 0 10px;
+	border: 1px solid var(--line);
+	border-radius: 9px;
+	background: var(--surface);
+	color: var(--ink);
+	/* under 16px, iOS zooms in on focus */
+	font-size: 16px;
+}
+
+.ws-colors {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 12px;
+	padding: 0 2px;
+}
+
+.ws-swatch {
+	width: 30px;
+	height: 30px;
+	padding: 0;
+	border: 0;
+	border-radius: 50%;
+}
+
+.ws-swatch[aria-checked="true"] {
+	box-shadow:
+		0 0 0 2px var(--surface),
+		0 0 0 4px var(--ink);
+}
+
+.panel .ws-edit .tools {
+	margin-top: 0;
+}
+
+.panel .tools button.danger {
+	color: var(--danger);
+}
+
+.panel .tools button:disabled {
+	opacity: 0.5;
+	cursor: default;
+}
+
 /* ------------------------------------------------------------ suggestions */
 
 #suggest {
@@ -1061,6 +1235,7 @@ body:not(.browsing) #frames {
 /* a touch screen leaves :hover on the last thing tapped */
 @media (hover: none) {
 	.icon-btn:hover,
+	#ws-btn:hover,
 	.tab:hover,
 	.tab-close:hover,
 	.tile:hover,
@@ -1141,6 +1316,8 @@ body:not(.browsing) #frames {
 		height: 22px;
 		padding: 0 3px;
 		border: 2px solid currentColor;
+		/* the workspace's color, once there's more than one */
+		border-color: var(--ws, currentColor);
 		border-radius: 6px;
 		font: 700 11px/1 var(--mono);
 	}
@@ -1241,4 +1418,396 @@ body:not(.browsing) #frames {
 /* in the background: nothing for the phone's app switcher preview to show */
 body.away > * {
 	visibility: hidden;
+}
+
+/* ------------------------------------------------------------ page tools */
+
+.panel .tools {
+	display: grid;
+	grid-template-columns: repeat(2, 1fr);
+	gap: 8px;
+	margin-top: 10px;
+}
+
+.panel .tools[hidden] {
+	display: none;
+}
+
+.panel .tools button {
+	min-height: 40px;
+	border: 1px solid var(--line);
+	border-radius: 9px;
+	background: var(--toolbar);
+	color: var(--ink);
+	font-weight: 500;
+}
+
+.panel .stepper {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+}
+
+.panel .stepper button {
+	width: 34px;
+	height: 32px;
+	border: 1px solid var(--line);
+	border-radius: 7px;
+	background: var(--surface);
+	color: var(--ink);
+	font-size: 18px;
+	line-height: 1;
+}
+
+.panel .stepper output {
+	min-width: 48px;
+	text-align: center;
+	font: 500 13px var(--mono);
+}
+
+/* ------------------------------------------------------------ reader view */
+
+#reader.panel {
+	align-items: stretch;
+	justify-content: center;
+	padding: 0;
+	background: var(--bg);
+}
+
+#reader .panel-card {
+	width: 100%;
+	max-width: 720px;
+	max-height: none;
+	height: 100%;
+	padding: calc(16px + var(--safe-top)) 20px calc(32px + var(--safe-bottom));
+	border: 0;
+	border-radius: 0;
+	box-shadow: none;
+	background: var(--bg);
+}
+
+#reader-title {
+	margin: 4px 0;
+	font-size: 22px;
+	line-height: 1.25;
+	word-break: normal;
+}
+
+#reader-article {
+	color: var(--text);
+	font: 18px/1.65 Georgia, "Iowan Old Style", "Times New Roman", serif;
+	overflow-wrap: break-word;
+}
+
+#reader-article img {
+	display: block;
+	max-width: 100%;
+	height: auto;
+	margin: 12px auto;
+	border-radius: 6px;
+}
+
+#reader-article img:not([src]) {
+	min-height: 40px;
+	background: var(--field);
+}
+
+#reader-article a[data-href] {
+	color: var(--ink);
+	text-decoration: underline;
+	cursor: pointer;
+}
+
+#reader-article pre,
+#reader-article code {
+	font: 14px/1.5 var(--mono);
+	white-space: pre-wrap;
+}
+
+#reader-article blockquote {
+	margin: 12px 0;
+	padding-left: 14px;
+	border-left: 3px solid var(--line);
+	color: var(--muted);
+}
+
+#reader-article table {
+	display: block;
+	max-width: 100%;
+	overflow-x: auto;
+	border-collapse: collapse;
+}
+
+/* ------------------------------------------------------------ downloads and the toast */
+
+.links .row-actions {
+	display: flex;
+	flex: none;
+	gap: 6px;
+}
+
+.links .row-actions button {
+	min-height: 32px;
+	padding: 0 10px;
+	border: 1px solid var(--line);
+	border-radius: 7px;
+	background: var(--surface);
+	color: var(--ink);
+	font-size: 13px;
+}
+
+#toast {
+	position: fixed;
+	left: 50%;
+	bottom: calc(16px + var(--safe-bottom) + var(--dock-h, 0px));
+	z-index: 20;
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	max-width: min(520px, calc(100% - 24px));
+	padding: 10px 12px 10px 16px;
+	transform: translateX(-50%);
+	border-radius: 12px;
+	background: var(--ink);
+	color: #fff;
+	font-size: 14px;
+	box-shadow: 0 8px 30px rgba(0, 0, 0, 0.2);
+}
+
+#toast[hidden] {
+	display: none;
+}
+
+#toast-text {
+	min-width: 0;
+	overflow: hidden;
+	white-space: nowrap;
+	text-overflow: ellipsis;
+}
+
+#toast-action {
+	flex: none;
+	border: 0;
+	background: none;
+	color: #fff;
+	font-weight: 600;
+	text-decoration: underline;
+}
+
+#toast-action:empty {
+	display: none;
+}
+
+/* ------------------------------------------------------------ certificate */
+
+.panel .text-btn {
+	margin-top: 4px;
+	padding: 0;
+	border: 0;
+	background: none;
+	color: var(--ink);
+	font-size: 12.5px;
+	text-decoration: underline;
+}
+
+.panel .text-btn[hidden] {
+	display: none;
+}
+
+.facts {
+	margin: 10px 0 0;
+	font-size: 13.5px;
+}
+
+.facts dt {
+	margin-top: 10px;
+	color: var(--muted);
+	font-size: 11.5px;
+	font-weight: 600;
+	letter-spacing: 0.05em;
+	text-transform: uppercase;
+}
+
+.facts dd {
+	margin: 2px 0 0;
+	color: var(--ink);
+	overflow-wrap: anywhere;
+}
+
+.facts dd.mono {
+	font: 12px/1.5 var(--mono);
+}
+
+/* ------------------------------------------------------------ the app's own prompts */
+
+#ask.panel {
+	z-index: 15;
+	align-items: center;
+	justify-content: center;
+	padding: 16px;
+	background: rgba(20, 19, 18, 0.35);
+}
+
+#ask .panel-card {
+	max-width: 380px;
+	border: 1px solid var(--line);
+	border-radius: 14px;
+}
+
+#ask #ask-title {
+	word-break: normal;
+}
+
+#ask-allow {
+	background: var(--ink) !important;
+	color: #fff !important;
+}
+
+/* ------------------------------------------------------------ passwords */
+
+#key-btn {
+	display: grid;
+	place-items: center;
+	flex: none;
+	width: 30px;
+	height: 30px;
+	margin-right: 2px;
+	border: 0;
+	border-radius: 7px;
+	background: none;
+	color: var(--ink);
+}
+
+#key-btn[hidden] {
+	display: none;
+}
+
+#key-btn svg {
+	width: 17px;
+	height: 17px;
+}
+
+#choice.panel {
+	z-index: 15;
+	align-items: center;
+	justify-content: center;
+	padding: 16px;
+	background: rgba(20, 19, 18, 0.35);
+}
+
+#choice .panel-card {
+	max-width: 400px;
+	border: 1px solid var(--line);
+	border-radius: 14px;
+}
+
+#choice-ok:not([hidden]) {
+	background: var(--ink) !important;
+	color: #fff !important;
+}
+
+#choice-ok[hidden] {
+	display: none;
+}
+
+#offer {
+	position: fixed;
+	left: 50%;
+	bottom: calc(16px + var(--safe-bottom) + var(--dock-h, 0px));
+	z-index: 21;
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 8px 12px;
+	width: min(520px, calc(100% - 24px));
+	padding: 12px 14px;
+	transform: translateX(-50%);
+	border: 1px solid var(--line);
+	border-radius: 12px;
+	background: var(--surface);
+	color: var(--ink);
+	font-size: 14px;
+	box-shadow: 0 8px 30px rgba(0, 0, 0, 0.16);
+}
+
+#offer[hidden] {
+	display: none;
+}
+
+#offer .offer-actions {
+	display: flex;
+	gap: 8px;
+	margin-left: auto;
+}
+
+#offer button {
+	min-height: 32px;
+	padding: 0 12px;
+	border: 1px solid var(--line);
+	border-radius: 8px;
+	background: var(--toolbar);
+	color: var(--ink);
+}
+
+#offer button.primary {
+	border-color: var(--ink);
+	background: var(--ink);
+	color: #fff;
+}
+
+.links .secret {
+	font-family: var(--mono);
+	font-size: 12.5px;
+}
+
+/* ------------------------------------------------------------ sync */
+
+.sync-code {
+	margin: 14px 0 4px;
+	padding: 12px;
+	border-radius: 10px;
+	background: var(--field);
+	color: var(--ink);
+	font: 600 22px/1.2 var(--mono);
+	letter-spacing: 0.06em;
+	text-align: center;
+	user-select: all;
+}
+
+.sync-code[hidden],
+#sync-form[hidden] {
+	display: none;
+}
+
+#sync-input {
+	width: 100%;
+	min-height: 44px;
+	margin-top: 12px;
+	padding: 0 10px;
+	border: 1px solid var(--line);
+	border-radius: 9px;
+	background: var(--surface);
+	color: var(--ink);
+	font: 16px var(--mono);
+	text-transform: uppercase;
+}
+
+/* ------------------------------------------------------------ Tor tabs */
+
+.tab.tor {
+	box-shadow: inset 0 -2px 0 #7d4698;
+}
+
+.tab.tor .tab-title::before {
+	content: "Tor · ";
+	color: #7d4698;
+	font-weight: 600;
+}
+
+body.tor #bar-form {
+	box-shadow: inset 0 0 0 1.5px #7d4698;
+}
+
+body.tor #site-btn {
+	color: #7d4698;
 }

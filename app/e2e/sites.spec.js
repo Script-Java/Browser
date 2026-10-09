@@ -4,7 +4,7 @@
 // The browser never sees the real requests, so the proxy has to get these right.
 
 import { expect, test } from "./fixtures.js";
-import { ECHO, bodyText, follow, open, received, testPage } from "./fixtures.js";
+import { ECHO, bodyText, follow, open, received, tabFrame, testPage } from "./fixtures.js";
 import { ISOLATED_URL } from "./env.js";
 
 async function openIsolated(page) {
@@ -132,4 +132,53 @@ test("a site that forbids framing stays out of other pages' frames", async ({ ap
 	// opened as a tab, a page with such a rule loads as usual
 	const tab = await open(app, frames.deny);
 	await expect(tab.locator("body")).toContainText("FRAMED-CONTENT");
+});
+
+// The site's own subdomain in isolation mode, worked out as an attacker's
+// page could (it's a hash of the site's name).
+const originOf = (page, url) =>
+	page.evaluate(async (u) => originFor(await BiosSiteKey.siteKey(new URL(u).hostname)), url);
+
+test("a form posted to a site not opened before keeps its fields (isolated)", async ({ page }) => {
+	await openIsolated(page);
+	// no visit to the echo site first: its origin has no service worker yet
+	await open(
+		page,
+		testPage(`<!doctype html><title>posts</title>
+<form id="form" method="post" action="${ECHO}/post"><input name="kept" value="yes"><input name="also" value="2"></form>`)
+	);
+	const frame = await follow(page, "form", ECHO + "/post");
+	expect(JSON.parse(await bodyText(frame)).form).toEqual({ kept: ["yes"], also: ["2"] });
+});
+
+test("only the app's own navigations count as the person's (isolated)", async ({ page }) => {
+	await openIsolated(page);
+	const cookies = ["strict=1; SameSite=Strict", "lax=1; SameSite=Lax"];
+	await open(page, `${ECHO}/response-headers?${cookies.map((c) => "Set-Cookie=" + encodeURIComponent(c)).join("&")}`);
+	// typed: the site's own visitor, with every cookie
+	let headers = received(await bodyText(await open(page, ECHO + "/headers")));
+	expect(headers["sec-fetch-site"]).toBe("none");
+	expect(headers.cookie).toContain("strict=1");
+
+	// A page that gets around the proxy's hooks sends the tab straight to the
+	// site's own origin, without a referrer: another site's request.
+	const target = (await originOf(page, ECHO)) + "/scramjet/" + encodeURIComponent(ECHO + "/headers?forged=1");
+	const frame = await open(page, testPage(`<!doctype html><title>forger</title><meta name="referrer" content="no-referrer">`));
+	await frame.evaluate((u) => (window.location.href = u), target);
+	await page.waitForFunction(() => active.url.includes("forged=1") && !active.loading);
+	headers = received(await bodyText(await tabFrame(page)));
+	expect(headers["sec-fetch-site"]).toBe("cross-site");
+	expect(headers.cookie || "").not.toContain("strict=1");
+});
+
+test("a tab a page opened arrives as that page's request (isolated)", async ({ page }) => {
+	await openIsolated(page);
+	await open(page, ECHO + "/get");
+	const frame = await open(page, testPage(`<!doctype html><title>opener</title><a id="out" target="_blank" href="${ECHO}/headers">new tab</a>`));
+	await frame.click("#out");
+	await page.waitForFunction((u) => tabs.length === 2 && active.url === u && !active.loading, ECHO + "/headers");
+	const headers = received(await bodyText(await tabFrame(page)));
+	expect(headers["sec-fetch-site"]).toBe("cross-site");
+	// the opening page's site, not its address
+	expect(headers.referer).toBe("https://httpbin.org/");
 });

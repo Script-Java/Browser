@@ -29,7 +29,7 @@ jobs:
   # The proxy reaches real sites, so this needs the internet.
   e2e:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -40,6 +40,8 @@ jobs:
           node-version: 22
       - run: pnpm -C app install --frozen-lockfile
       - run: pnpm -C app exec playwright install --with-deps chromium webkit
+      # Tor, for the Tor tab test (it's skipped where the server can't run Tor)
+      - run: sudo apt-get update && sudo apt-get install -y tor
       - run: pnpm -C app e2e
       - uses: actions/upload-artifact@v4
         if: failure()

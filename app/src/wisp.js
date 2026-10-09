@@ -35,11 +35,23 @@ async function publicLookup(hostname) {
 	return allowed[0].address;
 }
 
+// Web traffic only, so the server can't be used for mail spam, port scans
+// or UDP floods: the web's two ports, and the ports web servers commonly use
+// besides (EXTRA_PORTS, comma-separated, replaces those; "none" for none).
+const DEFAULT_EXTRA_PORTS = [8080, 8443, 8000, 8888];
+export const WEB_PORTS = [
+	80,
+	443,
+	...(process.env.EXTRA_PORTS === undefined
+		? DEFAULT_EXTRA_PORTS
+		: process.env.EXTRA_PORTS.split(",")
+				.map((port) => Number(port.trim()))
+				// never the ports mail and remote logins use
+				.filter((port) => Number.isInteger(port) && port > 1024 && port < 65536)),
+];
+
 Object.assign(wisp.options, {
-	// Web traffic only, so the server can't be used for mail spam, port scans
-	// or UDP floods.
-	// ponytail: sites on other ports (e.g. :8080) won't load; extend the list if that matters.
-	port_whitelist: [80, 443],
+	port_whitelist: WEB_PORTS,
 	allow_udp_streams: false,
 	allow_private_ips: false,
 	allow_loopback_ips: false,

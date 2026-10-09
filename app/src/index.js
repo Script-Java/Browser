@@ -3,6 +3,7 @@ import { tmpdir, hostname } from "node:os";
 import { createServer } from "node:http";
 import { readFile, readdir } from "node:fs/promises";
 import { createHash, createHmac } from "node:crypto";
+import { gzipSync } from "node:zlib";
 import express from "express";
 import { routeRequest } from "./wisp.js";
 import { build } from "esbuild";
@@ -14,6 +15,11 @@ import { scramjetPath } from "@mercuryworkshop/scramjet/path";
 import { CHALLENGE_BITS, createAuth, parseCookies, seal, unseal } from "./auth.js";
 import { Filters } from "./filters.js";
 import { serveMedia } from "./media.js";
+import { canonicalNames, lookupable } from "./cname.js";
+import { certificateOf } from "./certs.js";
+import * as sync from "./sync.js";
+import { startTor, torAgent, torSocket, torStatus } from "./tor.js";
+import { WebRisk } from "./webrisk.js";
 import { clientKey, createLimits } from "./limits.js";
 import { DEFAULT_SETTINGS, cleanSettings } from "./settings.js";
 
@@ -63,9 +69,14 @@ const limits = createLimits({
 	totalDailyBytes: Number(process.env.DAILY_GB_TOTAL || 50) * 1024 ** 3,
 });
 
+// Optional: Google Web Risk, checked privately (webrisk.js), for threats
+// fresher than the free lists' half-hourly updates.
+const webRisk = process.env.WEB_RISK_API_KEY ? new WebRisk({ key: process.env.WEB_RISK_API_KEY }) : null;
+
 const filters = new Filters({
 	cacheDir: process.env.FILTER_CACHE_DIR || resolve(tmpdir(), "browser-ios-filters"),
 	refreshHours: Number(process.env.FILTER_REFRESH_HOURS) || 24,
+	threatMinutes: Number(process.env.THREAT_REFRESH_MINUTES) || 30,
 });
 
 // ----------------------------------------------------------------- helpers
@@ -76,6 +87,12 @@ function hostOf(req) {
 		.replace(/:\d+$/, "");
 }
 
+// A site origin's label: "s<key>" for a site, "t<key>" for a site in a Tor
+// tab, "f<key>" for a frame from another site inside a page, "g<key>" for one
+// in a Tor tab (src/client/sitekey.js).
+const SITE_LABEL = /^[stfg][a-z2-7]{25}$/;
+const viaTor = (label) => /^[tg]/.test(label);
+
 // "shell": the app itself. "site": an isolated site origin. "stray": any other
 // name under ISOLATION_DOMAIN (www, typos), which only redirects to the app.
 // In shared mode (no ISOLATION_DOMAIN, or reached through another address)
@@ -84,8 +101,11 @@ function hostKind(req) {
 	if (!ISOLATION) return "shell";
 	const host = hostOf(req);
 	if (!host.endsWith("." + ISOLATION)) return "shell";
-	return /^s[a-z2-7]{25}$/.test(host.slice(0, -ISOLATION.length - 1)) ? "site" : "stray";
+	return SITE_LABEL.test(host.slice(0, -ISOLATION.length - 1)) ? "site" : "stray";
 }
+
+// The label of a site origin request's host, or "".
+const labelOf = (req) => (hostKind(req) === "site" ? hostOf(req).slice(0, -ISOLATION.length - 1) : "");
 
 function cookieDomain(req) {
 	const host = hostOf(req);
@@ -139,7 +159,10 @@ function fromShell(req) {
 
 // ------------------------------------------------------------------ bundles
 
-async function bundle(entry, globalName) {
+// `auth`: whether the shield menu offers Lock (only useful with a password).
+const clientConfig = JSON.stringify({ isolation: ISOLATION || null, auth: auth.mode === "password" });
+
+async function bundle(entry, globalName, define) {
 	const result = await build({
 		entryPoints: [resolve(import.meta.dirname, entry)],
 		bundle: true,
@@ -148,19 +171,54 @@ async function bundle(entry, globalName) {
 		minify: true,
 		write: false,
 		target: ["safari15"],
-		legalComments: "none",
+		// keeps the notices the open-source libraries bundled here ask for
+		legalComments: "inline",
+		define,
 	});
 	return result.outputFiles[0].text;
 }
+
+// consent.js runs in a proxied page without Scramjet rewriting it: its
+// library's `location`, `top` and `parent` are the page's, not the proxy's
+// (see consent.js).
+const PAGE_VIEW = {
+	location: "self.__biosLocation",
+	"window.location": "self.__biosLocation",
+	"globalThis.location": "self.__biosLocation",
+	"document.location": "self.__biosLocation",
+	"window.top": "self.__biosTop",
+	"window.parent": "self.__biosParent",
+};
 
 const bundles = Promise.all([
 	bundle("sw/shield.js", "BiosShield"),
 	bundle("client/sitekey.js", "BiosSiteKey"),
 	bundle("client/page.js"),
-]).then(([shield, sitekey, page]) => ({ shield, sitekey, page }));
+	bundle("client/consent.js", undefined, PAGE_VIEW),
+	bundle("client/reader.js", "BiosReader"),
+	bundle("client/worker.js", undefined, { __BIOS_LEVEL__: '"standard"' }),
+	bundle("client/worker.js", undefined, { __BIOS_LEVEL__: '"safer"' }),
+]).then(([shield, sitekey, page, consent, reader, worker, workerSafer]) => {
+	// the service worker's and the page's carry the server's settings
+	const withConfig = (text) => `self.__biosConfig = ${clientConfig};\n${text}`;
+	const texts = { shield: withConfig(shield), page: withConfig(page), sitekey, consent, reader, worker, workerSafer };
+	// with a gzipped copy of each: the bigger ones carry whole libraries
+	return Object.fromEntries(Object.entries(texts).map(([name, text]) => [name, { text, gzip: gzipSync(text) }]));
+});
 
-// `auth`: whether the shield menu offers Lock (only useful with a password).
-const clientConfig = JSON.stringify({ isolation: ISOLATION || null, auth: auth.mode === "password" });
+function sendBundle(name) {
+	return async (req, res) => {
+		res.type("text/javascript").setHeader("Cache-Control", "no-cache");
+		res.vary("Accept-Encoding");
+		const { text, gzip } = (await bundles)[name];
+		if (/\bgzip\b/.test(req.headers["accept-encoding"] || "")) {
+			res.setHeader("Content-Encoding", "gzip");
+			return res.end(gzip);
+		}
+		res.send(text);
+	};
+}
+
 
 // -------------------------------------------------------------------- app
 
@@ -182,8 +240,13 @@ for (const name of (await readdir(publicPath)).filter((n) => n.endsWith(".html")
 }
 
 const portOf = (req) => String(req.headers.host || "").match(/:\d+$/)?.[0] || "";
+// The app frames its own pages; a frame's own origin (f…, g…, see
+// shield.js inFrame) is framed by the site origins of the pages it's in,
+// all of them inside the app (the rule holds for every window above).
 const framing = (req) =>
-	"frame-ancestors 'self'" + (ISOLATION ? ` ${req.protocol}://${ISOLATION}${portOf(req)}` : "");
+	/^[fg]/.test(labelOf(req))
+		? `frame-ancestors ${req.protocol}://${ISOLATION}${portOf(req)} ${req.protocol}://*.${ISOLATION}${portOf(req)}`
+		: "frame-ancestors 'self'" + (ISOLATION ? ` ${req.protocol}://${ISOLATION}${portOf(req)}` : "");
 
 function pageCsp(req) {
 	// isolation: the shell frames every site's own subdomain
@@ -223,8 +286,13 @@ app.use((req, res, next) => {
 	res.setHeader("Referrer-Policy", "same-origin");
 	res.setHeader("X-Content-Type-Options", "nosniff");
 	// No page, the app's or a site's inside it, gets these. page.js refuses
-	// them too, but this is the browser's own rule.
-	res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=(), display-capture=()");
+	// them too, but this is the browser's own rule. Location, camera and
+	// microphone go to a tab only through the app's own prompt (page.js asks
+	// it); the app hands them to its tab frames (index.js, frame.allow).
+	res.setHeader(
+		"Permissions-Policy",
+		"camera=*, microphone=*, geolocation=*, payment=(), usb=(), display-capture=(), serial=(), hid=()"
+	);
 	// keeps the proxy out of search results
 	res.setHeader("X-Robots-Tag", "noindex, nofollow");
 	// Only the app frames its own pages (tabs, anchors, wipers), so another
@@ -243,7 +311,7 @@ app.use((req, res, next) => {
 
 // Site origins only serve what the proxy needs, never the shell: if the shell
 // ran on a site origin, that site could reach into it.
-const SITE_PATHS = /^\/(scramjet\/|scram\/|bios\/(shield|page)\.js$|baremux\/|epoxy\/|filters\/|scramjet-sw\.js$|register-sw\.js$|wipe\.html$|anchor\.html$)/;
+const SITE_PATHS = /^\/(scramjet\/|scram\/|bios\/(shield|page|consent|worker|worker-safer)\.js$|baremux\/|epoxy\/|filters\/|scramjet-sw\.js$|register-sw\.js$|wipe\.html$|anchor\.html$)/;
 app.use((req, res, next) => {
 	const kind = hostKind(req);
 	if (kind === "stray" || (kind === "site" && !SITE_PATHS.test(req.path))) {
@@ -294,48 +362,42 @@ function siteCors(req, res, next) {
 	} catch {
 		// no Origin, or a malformed one
 	}
-	if (/^s[a-z2-7]{25}$/.test(label)) {
+	if (SITE_LABEL.test(label)) {
 		res.setHeader("Access-Control-Allow-Origin", req.headers.origin);
 		res.setHeader("Access-Control-Allow-Credentials", "true");
 		if (req.method === "OPTIONS") {
-			res.setHeader("Access-Control-Allow-Headers", "x-bios-host, if-none-match");
+			res.setHeader("Access-Control-Allow-Headers", "x-bios-host, x-bios-port, if-none-match");
 			res.setHeader("Access-Control-Max-Age", "86400");
 			return res.status(204).end();
 		}
 	}
 	next();
 }
-app.use(["/filters/engine.bin", "/filters/notices.bin", "/api/nav", "/api/settings"], siteCors);
+app.use(["/filters/engine.bin", "/filters/notices.bin", "/filters/privacy.json", "/api/nav", "/api/settings", "/api/cname", "/api/cert"], siteCors);
 
 app.use(auth.gate);
 
 // Server settings for the shell, the service worker and every proxied page.
-const withConfig = (source) => `self.__biosConfig = ${clientConfig};\n${source}`;
 app.get("/bios/config.js", (req, res) => {
 	res.type("text/javascript").setHeader("Cache-Control", "no-cache");
-	res.send(withConfig(""));
+	res.send(`self.__biosConfig = ${clientConfig};\n`);
 });
-app.get("/bios/shield.js", async (req, res) => {
-	res.type("text/javascript").setHeader("Cache-Control", "no-cache");
-	res.send(withConfig((await bundles).shield));
-});
-app.get("/bios/page.js", async (req, res) => {
-	res.type("text/javascript").setHeader("Cache-Control", "no-cache");
-	res.send(withConfig((await bundles).page));
-});
-app.get("/sitekey.js", async (req, res) => {
-	res.type("text/javascript").setHeader("Cache-Control", "no-cache");
-	res.send((await bundles).sitekey);
-});
+app.get("/bios/shield.js", sendBundle("shield"));
+app.get("/bios/page.js", sendBundle("page"));
+app.get("/bios/consent.js", sendBundle("consent"));
+app.get("/bios/reader.js", sendBundle("reader"));
+app.get("/bios/worker.js", sendBundle("worker"));
+app.get("/bios/worker-safer.js", sendBundle("workerSafer"));
+app.get("/sitekey.js", sendBundle("sitekey"));
 
-const serveEngine = (pick) => (req, res) => {
+const serveEngine = (pick, type = "application/octet-stream") => (req, res) => {
 	res.vary("Accept-Encoding");
 	const engine = pick();
 	if (!engine) return res.status(503).setHeader("Retry-After", "60").end();
 	res.setHeader("ETag", engine.etag);
 	res.setHeader("Cache-Control", "no-cache");
 	if (req.headers["if-none-match"] === engine.etag) return res.status(304).end();
-	res.type("application/octet-stream");
+	res.type(type);
 	if (/\bgzip\b/.test(req.headers["accept-encoding"] || "")) {
 		res.setHeader("Content-Encoding", "gzip");
 		return res.end(engine.gzip);
@@ -345,10 +407,12 @@ const serveEngine = (pick) => (req, res) => {
 app.get("/filters/engine.bin", serveEngine(() => filters.engine));
 // the cookie-notice lists, for service workers of people who switched them on
 app.get("/filters/notices.bin", serveEngine(() => filters.notices));
+// Brave's navigation-tracking rules (privacyrules.js)
+app.get("/filters/privacy.json", serveEngine(() => filters.privacy, "application/json"));
 
 app.get("/filters/status", (req, res) => {
 	res.setHeader("Cache-Control", "no-store");
-	res.json(filters.status());
+	res.json({ ...filters.status(), webRiskAt: webRisk?.updatedAt || null });
 });
 
 app.get("/api/settings", (req, res) => {
@@ -377,10 +441,60 @@ app.post("/api/settings", express.json({ limit: "16kb" }), (req, res) => {
 
 // The service worker calls this once per page load. The site's hostname comes
 // in a header, not the URL, so it never shows up in the host's request logs.
-app.get("/api/nav", (req, res) => {
+app.get("/api/nav", async (req, res) => {
 	res.setHeader("Cache-Control", "no-store");
 	const host = String(req.headers["x-bios-host"] || "");
-	res.json({ settings: readSettings(req), threat: host ? filters.threat(host) : null });
+	let threat = host ? filters.threat(host) : null;
+	if (host && !threat && webRisk) threat = await webRisk.check(host).catch(() => null);
+	res.json({ settings: readSettings(req), threat });
+});
+
+// What a site's subdomain is an alias of (CNAME uncloaking, see cname.js).
+// The name comes in a header, like /api/nav's, so it stays out of request logs.
+// Whether Tor tabs can be opened here (tor.js): Tor running, and site
+// isolation for their origins.
+app.get("/api/tor", (req, res) => {
+	res.setHeader("Cache-Control", "no-store");
+	const status = torStatus();
+	res.json({ ...status, available: status.available && !!ISOLATION });
+});
+
+app.get("/api/cname", async (req, res) => {
+	res.setHeader("Cache-Control", "no-store");
+	const host = String(req.headers["x-bios-host"] || "").toLowerCase();
+	res.json({ names: lookupable(host) ? await canonicalNames(host) : [] });
+});
+
+// A site's certificate as the server sees it, and whether it's revoked
+// (certs.js): for the service worker's check and the app's certificate viewer.
+app.get("/api/cert", async (req, res) => {
+	res.setHeader("Cache-Control", "no-store");
+	const host = String(req.headers["x-bios-host"] || "").toLowerCase();
+	const port = Number(req.headers["x-bios-port"] || 443);
+	if (!lookupable(host)) return res.status(400).json({ error: "not a site name" });
+	try {
+		res.json(await certificateOf(host, port));
+	} catch (err) {
+		res.status(502).json({ error: String(err.message || err) });
+	}
+});
+
+// Sync between two of the person's devices (sync.js): a relay in memory for
+// two sealed boxes, under names only the two devices can work out. Only the
+// app itself may use it.
+app.put("/api/sync/:channel", express.text({ limit: "5mb", type: "*/*" }), (req, res) => {
+	res.setHeader("Cache-Control", "no-store");
+	if (!fromShell(req)) return res.status(403).json({ error: "forbidden" });
+	const error = sync.put(req.params.channel, req.body, clientKey(req));
+	if (error) return res.status(error === "bad box" || error === "bad channel" ? 400 : 429).json({ error });
+	res.status(204).end();
+});
+app.get("/api/sync/:channel", (req, res) => {
+	res.setHeader("Cache-Control", "no-store");
+	if (!fromShell(req)) return res.status(403).json({ error: "forbidden" });
+	const box = sync.take(req.params.channel);
+	if (!box) return res.status(404).end();
+	res.type("text/plain").send(box);
 });
 
 app.use(express.static(publicPath, staticOptions));
@@ -413,7 +527,11 @@ app.all("/scramjet/{*rest}", async (req, res) => {
 				limits.addBytes(key, n);
 				if (limits.overQuota(key)) res.destroy();
 			};
-			if (await serveMedia(req, res, count)) return;
+			// a Tor tab's video goes through Tor too, or not at all
+			const label = labelOf(req);
+			const agent = viaTor(label) ? torAgent(label) : undefined;
+			if (viaTor(label) && !agent) return res.status(503).type("text/plain").send("Tor isn't ready.");
+			if (await serveMedia(req, res, count, agent)) return;
 		} catch (err) {
 			console.warn("media:", err.message);
 			if (!res.headersSent) return res.status(502).end();
@@ -434,15 +552,25 @@ app.use((req, res) => {
 const server = createServer(app);
 
 server.on("upgrade", (req, socket, head) => {
-	if (!req.url.endsWith("/wisp/") || !auth.isAuthed(req) || hostKind(req) === "stray") {
+	const path = new URL(req.url, "http://x").pathname;
+	const label = labelOf(req);
+	// A Tor tab's site connects through Tor, and only through it; every
+	// other origin, never.
+	const tor = path === "/torwisp/";
+	if ((path !== "/wisp/" && !tor) || !auth.isAuthed(req) || hostKind(req) === "stray" || tor !== viaTor(label)) {
 		socket.end("HTTP/1.1 401 Unauthorized\r\n\r\n");
+		return;
+	}
+	if (tor && !torStatus().ready) {
+		socket.end("HTTP/1.1 503 Service Unavailable\r\n\r\n");
 		return;
 	}
 	if (!limits.trackSocket(clientKey(req), socket)) {
 		socket.end("HTTP/1.1 429 Too Many Requests\r\n\r\n");
 		return;
 	}
-	routeRequest(req, socket, head);
+	if (tor) routeRequest(req, socket, head, { TCPSocket: torSocket(label) });
+	else routeRequest(req, socket, head);
 });
 
 let port = parseInt(process.env.PORT || "");
@@ -484,6 +612,8 @@ function shutdown(signal) {
 }
 
 filters.start();
+webRisk?.start();
+if (ISOLATION) startTor().catch((err) => console.warn("tor:", err.message));
 server.listen({
 	port,
 });

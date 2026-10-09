@@ -3,7 +3,7 @@
 // origins here, which shared mode never exercises.
 
 import { expect, test } from "@playwright/test";
-import { SCRIPTED_PAGE, leaks, open, proxied, setSettings, tabFrame, testPage } from "./fixtures.js";
+import { SCRIPTED_PAGE, bodyText, leaks, open, proxied, setSettings, tabFrame, testPage } from "./fixtures.js";
 import { CATCHER, ISOLATED_URL } from "./env.js";
 
 test("browser check, site isolation, verified address and tab commands", async ({ page }) => {
@@ -132,8 +132,8 @@ test("a site chosen to stay signed in keeps its data when the rest is cleared", 
 });
 
 // A frame from another site inside a page (an ad, a player, a widget). With
-// isolation it runs in the page's origin, so the browser itself keeps nothing
-// between the two; only Scramjet's and the app's page scripts stand there.
+// isolation it runs on an origin of its own (shield.js inFrame), so the
+// browser itself keeps the two apart, as it would without the proxy.
 const EMBEDDED = `<!doctype html><title>embedded</title><pre id="out"></pre><script>
 const out = {};
 const attempt = (name, read) => { try { out[name] = String(read()); } catch (e) { out[name] = "REFUSED"; } };
@@ -175,14 +175,165 @@ test("a frame from another site gets no cookies of its own site, and can't reach
 	expect(got["past the tab"]).toBe("true");
 });
 
-test("known gap: a frame from another site can read the page around it", async ({ page }) => {
-	// A browser refuses all three. Here nothing does yet (SECURITY-GAPS.md,
-	// "Embedded frames share the page's space"): this test fails until that
-	// is closed, and says so when it is.
-	test.fail();
+test("a frame from another site can't read or change the page around it", async ({ page }) => {
 	const got = await embed(page);
 	expect(got["page text"]).toBe("REFUSED");
 	expect(got["page cookies"]).toBe("REFUSED");
 	expect(got["page storage"]).toBe("REFUSED");
 	expect(got["page address"]).toBe("REFUSED");
+	// on an origin of its own, walled off by the browser
+	const origins = await page.evaluate(() => [...document.querySelectorAll("iframe")].map((f) => f.src));
+	expect(origins.length).toBeGreaterThan(0);
+});
+
+// A page and a frame of another site talk the way embedded players and
+// widgets do: messages each way, each naming the other's real origin.
+const TALKER = `<!doctype html><title>talker</title><script>
+addEventListener("message", (event) => {
+	if (event.data !== "ping") return;
+	event.source.postMessage({ pong: true, heard: event.origin }, event.origin);
+	parent.postMessage("to the page", "https://example.com");
+	parent.postMessage("not for that page", "https://elsewhere.example");
+});
+</script>`;
+
+test("a page and a frame of another site exchange messages with their real origins", async ({ page }) => {
+	await page.goto(ISOLATED_URL + "/");
+	await page.waitForFunction(() => typeof go === "function" && !!active, null, { timeout: 60_000 });
+	await open(page, "https://example.com/");
+	await page.waitForFunction(() => active.title === "Example Domain");
+	const frame = await tabFrame(page);
+	const heard = await frame.evaluate(
+		(src) =>
+			new Promise((resolve) => {
+				const got = [];
+				const embedded = document.createElement("iframe");
+				addEventListener("message", (event) => {
+					got.push({
+						data: event.data,
+						origin: event.origin,
+						fromFrame: event.source === embedded.contentWindow,
+					});
+					if (got.length === 2) setTimeout(() => resolve(got), 1500);
+				});
+				embedded.onload = () => {
+					// only the frame's real origin gets it; another name, nothing
+					embedded.contentWindow.postMessage("ping", "https://elsewhere.example");
+					embedded.contentWindow.postMessage("ping", "https://httpbin.org");
+				};
+				embedded.src = src;
+				document.body.append(embedded);
+			}),
+		testPage(TALKER)
+	);
+	expect(heard).toEqual([
+		{ data: { pong: true, heard: "https://example.com" }, origin: "https://httpbin.org", fromFrame: true },
+		{ data: "to the page", origin: "https://httpbin.org", fromFrame: true },
+	]);
+});
+
+// Two frames of one site inside a page find each other by name (payment
+// widgets do), through the page around them, which is another site's.
+const SIBLING = (name) => `<!doctype html><title>${name}</title><script>
+addEventListener("message", (event) => {
+	if (event.data === "hello, sibling") parent.postMessage("${name} heard its sibling", "*");
+});
+if ("${name}" === "second") setTimeout(() => {
+	try { parent.frames["first"].postMessage("hello, sibling", "https://httpbin.org"); }
+	catch (e) { parent.postMessage("lookup threw " + e.name, "*"); }
+}, 1500);
+</script>`;
+
+test("frames of one site inside a page find each other by name", async ({ page }) => {
+	await page.goto(ISOLATED_URL + "/");
+	await page.waitForFunction(() => typeof go === "function" && !!active, null, { timeout: 60_000 });
+	await open(page, "https://example.com/");
+	await page.waitForFunction(() => active.title === "Example Domain");
+	const frame = await tabFrame(page);
+	const heard = await frame.evaluate(
+		([first, second]) =>
+			new Promise((resolve) => {
+				addEventListener("message", (event) => resolve(String(event.data)));
+				for (const [name, src] of [["first", first], ["second", second]]) {
+					const f = document.createElement("iframe");
+					f.name = name;
+					f.src = src;
+					document.body.append(f);
+				}
+			}),
+		[testPage(SIBLING("first")), testPage(SIBLING("second"))]
+	);
+	expect(heard).toBe("first heard its sibling");
+});
+
+test("a site that forbids framing stays out of frames on its own origin too", async ({ page }) => {
+	await page.goto(ISOLATED_URL + "/");
+	await page.waitForFunction(() => typeof go === "function" && !!active, null, { timeout: 60_000 });
+	const ruled = `https://httpbin.org/response-headers?Content-Type=text/html&X-Frame-Options=DENY&x=FRAMED-CONTENT`;
+	const allowed = testPage("<!doctype html><title>ok</title><p>ALLOWED-CONTENT</p>");
+	await open(page, "https://example.com/");
+	await page.waitForFunction(() => active.title === "Example Domain");
+	const frame = await tabFrame(page);
+	await frame.evaluate(
+		([ruled, allowed]) => {
+			for (const [id, src] of [["ruled", ruled], ["allowed", allowed]]) {
+				const f = document.createElement("iframe");
+				f.id = id;
+				f.src = src;
+				document.body.append(f);
+			}
+		},
+		[ruled, allowed]
+	);
+	await expect(frame.frameLocator("#allowed").locator("body")).toContainText("ALLOWED-CONTENT", { timeout: 30_000 });
+	await page.waitForTimeout(2000);
+	await expect(frame.frameLocator("#ruled").locator("html")).not.toContainText("FRAMED-CONTENT");
+});
+
+// Tor tabs (src/tor.js): only where the server runs Tor (the Docker image
+// installs it; elsewhere, TOR_BIN). The Tor network can be slow to answer.
+test("a Tor tab's sites see a Tor exit, onion sites open, and nothing is kept", async ({ page }) => {
+	test.setTimeout(420_000);
+	await page.goto(ISOLATED_URL + "/");
+	await page.waitForFunction(() => typeof go === "function" && !!active, null, { timeout: 60_000 });
+	await page.evaluate(() => startup);
+	const tor = await page.evaluate(() => torState());
+	test.skip(!tor.available, "this server runs no Tor");
+
+	await page.evaluate(() => newTorTab("https://check.torproject.org/api/ip"));
+	await page.waitForFunction(() => active.tor && active.url === "https://check.torproject.org/api/ip" && !active.loading, null, {
+		timeout: 180_000,
+	});
+	expect(JSON.parse(await bodyText(await tabFrame(page))).IsTor).toBe(true);
+	// a site of its own, walled off from the same site's ordinary one
+	expect(await page.evaluate(() => active.siteOrigin)).toMatch(/^http:\/\/t[a-z2-7]{25}\.app\.localhost:\d+$/);
+
+	// an onion site: the Tor Project's own
+	await page.evaluate(() => go("http://2gzyxa5ihm7nsggfxnu52rck2vv4rvmdlkiu3zzui5du4xyclen53wid.onion/"));
+	// (an onion site's page arrives well before all its pictures do, and an
+	// onion site can take a try or two to answer: "Try again", as a person would)
+	await expect
+		.poll(
+			async () => {
+				if (!(await page.evaluate(() => active.url)).includes(".onion")) return "";
+				const tab = await tabFrame(page);
+				const title = await tab.title().catch(() => "");
+				if (title === "Couldn't open this page") await tab.click("#go").catch(() => {});
+				return title;
+			},
+			{ timeout: 240_000, intervals: [2000] }
+		)
+		.toContain("Tor Project");
+
+	// no history, and it isn't brought back when the app opens
+	expect(await page.evaluate(() => readEntries(HISTORY).filter((h) => /torproject|onion/.test(h.url)).length)).toBe(0);
+	expect(await page.evaluate(() => JSON.stringify(readList(TABS)))).not.toContain("onion");
+
+	// an onion address in an ordinary tab is offered a Tor tab instead
+	await page.evaluate(() => {
+		for (const tab of [...tabs]) if (tab.tor) closeTab(tab);
+	});
+	const frame = await open(page, testPage(`<!doctype html><title>link</title><a id="onion" href="http://2gzyxa5ihm7nsggfxnu52rck2vv4rvmdlkiu3zzui5du4xyclen53wid.onion/">onion</a>`));
+	await frame.click("#onion");
+	await expect.poll(async () => (await tabFrame(page)).locator("h1").textContent().catch(() => "")).toBe("This is an onion site");
 });

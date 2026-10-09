@@ -21,12 +21,15 @@
 	<body>
 		<p id="msg">Loading…</p>
 		<script>
-			const key = "bios-recover:" + location.pathname;
+			// the whole address: frames inside one page share this storage
+			const key = "bios-recover:" + location.pathname + location.search;
 			// Isolation mode, inside the app's frame (the parent is the shell on
 			// another origin): ask the shell to open this site's anchor frame,
 			// which registers the service worker and keeps the proxy connection.
 			function inIsolatedTab() {
 				if (parent === self) return false;
+				// a frame's own origin (f… or g…) is never a tab's: it connects by itself
+				if (/^[fg][a-z2-7]{25}\./.test(location.hostname)) return false;
 				try {
 					parent.location.href;
 					return false;
@@ -49,7 +52,11 @@
 					parent.postMessage({ bios: "need-anchor" }, "*");
 				});
 			}
-			(inIsolatedTab() ? needAnchor() : registerSW().then(setupTransport))
+			// (the connection at most a few seconds: two frames of one origin
+			// starting at once can leave one waiting, and it's the origin's)
+			const connect = () =>
+				registerSW().then(() => Promise.race([setupTransport(), new Promise((resolve) => setTimeout(resolve, 4000))]));
+			(inIsolatedTab() ? needAnchor() : connect())
 				.then(() => {
 					if (sessionStorage.getItem(key)) {
 						sessionStorage.removeItem(key);

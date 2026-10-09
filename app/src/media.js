@@ -17,7 +17,7 @@ import dns from "node:dns";
 import net from "node:net";
 import { pipeline } from "node:stream";
 import { decodeUrl, encodeUrl } from "./codec.js";
-import { isBlockedAddress } from "./wisp.js";
+import { WEB_PORTS, isBlockedAddress } from "./wisp.js";
 
 const MAX_REDIRECTS = 5;
 const MAX_PLAYLIST_BYTES = 4 * 1024 * 1024;
@@ -83,19 +83,21 @@ const PASS_HEADERS = ["content-type", "content-range", "accept-ranges", "etag", 
 // would run on this origin without the proxy's hooks.
 const MEDIA_DESTS = new Set(["video", "audio", "track", "empty"]);
 
-function upstreamRequest(url, headers, method, redirects = 0) {
+// `agent`: for a Tor tab's site, its connections through Tor (tor.js)
+function upstreamRequest(url, headers, method, redirects = 0, agent = undefined) {
 	return new Promise((resolve, reject) => {
 		// an IP in the URL skips DNS, and so the lookup check
 		const literal = url.hostname.replace(/^\[|\]$/g, "");
 		if (net.isIP(literal) && isBlockedAddress(literal))
 			return reject(new Error(`Blocked connection to a private address (${literal})`));
 		// same ports as wisp, so this can't be used for port scans either; checked per redirect hop
-		if (url.port && url.port !== "80" && url.port !== "443")
+		if (url.port && !WEB_PORTS.includes(Number(url.port)))
 			return reject(new Error(`Blocked port ${url.port}`));
 		const lib = url.protocol === "https:" ? https : http;
 		const req = lib.request(
 			url,
-			{ method, headers, lookup: safeLookup, timeout: 30_000 },
+			// through Tor the exit looks the name up, never the server
+			agent ? { method, headers, agent, timeout: 60_000 } : { method, headers, lookup: safeLookup, timeout: 30_000 },
 			(res) => {
 				const status = res.statusCode || 0;
 				const location = res.headers.location;
@@ -109,7 +111,7 @@ function upstreamRequest(url, headers, method, redirects = 0) {
 					}
 					if (next.protocol !== "http:" && next.protocol !== "https:")
 						return resolve({ res, url });
-					return resolve(upstreamRequest(next, headers, method, redirects + 1));
+					return resolve(upstreamRequest(next, headers, method, redirects + 1, agent));
 				}
 				resolve({ res, url });
 			}
@@ -145,7 +147,7 @@ function readAll(stream, limit) {
  * @param {import("express").Response} res
  * @param {(bytes: number) => void} [countBytes] told about every chunk streamed
  */
-export async function serveMedia(req, res, countBytes = () => {}) {
+export async function serveMedia(req, res, countBytes = () => {}, agent = undefined) {
 	if (req.method !== "GET" && req.method !== "HEAD") return false;
 	// absent before iOS 16.4, and from the system's HLS player
 	const dest = req.headers["sec-fetch-dest"];
@@ -168,7 +170,7 @@ export async function serveMedia(req, res, countBytes = () => {}) {
 
 	let upstream;
 	try {
-		upstream = await upstreamRequest(target, headers, req.method);
+		upstream = await upstreamRequest(target, headers, req.method, 0, agent);
 	} catch (err) {
 		// no hostname: the server doesn't keep a record of where people browse
 		console.warn(`media: ${err.message.replace(target.hostname, "<site>")}`);

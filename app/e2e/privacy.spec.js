@@ -74,3 +74,64 @@ test("cookie notices are hidden once that is switched on", async ({ app }) => {
 	await expect(frame.locator("#onetrust-banner-sdk")).toBeHidden();
 	await expect(frame.locator("#text")).toBeVisible();
 });
+
+test("cookie notices are answered with a no, unless that is switched off", async ({ app }) => {
+	// a consent tool's banner (CookieYes), as autoconsent knows it; its
+	// buttons say in the page's title which one was pressed
+	const notice = (note) =>
+		testPage(`<!doctype html><title>notice</title><p>the article</p>
+<div class="cky-consent-container" style="position:fixed;bottom:0;left:0;right:0;background:#eee;padding:20px">
+<p>We use cookies</p>
+<button data-cky-tag="accept-button" onclick="document.title='ACCEPTED';this.parentNode.remove()">Accept all</button>
+<button data-cky-tag="reject-button" onclick="document.title='REJECTED';this.parentNode.remove()">Reject all</button>
+</div><!-- ${note} -->`);
+	let frame = await open(app, notice("on"));
+	await expect.poll(() => frame.title(), { timeout: 30_000 }).toBe("REJECTED");
+	// the shield menu says what happened
+	await app.evaluate(() => openSheet());
+	await expect(app.locator("#consent-here")).toContainText("no to tracking");
+	await app.evaluate(() => (sheet.hidden = true));
+
+	await setSettings(app, { consent: false });
+	frame = await open(app, notice("off"));
+	await app.waitForTimeout(4000);
+	expect(await frame.title()).toBe("notice");
+});
+
+test("a bounce-tracking address goes straight to where it leads", async ({ app }) => {
+	// Brave's own test rule (debounce.json): the tracker's page is never asked for
+	const target = `${ECHO}/get?landed=1`;
+	await open(app, `https://dev-pages.brave.software/navigation-tracking/${encodeURIComponent(target)};.html`);
+	await app.waitForFunction((u) => active.url === u, target);
+	expect(await args(await tabFrame(app))).toEqual(["landed"]);
+	// a site with blocking off is left alone: off for the tracker's site, the hop stays
+	await setSettings(app, { allow: ["brave.software"] });
+	await open(app, `https://dev-pages.brave.software/navigation-tracking/${encodeURIComponent(target + "&again=1")};.html`);
+	expect(await app.evaluate(() => active.url)).toMatch(/^https:\/\/dev-pages\.brave\.software\//);
+});
+
+test("parameters on Brave's list go too", async ({ app }) => {
+	// bbeml, oft_id: not on Badger's own list, on Brave's
+	await open(app, `${ECHO}/get?bbeml=1&oft_id=2&keep=1`);
+	await app.waitForFunction((u) => active.url === u, `${ECHO}/get?keep=1`);
+	expect(await args(await tabFrame(app))).toEqual(["keep"]);
+});
+
+test("rules that hide ads by their link's address work on proxied pages", async ({ app }) => {
+	await expect
+		.poll(async () => (await (await app.request.get(`${SHARED_URL}/filters/status`)).json()).updatedAt, {
+			message: "block lists downloaded",
+			timeout: 110_000,
+		})
+		.toBeTruthy();
+	// EasyList: ##a[href^="http://partners.etoro.com/"] (the proxy rewrites the
+	// link itself, so the rule has to look at the address the page wrote)
+	const frame = await open(
+		app,
+		testPage(`<!doctype html><title>links</title>
+<a id="ad" href="http://partners.etoro.com/aw.aspx?A=1">an affiliate</a>
+<a id="ok" href="https://example.com/">a link</a>`)
+	);
+	await expect(frame.locator("#ad")).toBeHidden({ timeout: 15_000 });
+	await expect(frame.locator("#ok")).toBeVisible();
+});

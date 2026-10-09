@@ -103,10 +103,14 @@ const readBack = (frame) =>
 
 const differing = (a, b) => a.reduce((count, value, i) => count + (value !== b[i] ? 1 : 0), 0);
 
-test("Safer: what a canvas or a sound reads back can't be the device's signature", async ({ app }) => {
+test("what a canvas or a sound reads back can't be the device's signature", async ({ app }) => {
+	// the control: a site with blocking switched off gets the device's own
+	await setSettings(app, { allow: ["httpbin.org"] });
 	const clean = await readBack(await open(app, testPage(DRAWS)));
-	await setSettings(app, { level: "safer" });
+	// Standard: every other site, as in Brave
+	await setSettings(app, { allow: [] });
 	const first = await readBack(await open(app, testPage(DRAWS + "<!-- first -->")));
+	await setSettings(app, { level: "safer" });
 	const second = await readBack(await open(app, testPage(DRAWS + "<!-- second -->")));
 
 	for (const seen of [first, second]) {
@@ -134,4 +138,77 @@ test("Safer: what a canvas or a sound reads back can't be the device's signature
 	// and different on the next page
 	expect(second.url).not.toBe(first.url);
 	if (clean.samples) expect(second.samples).not.toEqual(first.samples);
+});
+
+// What a script can ask from inside a worker, a page's own (a blob:) or one
+// from an address: the same as the page answers.
+const WORKERS = `<!doctype html><title>workers</title><script>
+const code = \`postMessage({
+	cores: navigator.hardwareConcurrency,
+	languages: navigator.languages.join(),
+	language: navigator.language,
+	zone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+	gpc: navigator.globalPrivacyControl === true,
+})\`;
+const ask = (worker) => new Promise((resolve) => (worker.onmessage = (e) => resolve(e.data)));
+Promise.all([
+	ask(new Worker(URL.createObjectURL(new Blob([code], { type: "text/javascript" })))),
+	ask(new Worker("data:text/javascript," + encodeURIComponent(code))),
+]).then(([blob, data]) => (document.title = "done " + JSON.stringify({ blob, data })));
+</script>`;
+
+const workerAnswers = async (frame) => {
+	await expect.poll(() => frame.title(), { timeout: 20_000 }).toMatch(/^done /);
+	return JSON.parse((await frame.title()).slice(5));
+};
+
+test("workers get the page's answers too", async ({ app }) => {
+	const standard = await workerAnswers(await open(app, testPage(WORKERS)));
+	for (const answers of Object.values(standard)) {
+		expect(answers).toMatchObject({ cores: 4, zone: "Asia/Tehran", gpc: true });
+		// one language, not the list (Chromium's test locale doesn't reach
+		// workers, so which one depends on the test browser)
+		expect(answers.languages).toBe(answers.language);
+	}
+
+	await setSettings(app, { level: "safer" });
+	const safer = await workerAnswers(await open(app, testPage(WORKERS + "<!-- safer -->")));
+	for (const answers of Object.values(safer))
+		expect(answers).toEqual({ cores: 4, languages: "en-US,en", language: "en-US", zone: "UTC", gpc: true });
+});
+
+test("the battery, the storage allowance and the graphics card say nothing", async ({ app }) => {
+	const frame = await open(app, testPage("<!doctype html><title>device</title><p>page</p>"));
+	const answers = await frame.evaluate(async () => {
+		const gl = document.createElement("canvas").getContext("webgl");
+		const info = gl && gl.getExtension("WEBGL_debug_renderer_info");
+		const battery = navigator.getBattery ? await navigator.getBattery() : null;
+		const { quota } = navigator.storage?.estimate ? await navigator.storage.estimate() : {};
+		return {
+			battery: battery && { level: battery.level, charging: battery.charging },
+			quota,
+			renderer: info ? gl.getParameter(info.UNMASKED_RENDERER_WEBGL) === gl.getParameter(gl.RENDERER) : true,
+			vendor: info ? gl.getParameter(info.UNMASKED_VENDOR_WEBGL) === gl.getParameter(gl.VENDOR) : true,
+		};
+	});
+	if (answers.battery) expect(answers.battery).toEqual({ level: 1, charging: true });
+	if (answers.quota !== undefined) expect(answers.quota).toBe(4 * 1024 ** 3);
+	expect(answers.renderer).toBe(true);
+	expect(answers.vendor).toBe(true);
+});
+
+test("Safer: the screen is the page's size, rounded", async ({ app }) => {
+	await setSettings(app, { level: "safer" });
+	const frame = await open(app, testPage("<!doctype html><title>screen</title><p>page</p>"));
+	const seen = await frame.evaluate(() => ({
+		width: screen.width,
+		height: screen.height,
+		availWidth: screen.availWidth,
+		inner: [innerWidth, innerHeight],
+	}));
+	expect(seen.width % 50).toBe(0);
+	expect(seen.height % 50).toBe(0);
+	expect(seen.availWidth).toBe(seen.width);
+	expect(seen.width).toBeLessThanOrEqual(seen.inner[0]);
+	expect(seen.width).toBeGreaterThan(seen.inner[0] - 50);
 });

@@ -41,7 +41,9 @@ test("the app's pages run only their own scripts and can't be framed by others",
 	expect(csp).toContain("frame-ancestors 'self'");
 	expect(page.headers()["x-content-type-options"]).toBe("nosniff");
 	expect(page.headers()["referrer-policy"]).toBe("same-origin");
-	expect(page.headers()["permissions-policy"]).toContain("camera=()");
+	// location, camera and microphone only through the app's own prompt; never payments or devices
+	expect(page.headers()["permissions-policy"]).toContain("payment=()");
+	expect(page.headers()["permissions-policy"]).toContain("usb=()");
 
 	// workers run Scramjet's WebAssembly, so they only get the framing rule
 	const worker = await request.get(`${SHARED_URL}/scramjet-sw.js`, {
@@ -117,4 +119,22 @@ test("the proxy connection needs a signed-in browser", async () => {
 		"sec-websocket-key": "dGhlIHNhbXBsZSBub25jZQ==",
 	});
 	expect(res.status).not.toBe(101);
+});
+
+test("the server says what a site's subdomain is an alias of, for the CNAME check", async ({ request }) => {
+	// a first-party subdomain that points at a tracker (Eulerian), as found on 2026-10-09
+	const answer = await (await request.get(`${SHARED_URL}/api/cname`, { headers: { "x-bios-host": "f7ds.liberation.fr" } })).json();
+	expect(answer.names.some((name) => name.endsWith("eulerian.net"))).toBe(true);
+	// not an address, not a name it would look up
+	const none = await (await request.get(`${SHARED_URL}/api/cname`, { headers: { "x-bios-host": "127.0.0.1" } })).json();
+	expect(none.names).toEqual([]);
+});
+
+test("the sync relay is for the app alone, and gives each box out once", async ({ request }) => {
+	const channel = "ab".repeat(16);
+	expect((await request.put(`${SHARED_URL}/api/sync/${channel}`, { data: "sealed", headers: { origin: "https://evil.example" } })).status()).toBe(403);
+	expect((await request.put(`${SHARED_URL}/api/sync/${channel}`, { data: "sealed" })).status()).toBe(204);
+	expect(await (await request.get(`${SHARED_URL}/api/sync/${channel}`)).text()).toBe("sealed");
+	expect((await request.get(`${SHARED_URL}/api/sync/${channel}`)).status()).toBe(404);
+	expect((await request.put(`${SHARED_URL}/api/sync/not-a-channel`, { data: "x" })).status()).toBe(400);
 });

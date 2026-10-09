@@ -77,7 +77,19 @@
 				</li>
 				<li>
 					The server does see the name of each site you open (like <code>example.com</code>), to check it
-					against lists of malware and phishing sites. It isn't logged or kept.
+					against lists of malware and phishing sites, to look up whether its certificate was revoked, and
+					to spot trackers hiding behind its addresses. It isn't logged or kept. If this server uses Google
+					Web Risk, Google only ever gets a short fragment of a code made from a site's name, for the rare
+					site that matches one.
+				</li>
+				<li>
+					Your saved passwords, passkeys and downloads stay on your device, encrypted. Syncing two of your
+					devices passes them between the two encrypted with the code you type; the server can't read them
+					and forgets them within ten minutes.
+				</li>
+				<li>
+					In a Tor tab, sites you open see a Tor address instead of this server's. The server still sees
+					their names, as for every tab.
 				</li>
 				<li>
 					Some videos are fetched by the server directly for your device's video player. The hosting

@@ -6,6 +6,8 @@ export const DEFAULT_SETTINGS = {
 	videoAds: true,
 	// Two more block lists (see filters.js); they cost memory on every site.
 	notices: false,
+	// Cookie notices answered "reject" (DuckDuckGo's autoconsent, client/consent.js).
+	consent: true,
 	threats: true,
 	// http:// pages pass through the server unencrypted: try https first.
 	httpsOnly: true,
@@ -38,7 +40,7 @@ const MAX_JSON = 2800;
 /** User input -> valid settings that fit in the cookie. */
 export function cleanSettings(input) {
 	const out = {};
-	for (const key of ["ads", "cosmetic", "videoAds", "notices", "threats", "httpsOnly", "wipe"])
+	for (const key of ["ads", "cosmetic", "videoAds", "notices", "consent", "threats", "httpsOnly", "wipe"])
 		out[key] =
 			typeof input?.[key] === "boolean" ? input[key] : DEFAULT_SETTINGS[key];
 	out.search = SEARCH_ENGINES.includes(input?.search)

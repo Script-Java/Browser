@@ -407,6 +407,22 @@ test("a site whose certificate is bad gets a warning with no way past it", async
 	}
 });
 
+test("a site whose certificate was revoked gets a warning with no way past it", async ({ app }) => {
+	// its authority's revocation list says so (the server checks it, certs.js)
+	const frame = await open(app, "https://revoked.badssl.com/");
+	await expect(frame.locator("body")).toContainText("revoked", { timeout: 30_000 });
+	await expect(frame.locator("#go")).toHaveCount(0);
+});
+
+test("the certificate viewer shows who a site's certificate belongs to", async ({ app }) => {
+	await open(app, "https://example.com/");
+	await app.evaluate(() => openSheet());
+	await app.click("#cert-open");
+	await expect(app.locator("#cert-status")).toContainText(/Valid/, { timeout: 60_000 });
+	await expect(app.locator("#cert-details")).toContainText("example.com");
+	await expect(app.locator("#cert-details")).toContainText("SHA-256 fingerprint");
+});
+
 test("a site that can't be reached says so, and offers to try again", async ({ app }) => {
 	const frame = await open(app, "https://no-such-site.badger-test.invalid/");
 	await expect(frame.locator("h1")).toHaveText("Couldn't open this page");

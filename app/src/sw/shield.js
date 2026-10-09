@@ -9,7 +9,7 @@
 
 import { FiltersEngine, Request as FilterRequest } from "@ghostery/adblocker";
 import { parse } from "tldts";
-import { siteOf, siteKey } from "../client/sitekey.js";
+import { frameKey, siteOf, siteKey, torKey } from "../client/sitekey.js";
 import { DEFAULT_SETTINGS } from "../settings.js";
 import { PREFIX, decodeUrl, encodeUrl } from "../codec.js";
 
@@ -110,6 +110,37 @@ export function createShield(scramjet, configStored) {
 	const ownLabel = isolated
 		? location.hostname.slice(0, -(isolationDomain.length + 1))
 		: null;
+	// A Tor tab's site (src/tor.js): its connections go through Tor, the
+	// sites it leads to open in Tor too, and the server never connects to a
+	// site for it (no certificate or CNAME lookups, which a site could see).
+	const viaTor = isolated && /^[tg]/.test(ownLabel);
+	const keyOf = (hostname) => (viaTor ? torKey(hostname) : siteKey(hostname));
+	// A frame from another site inside a page runs on an origin of its own
+	// (f<key>, g<key> in a Tor tab; see sitekey.js frameKey), so the browser
+	// itself keeps it and the page around it apart. This origin's worker
+	// learns which site's page the frame is in from the address that opens
+	// it, checked against the origin's own label, and keeps it.
+	const inFrame = isolated && /^[fg]/.test(ownLabel);
+	const TOP_KEY = location.origin + API + "top";
+	let topSite = null;
+	const topLoaded = inFrame
+		? caches
+				.open("bios-frame")
+				.then((cache) => cache.match(TOP_KEY))
+				.then((res) => res?.text())
+				.then((text) => (topSite ||= /^[a-z0-9.-]{1,253}$/.test(text || "") ? text : null))
+				.catch(() => {})
+		: null;
+	function keepTop(site) {
+		topSite = site;
+		caches
+			.open("bios-frame")
+			.then((cache) => cache.put(TOP_KEY, new Response(site)))
+			.catch(() => {});
+	}
+	// The site this origin's tabs show, once a page of it was served (or
+	// from the page asking): the page a frame of another site is in.
+	let ownSite = null;
 	const port = location.port ? ":" + location.port : "";
 	const shellOrigin = isolated
 		? `${location.protocol}//${isolationDomain}${port}`
@@ -123,6 +154,17 @@ export function createShield(scramjet, configStored) {
 	const ENGINE_URL = isolated
 		? shellOrigin + "/filters/engine.bin"
 		: "/filters/engine.bin";
+
+	// Who may show this origin's pages in a frame (every window above must
+	// be one). A tab's site: its own pages and the app (no other site may
+	// frame it, signed in, to trick taps). A frame's own origin: the site
+	// origins of the pages it's in, inside the app.
+	const siteOrigins = isolated ? `${location.protocol}//*.${isolationDomain}${port}` : "";
+	const FRAMED_BY = !isolated
+		? "frame-ancestors 'self'"
+		: inFrame
+			? `frame-ancestors ${shellOrigin} ${siteOrigins}`
+			: `frame-ancestors 'self' ${shellOrigin}`;
 
 	// Only pages this worker made (a warning's button, a trampoline) know the
 	// token, so a link from elsewhere can't click "Continue anyway" for someone.
@@ -164,7 +206,26 @@ export function createShield(scramjet, configStored) {
 	// Why the last request for a site address failed (handle() shows a page
 	// that couldn't be fetched what went wrong).
 	const failures = new Map();
-	const transportFetch = scramjet.client.fetch.bind(scramjet.client);
+	const rawFetch = scramjet.client.fetch.bind(scramjet.client);
+	// The first request on a fresh connection goes alone: the transport sets
+	// itself up on it, and a second one arriving meanwhile (two frames of a
+	// site starting together) could be lost. The rest wait for it, at most
+	// ten seconds.
+	let warmedUp = false;
+	let warming = null;
+	async function transportFetch(url, init) {
+		if (warmedUp) return rawFetch(url, init);
+		if (warming) {
+			await Promise.race([warming.catch(() => {}), new Promise((resolve) => setTimeout(resolve, 10_000))]);
+			return rawFetch(url, init);
+		}
+		warming = rawFetch(url, init);
+		try {
+			return await warming;
+		} finally {
+			warmedUp = true;
+		}
+	}
 	scramjet.client.fetch = async (url, init) => {
 		try {
 			try {
@@ -172,6 +233,9 @@ export function createShield(scramjet, configStored) {
 			} catch (err) {
 				if (!DEAD_TRANSPORT.test(String(err?.message || err))) throw err;
 				await reconnect();
+				// a new connection: set up afresh, one request first
+				warmedUp = false;
+				warming = null;
 				return await transportFetch(url, init);
 			}
 		} catch (err) {
@@ -181,6 +245,26 @@ export function createShield(scramjet, configStored) {
 			throw err;
 		}
 	};
+
+	// Navigations the app itself starts in this origin (an address typed, a
+	// bookmark, back, reload, or a tab a page opened), announced by the
+	// shell through this site's anchor frame just before: proxied URL ->
+	// { from: the page that opened the tab, or null for the person }. Any
+	// other navigation without a referrer is taken to be another site's.
+	const announced = new Map();
+	self.addEventListener("message", (event) => {
+		if (event.origin !== location.origin || event.data?.bios !== "typed") return;
+		if (announced.size > 100) announced.clear();
+		let from = null;
+		try {
+			if (event.data.from) from = new URL(event.data.from);
+		} catch {
+			// the person, then
+		}
+		if (from && from.protocol !== "http:" && from.protocol !== "https:") from = null;
+		announced.set(pageKey(String(event.data.url || "")), { from, at: Date.now() });
+		event.ports[0]?.postMessage("ok");
+	});
 
 	// "Clear all site data" deleted Scramjet's cookie database; forget the
 	// copy this worker keeps in memory too.
@@ -308,6 +392,44 @@ export function createShield(scramjet, configStored) {
 		return noticesLoad;
 	}
 
+	// Brave's navigation-tracking rules (src/privacyrules.js): addresses that
+	// only bounce a visitor through a tracker, and query parameters that follow
+	// a person between sites. Patterns arrive as regular expressions.
+	const PRIVACY_URL = ENGINE_URL.replace("engine.bin", "privacy.json");
+	let privacyRules = { debounce: [], params: [] };
+	let privacyLoad = null;
+	const compile = (list) => (list || []).map((source) => new RegExp(source, "i"));
+	function loadPrivacyRules() {
+		privacyLoad ||= fetch(PRIVACY_URL, { credentials: "include", cache: "no-cache" })
+			.then(async (res) => {
+				if (!res.ok) throw new Error(`privacy rules HTTP ${res.status}`);
+				const rules = await res.json();
+				privacyRules = {
+					debounce: (rules.debounce || []).map((rule) => ({
+						...rule,
+						match: compile(rule.match),
+						exclude: compile(rule.exclude),
+					})),
+					params: (rules.params || []).map((rule) => ({
+						match: rule.match && compile(rule.match),
+						exclude: compile(rule.exclude),
+						params: new Set(rule.params),
+					})),
+				};
+				setTimeout(() => (privacyLoad = null), ENGINE_RECHECK_MS);
+			})
+			.catch((err) => {
+				console.warn("bios: navigation-tracking rules unavailable:", err);
+				setTimeout(() => (privacyLoad = null), 30_000);
+			});
+		return privacyLoad;
+	}
+
+	function waitForPrivacyRules() {
+		if (privacyRules.debounce.length || privacyRules.params.length) return;
+		return Promise.race([loadPrivacyRules(), new Promise((resolve) => setTimeout(resolve, ENGINE_WAIT_MS))]);
+	}
+
 	// Switched on a moment ago, or this worker just started: the first page waits for them.
 	function waitForNotices() {
 		if (!settings?.notices || notices) return;
@@ -333,6 +455,12 @@ export function createShield(scramjet, configStored) {
 		return answer;
 	}
 
+	// Scramjet rewrites a page's addresses (href, src, ...) to the proxy's and
+	// keeps each original in a scramjet-attr-<name> attribute. A hiding rule
+	// that matches by address ("a[href*=doubleclick]") looks there instead.
+	const PROXIED_ATTRIBUTE = /\[\s*(href|src|action|data|poster|formaction)(\s*[~|^$*]?=)/gi;
+	const realAttributes = (css) => css.replace(PROXIED_ATTRIBUTE, "[scramjet-attr-$1$2");
+
 	// The rules that hide parts of a page, and its scriptlets, from each of `lists`.
 	function hiding(lists, options) {
 		let styles = "";
@@ -342,7 +470,7 @@ export function createShield(scramjet, configStored) {
 			styles += found.styles || "";
 			scripts.push(...(found.scripts || []));
 		}
-		return { styles, scripts };
+		return { styles: realAttributes(styles), scripts };
 	}
 
 	// -------------------------------------------------------------- settings
@@ -352,8 +480,10 @@ export function createShield(scramjet, configStored) {
 		settingsAt = Date.now();
 		if (settings.notices) loadNotices();
 		// This origin is one site's (isolation): is it one with scripts switched off?
-		if (isolated)
-			Promise.all(settings.noScripts.map((site) => siteKey(site))).then(
+		// a frame's: the page it's in, whose tab it belongs to
+		if (inFrame) tabScriptsOff = !!topSite && settings.noScripts.includes(siteOf(topSite));
+		else if (isolated)
+			Promise.all(settings.noScripts.map((site) => keyOf(site))).then(
 				(keys) => (tabScriptsOff = keys.includes(ownLabel))
 			);
 	}
@@ -398,6 +528,7 @@ export function createShield(scramjet, configStored) {
 			"content-type": `${type}; charset=utf-8`,
 			"cache-control": "no-store",
 			"cross-origin-resource-policy": "same-site",
+			"content-security-policy": FRAMED_BY,
 		};
 		if (self.crossOriginIsolated)
 			h["cross-origin-embedder-policy"] = "require-corp";
@@ -410,7 +541,11 @@ export function createShield(scramjet, configStored) {
 
 	// Runs in a page we generate. Works out where it is: "top" (escaped the
 	// app), "tab" (the app's page frame) or "sub" (a frame inside a page).
-	const WHERE = `function where(){try{if(parent===self)return"top";if(parent.__biosShell)return"tab";parent.location.href;return"sub"}catch(e){return"tab"}}`;
+	// (A frame's own origin is never a tab's: there, a cross-origin parent is
+	// the page around the frame.)
+	const WHERE = inFrame
+		? `function where(){return parent===self?"top":"sub"}`
+		: `function where(){try{if(parent===self)return"top";if(parent.__biosShell)return"tab";parent.location.href;return"sub"}catch(e){return"tab"}}`;
 
 	const WARNINGS = {
 		phishing: {
@@ -441,6 +576,20 @@ export function createShield(scramjet, configStored) {
 			title: "This connection isn't private",
 			text: "Someone may be pretending to be this site, so it wasn't opened.",
 		},
+		onion: {
+			title: "This is an onion site",
+			text: "Onion sites can only be reached through Tor. Open it in a Tor tab: its connections go through Tor, and nothing from this tab comes along.",
+			go: "Open in a Tor tab",
+			action: "tor",
+		},
+		// The site's certificate authority has revoked its certificate (the
+		// server checked its list, certs.js): whoever presents it may have
+		// stolen it. No way past, as in browsers.
+		revoked: {
+			danger: true,
+			title: "This connection isn't private",
+			text: "The authority that issued this site's security certificate has revoked it, so someone may be using a stolen certificate to pretend to be the site. It wasn't opened.",
+		},
 		unreachable: {
 			title: "Couldn't open this page",
 			text: "The site didn't answer. It may be down, the address may be wrong, or the connection dropped.",
@@ -469,7 +618,7 @@ export function createShield(scramjet, configStored) {
 		const { danger, title, go, action } = WARNINGS[kind];
 		let { text } = WARNINGS[kind];
 		if (kind === "cert") text = CERT_PROBLEMS.find(([problem]) => problem.test(why))[1] + " " + text;
-		const proceed = action === "retry" ? url : action ? goUrl(action, url) : "";
+		const proceed = action === "retry" || action === "tor" ? url : action ? goUrl(action, url) : "";
 		return new Response(
 			`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${htmlEscape(title)}</title>
 <style>
@@ -491,7 +640,7 @@ ${WHERE}
 if (where() === "sub") document.body.className = "sub";
 document.getElementById("back").onclick = function () { history.length > 1 ? history.back() : location.replace("about:blank"); };
 var go = document.getElementById("go");
-if (go) go.onclick = function () { location.replace(${scriptJson(proceed)}); };
+if (go) go.onclick = ${kind === "onion" ? `function () { top.postMessage({ bios: "open-tor", url: ${scriptJson(url)} }, "*"); }` : `function () { location.replace(${scriptJson(proceed)}); }`};
 </script></body></html>`,
 			{ status: 200, headers: headers() }
 		);
@@ -529,7 +678,7 @@ if (go) go.onclick = function () { location.replace(${scriptJson(proceed)}); };
 		const targets = {
 			shell: plan.shell || null,
 			tab: plan.tab || null,
-			sub: plan.inline ? goUrl("inline", plan.inline) : plan.url,
+			sub: plan.sub || (plan.inline ? goUrl("inline", plan.inline) : plan.url),
 		};
 		const inputs = (fields || [])
 			.map(
@@ -553,15 +702,19 @@ if (go) go.onclick = function () { location.replace(${scriptJson(proceed)}); };
 			`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>html{background:#fff}</style>${boot}</head><body>${forms}<script>
 ${WHERE}
 var targets = ${scriptJson(targets)};
-function needAnchor() {
+// the shell opens the anchor of this origin, or of another site's origin a
+// form is about to be posted to (without its service worker there yet, the
+// server would get the post, and its fields would be lost)
+// (the shell is the top: the tab's parent, or above the page a frame is in)
+function needAnchor(origin) {
 	return new Promise(function (resolve) {
-		var timer = setTimeout(function () { setupTransport().then(resolve, resolve); }, 8000);
+		var timer = setTimeout(function () { origin ? resolve() : setupTransport().then(resolve, resolve); }, 8000);
 		addEventListener("message", function (e) {
-			if (e.source !== parent || !e.data || e.data.bios !== "anchor-ready") return;
+			if (e.source !== top || !e.data || e.data.bios !== "anchor-ready") return;
 			clearTimeout(timer);
 			resolve();
 		});
-		parent.postMessage({ bios: "need-anchor" }, "*");
+		top.postMessage({ bios: "need-anchor", origin: origin || undefined }, "*");
 	});
 }
 function go(key) {
@@ -580,7 +733,13 @@ function go(key) {
 		} catch (e) { document.body.textContent = String(e && e.message || e); return; }
 	}
 	if (at === "top" && targets.shell) return location.replace(targets.shell);
-	if (at !== "sub" && targets.tab) return go("tab");
+	if (at !== "sub" && targets.tab) {
+		if (at === "tab" && document.getElementById("f-tab")) await needAnchor(new URL(targets.tab).origin);
+		return go("tab");
+	}
+	// a frame of another site goes to an origin of its own: its anchor first
+	if (at === "sub" && targets.sub && new URL(targets.sub, location.href).origin !== location.origin && top !== self)
+		await needAnchor(new URL(targets.sub, location.href).origin);
 	go("sub");
 })();
 </script></body></html>`,
@@ -601,6 +760,123 @@ function go(key) {
 				client.url.startsWith(prefix) ||
 				client.url === location.origin + "/anchor.html"
 		);
+	}
+
+	// --------------------------------------------------------------- downloads
+
+	// A file the site sends to be saved (an attachment, or a type no page can
+	// show) goes to the app's download list instead of the browser's own
+	// handling, which in a home-screen app is a sheet that leaves the app. The
+	// file streams into this origin's cache while a small page in the tab
+	// shows how far along it is; that page then hands it to the app.
+	const DOWNLOAD_CACHE = "bios-downloads";
+	const MAX_DOWNLOAD_BYTES = 200 * 1024 * 1024;
+	const downloads = new Map(); // id -> { name, type, total, received, done, error }
+	const SHOWABLE =
+		/^(text\/|image\/|video\/|audio\/|font\/|application\/(json|xml|javascript|pdf|xhtml\+xml|ld\+json|manifest\+json|x-javascript|ecmascript|rss\+xml|atom\+xml)\b)/i;
+
+	function headerOf(raw, name) {
+		for (const [key, value] of Object.entries(raw || {})) if (key.toLowerCase() === name) return [].concat(value).join(", ");
+		return "";
+	}
+
+	// What the file is to be called: the site's name for it, else the address's last part.
+	function fileName(disposition, url) {
+		let name = "";
+		const star = /filename\*\s*=\s*(?:UTF-8|utf-8)?'[^']*'([^;]+)/i.exec(disposition);
+		const plain = /filename\s*=\s*("([^"]*)"|[^;]+)/i.exec(disposition);
+		try {
+			if (star) name = decodeURIComponent(star[1].trim());
+		} catch {
+			// a name that isn't valid percent-encoding: try the plain one
+		}
+		if (!name && plain) name = (plain[2] ?? plain[1]).trim();
+		if (!name) name = decodeURIComponent(url.pathname.split("/").filter(Boolean).pop() || "") || url.hostname;
+		// no paths, nothing a file system would refuse
+		return name.replace(/[\\/:*?"<>|\u0000-\u001f]/g, "_").replace(/^\.+/, "").slice(0, 200) || "download";
+	}
+
+	function downloadOf(event) {
+		if (event.destination !== "document" && event.destination !== "iframe") return null;
+		if (event.status < 200 || event.status >= 300 || !(event.responseBody instanceof ReadableStream)) return null;
+		const raw = event.rawResponse?.rawHeaders;
+		const disposition = headerOf(raw, "content-disposition");
+		const type = (headerOf(raw, "content-type") || "application/octet-stream").split(";")[0].trim().toLowerCase();
+		const attachment = /^\s*attachment/i.test(disposition);
+		if (!attachment && (SHOWABLE.test(type) || /html/.test(type))) return null;
+		return {
+			name: fileName(disposition, event.url),
+			type: type || "application/octet-stream",
+			total: Number(headerOf(raw, "content-length")) || 0,
+		};
+	}
+
+	function startDownload(event, info) {
+		// before the caller puts the progress page in its place
+		const body = event.responseBody;
+		const id = crypto.randomUUID();
+		const entry = { ...info, received: 0, done: false, error: null };
+		if (downloads.size > 50) for (const [key, old] of downloads) if (old.done || old.error) downloads.delete(key);
+		downloads.set(id, entry);
+		const counting = new TransformStream({
+			transform(chunk, controller) {
+				entry.received += chunk.byteLength;
+				if (entry.received > MAX_DOWNLOAD_BYTES) controller.error(new Error("The file is larger than 200 MB."));
+				else controller.enqueue(chunk);
+			},
+		});
+		caches
+			.open(DOWNLOAD_CACHE)
+			.then((cache) =>
+				cache.put(
+					location.origin + API + "file?id=" + id,
+					new Response(body.pipeThrough(counting), { headers: { "content-type": entry.type } })
+				)
+			)
+			.then(
+				() => (entry.done = true),
+				(err) => (entry.error = String(err?.message || err))
+			);
+		return id;
+	}
+
+	// The tab's page while a file comes down. It polls this worker (which keeps
+	// it running), then sends the file up to the app, and goes back.
+	function downloadPage(id, info) {
+		return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${htmlEscape(info.name)}</title>
+<style>
+html{background:#faf9f7;color:#1f1e1d;font:16px/1.45 -apple-system,system-ui,sans-serif}
+body{margin:0;padding:48px 24px;max-width:560px}h1{font-size:20px;margin:0 0 8px;word-break:break-all}
+p{margin:0 0 14px;color:#6f6c68}progress{width:100%;height:8px}
+button{font:inherit;padding:10px 16px;border-radius:10px;border:1px solid #e2e0dc;background:#fff;margin-top:8px}
+</style></head><body>
+<h1 id="name">${htmlEscape(info.name)}</h1>
+<p id="status">Downloading…</p>
+<progress id="bar"></progress>
+<p><button id="back" type="button">Back to the page</button></p>
+<script>
+var fetchNow = window.fetch.bind(window), id = ${scriptJson(id)}, api = ${scriptJson(location.origin + API)};
+var shown = function (n) { return n > 1048576 ? (n / 1048576).toFixed(1) + " MB" : Math.ceil(n / 1024) + " KB"; };
+document.getElementById("back").onclick = function () { history.length > 1 ? history.back() : location.replace("about:blank"); };
+function fail(why) { document.getElementById("status").textContent = "The download failed. " + (why || ""); document.getElementById("bar").remove(); }
+function poll() {
+	fetchNow(api + "download?id=" + id).then(function (r) { return r.json(); }).then(function (s) {
+		var bar = document.getElementById("bar");
+		if (s.total) { bar.max = s.total; bar.value = s.received; }
+		document.getElementById("status").textContent = "Downloading… " + shown(s.received) + (s.total ? " of " + shown(s.total) : "");
+		if (s.error) return fail(s.error);
+		if (!s.done) return setTimeout(poll, 400);
+		fetchNow(api + "file?id=" + id).then(function (r) { return r.blob(); }).then(function (blob) {
+			top.postMessage({ bios: "download", name: s.name, type: s.type, blob: blob }, "*");
+			fetchNow(api + "download-done?id=" + id);
+			document.getElementById("status").textContent = "Saved to Downloads (" + shown(blob.size) + ").";
+			bar.remove();
+			if (history.length > 1) setTimeout(function () { history.back(); }, 600);
+		}, function () { fail(); });
+	}, function () { setTimeout(poll, 1000); });
+}
+poll();
+</script></body></html>`;
 	}
 
 	// ------------------------------------------------------------ internal API
@@ -636,6 +912,44 @@ function go(key) {
 				// not said
 			}
 			if (decode(request.referrer)) framed.set(pageKey(request.referrer), top);
+			return new Response(null, { status: 204 });
+		}
+		// The way into a frame's own origin (see inFrame): which site's page
+		// it's in comes along, and must be the one this origin was made for.
+		if (path === "frame") {
+			const params = new URL(request.url).searchParams;
+			const top = String(params.get("top") || "").toLowerCase();
+			const to = location.origin + String(params.get("u") || "");
+			const target = decode(to);
+			if (!inFrame || !target || !/^[a-z0-9.-]{1,253}$/.test(top)) return new Response(null, { status: 400 });
+			if ((await frameKey(top, target.hostname, viaTor)) !== ownLabel) return new Response(null, { status: 403 });
+			keepTop(top);
+			if (request.method !== "GET") return redirect(to);
+			// A frame's origin has no anchor frame to hold its proxy connection
+			// (a tab's site has one): this page connects it, then goes on,
+			// without a referrer: this address isn't a site's, and Scramjet
+			// would read it as one. (A frame's request is another site's anyway.)
+			return new Response(
+				`<!doctype html><meta charset="utf-8"><script src="/baremux/index.js"></script><script src="/register-sw.js"></script>` +
+					// (at most a few seconds: two frames of one origin setting up at
+					// once can leave one waiting, and the connection is the origin's)
+					`<script>Promise.race([setupTransport(), new Promise(function (r) { setTimeout(r, 4000); })]).catch(function () {}).then(function () { location.replace(${scriptJson(to)}); });</script>`,
+				{ headers: { ...headers(), "referrer-policy": "no-referrer" } }
+			);
+		}
+		// A download's progress, its file, and its end (see startDownload).
+		if (path === "download" || path === "file" || path === "download-done") {
+			const id = new URL(request.url).searchParams.get("id") || "";
+			const entry = downloads.get(id);
+			if (path === "download")
+				return entry
+					? json({ name: entry.name, type: entry.type, total: entry.total, received: entry.received, done: entry.done, error: entry.error })
+					: json({ error: "This download is no longer here." });
+			const cache = await caches.open(DOWNLOAD_CACHE);
+			const key = location.origin + API + "file?id=" + id;
+			if (path === "file") return (entry?.done && (await cache.match(key))) || new Response(null, { status: 404 });
+			await cache.delete(key);
+			downloads.delete(id);
 			return new Response(null, { status: 204 });
 		}
 		// Would the ad blocker stop this page? Asked before a page's pop-up
@@ -726,6 +1040,7 @@ function go(key) {
 	// is described by Scramjet alone, as all were before
 	const hops = new Map(); // proxied page URL -> who began the navigation a trampoline or a redirect carries on
 	const asked = new Map(); // site URL -> who is asking, for the request Scramjet sends next
+	const workerLevels = new Map(); // site URL of a worker's script -> its fingerprinting protection
 	function keep(map, key, value) {
 		if (map.size > 200) map.clear();
 		map.set(key, value);
@@ -774,8 +1089,23 @@ function go(key) {
 				site: began.from ? stricter(began.site, relation(began.from, target)) : began.site,
 			};
 		}
+		// the app's own navigation: the person, or the page that opened the tab
+		const mine = announced.get(pageKey(url));
+		if (mine && !ref) {
+			announced.delete(pageKey(url));
+			if (Date.now() - mine.at < 30_000) {
+				if (!mine.from) return who;
+				return { ...who, from: mine.from, quiet: false, brief: true, site: relation(mine.from, target) };
+			}
+		}
+		// a frame's own origin only ever holds frames
+		if (inFrame) who.framed = true;
 		if (ref) who.site = relation(ref, target);
 		else if (fromAnotherSite(request.referrer)) who.site = "cross-site";
+		// Isolation: a page that got around the proxy's hooks can send the tab
+		// to this origin without a referrer. Unless the app said it was its
+		// own, nobody we know asked: another site's request.
+		else if (isolated && !request.referrer) who.site = "cross-site";
 		return who;
 	}
 
@@ -869,9 +1199,15 @@ function go(key) {
 		).split(" ")
 	);
 
+	// Brave's rules that apply to `target`: every address's, and its site's.
+	const appliesTo = (rule, href) =>
+		(!rule.match || rule.match.some((re) => re.test(href))) && !rule.exclude.some((re) => re.test(href));
+
 	// `target` without them, or null when it has none. The rest of the query
 	// is left exactly as written (some sites sign theirs).
 	function withoutTracking(target) {
+		if (!target.search) return null;
+		const extra = privacyRules.params.filter((rule) => appliesTo(rule, target.href));
 		const parts = target.search.slice(1).split("&");
 		const kept = parts.filter((part) => {
 			let name = part.split("=")[0];
@@ -881,12 +1217,53 @@ function go(key) {
 				// not valid percent-encoding: compare it as written
 			}
 			name = name.toLowerCase();
-			return !TRACKING_PARAMS.has(name) && !name.startsWith("utm_");
+			return !TRACKING_PARAMS.has(name) && !name.startsWith("utm_") && !extra.some((rule) => rule.params.has(name));
 		});
 		if (kept.length === parts.length) return null;
 		const clean = new URL(target.href);
 		clean.search = kept.join("&");
 		return clean;
+	}
+
+	// Where a bounce-tracking address leads (Brave's debounce rules), or null.
+	// Only to another site: a hop within one site may be its own sign-in.
+	function bounceTarget(target) {
+		let at = target;
+		for (let hops = 0; hops < 5; hops++) {
+			const next = privacyRules.debounce
+				.filter((rule) => appliesTo(rule, at.href))
+				.map((rule) => leadsTo(rule, at))
+				.find((url) => url && siteOf(url.hostname) !== siteOf(at.hostname));
+			if (!next) break;
+			at = next;
+		}
+		return at === target ? null : at;
+	}
+
+	function leadsTo(rule, from) {
+		let value = null;
+		try {
+			if (rule.action === "redirect" || rule.action === "base64,redirect") {
+				value = from.searchParams.get(rule.param);
+				if (value && rule.action === "base64,redirect")
+					value = atob(value.replace(/-/g, "+").replace(/_/g, "/").replace(/\s/g, ""));
+			} else {
+				const found = new RegExp(rule.param).exec(from.pathname);
+				if (!found) return null;
+				const groups = found.slice(1).map((part) => decodeURIComponent(part || ""));
+				value =
+					rule.action === "regex-path-template"
+						? rule.template.replace(/\$(\d)/g, (_, n) => groups[n - 1] || "")
+						: groups.join("");
+			}
+			if (!value) return null;
+			value = value.trim();
+			if (rule.scheme && !/^https?:\/\//i.test(value)) value = `${rule.scheme}://${value.replace(/^\/+/, "")}`;
+			const url = new URL(value);
+			return url.protocol === "http:" || url.protocol === "https:" ? url : null;
+		} catch {
+			return null;
+		}
 	}
 
 	/**
@@ -918,6 +1295,22 @@ function go(key) {
 		return null;
 	}
 
+	// Whether a site's framing rule (framingRule) lets a page of `site` frame
+	// it. A frame's own origin is always another site's than the page's, so
+	// 'self' never matches; a source matches by its site.
+	function framingAllows(policies, site) {
+		if (!site) return false;
+		return policies.every((sources) =>
+			sources.some((source) => {
+				source = source.toLowerCase();
+				if (source === "*" || /^https?:$/.test(source)) return true;
+				if (source.startsWith("'")) return false;
+				const host = /^(?:[a-z][a-z0-9+.-]*:\/\/)?(?:\*\.)?([a-z0-9.-]+)/.exec(source)?.[1];
+				return !!host && siteOf(host) === siteOf(site);
+			})
+		);
+	}
+
 	// Counts blocked requests for the new tab's "trackers blocked" stat and
 	// tells the app's own pages every few seconds: the shell (shared mode) or
 	// this site's anchor frame (isolation mode), never the proxied pages.
@@ -940,6 +1333,55 @@ function go(key) {
 			for (const page of pages)
 				if (!page.url.startsWith(prefix)) page.postMessage({ bios: "blocked", count, hosts });
 		}, 3000);
+	}
+
+	// Revocation: the server checks the site's certificate against its
+	// authority's list (src/certs.js), once per host every half hour here.
+	const certChecks = new Map(); // host[:port] -> Promise<certificate | null>
+	function revocation(target) {
+		if (target.protocol !== "https:" || viaTor) return null;
+		let check = certChecks.get(target.host);
+		if (!check) {
+			if (certChecks.size > 300) certChecks.clear();
+			check = shellFetch("/api/cert", {
+				cache: "no-store",
+				headers: { "x-bios-host": target.hostname, "x-bios-port": target.port || "443" },
+			})
+				.then((res) => (res.ok ? res.json() : null))
+				.catch(() => null);
+			certChecks.set(target.host, check);
+			setTimeout(() => certChecks.delete(target.host), 30 * 60_000);
+		}
+		return check;
+	}
+
+	// CNAME uncloaking (src/cname.js): what one of the page's site's own
+	// subdomains points to, asked once per name while this worker runs.
+	// Only those: a name of another site is checked against the lists as it is.
+	const cnames = new Map(); // host -> Promise<string[]>
+	function canonical(host) {
+		let names = cnames.get(host);
+		if (!names) {
+			if (cnames.size > 500) cnames.clear();
+			names = shellFetch("/api/cname", { cache: "no-store", headers: { "x-bios-host": host } })
+				.then((res) => (res.ok ? res.json() : { names: [] }))
+				.then((answer) => (Array.isArray(answer.names) ? answer.names : []))
+				.catch(() => []);
+			cnames.set(host, names);
+		}
+		// a slow answer lets the request through rather than stall the page
+		return Promise.race([names, new Promise((resolve) => setTimeout(resolve, 1500, []))]);
+	}
+
+	async function cloakedTracker(target, source, destination) {
+		if (viaTor || !source || target.hostname === source.hostname) return false;
+		if (siteOf(target.hostname) !== siteOf(source.hostname)) return false;
+		for (const name of await canonical(target.hostname)) {
+			const uncloaked = new URL(target.href);
+			uncloaked.hostname = name;
+			if (listed(uncloaked, source, REQUEST_TYPES[destination] || "other").match) return true;
+		}
+		return false;
 	}
 
 	// The tab's page a request belongs to: a frame inside a page answers for
@@ -1002,6 +1444,8 @@ function go(key) {
 	async function httpsOnly(request, target, isPage, url) {
 		if (target.protocol !== "http:") return null;
 		const host = target.hostname.toLowerCase();
+		// an onion site's connection is encrypted end to end by Tor itself
+		if (viaTor && host.endsWith(".onion")) return null;
 		if (plainHttp.has(siteOf(host))) return null;
 		// a page load gets fresh settings, so the switch applies at once
 		if (isPage) settingsAt = 0;
@@ -1048,10 +1492,21 @@ function go(key) {
 		const noScripts = noSiteScripts(decode(event.request.referrer));
 		if (noScripts && SCRIPTED.has(destination)) return blocked(destination);
 		const res = await scramjet.fetch(event);
-		const page = isPage && { cosmetic: false, videoAds: false, safer: hardened(), noScripts };
+		const page = isPage && { cosmetic: false, videoAds: false, safer: hardened(), farble: true, noScripts };
 		const resHeaders = new Headers(res.headers);
 		resHeaders.set("content-security-policy", policyFor(page));
 		const html = page && /^text\/html/i.test(resHeaders.get("content-type") || "");
+		// a worker made from a blob: (a favourite of fingerprinting scripts) gets
+		// the protection a worker from an address gets
+		if (destination === "worker" || destination === "sharedworker") {
+			const shim = `${location.origin}/bios/worker${hardened() ? "-safer" : ""}.js`;
+			const body = await res.text();
+			return new Response((body.startsWith("import ") ? `import "${shim}";\n` : `importScripts("${shim}");\n`) + body, {
+				status: res.status,
+				statusText: res.statusText,
+				headers: resHeaders,
+			});
+		}
 		return new Response(html ? injectHtml(await res.text(), page) : res.body, {
 			status: res.status,
 			statusText: res.statusText,
@@ -1106,10 +1561,29 @@ function go(key) {
 		const empty = await emptyAttribute(event, target, destination);
 		if (empty) return empty;
 
+		// an onion site only exists inside Tor: offer to open it in a Tor tab
+		if (!viaTor && target.hostname.toLowerCase().endsWith(".onion")) {
+			if (isPage) return interstitial({ kind: "onion", host: target.hostname, url: target.href });
+			return Response.error();
+		}
+
 		const upgraded = await httpsOnly(request, target, isPage, url);
 		if (upgraded) return upgraded;
 
 		const who = await whoAsks(event, url, target, isPage);
+
+		// A bounce-tracking address (an affiliate or mail-click link, an AMP
+		// cache) goes straight to where it leads, skipping the tracker.
+		if (isPage && safe(request.method)) {
+			await waitForPrivacyRules();
+			const leads = bounceTarget(target);
+			// fresh settings, so the switch applies to the very next page
+			if (leads) settingsAt = 0;
+			if (leads && (await getSettings()).ads && !isAllowed(target.hostname) && !isAllowed(leads.hostname)) {
+				countBlocked();
+				return redirect(location.origin + encodeUrl(leads.href));
+			}
+		}
 
 		// An address typed or pasted, or a link from another site, loses the
 		// parameters that follow people between sites; a site's own links
@@ -1131,16 +1605,30 @@ function go(key) {
 			// belongs to another site goes there, unless it's a frame inside
 			// a page (those stay with the page, like Safari's partitioning).
 			if (isolated && !inlineOnce.delete(url)) {
-				const key = await siteKey(target.hostname);
-				if (key !== ownLabel) {
+				if (inFrame) await topLoaded;
+				const key = await keyOf(target.hostname);
+				// the page this frame is in: this origin's own site, or the
+				// one a frame's origin was opened for
+				const embedder = inFrame ? topSite : ownSite || (decode(request.referrer) && siteOf(decode(request.referrer).hostname));
+				const frameLabel = embedder ? await frameKey(embedder, target.hostname, viaTor) : null;
+				const here = inFrame ? frameLabel === ownLabel : key === ownLabel;
+				if (!inFrame && here) ownSite = siteOf(target.hostname);
+				if (!here) {
+					// A frame inside a page goes to an origin of its own (see
+					// inFrame); one whose page can't be told stays here, as before.
+					const sub =
+						frameLabel && (!inFrame || topSite)
+							? `${originFor(frameLabel)}${API}frame?top=${encodeURIComponent(embedder)}&u=${encodeURIComponent(url.slice(location.origin.length))}`
+							: null;
 					const page = await trampoline(request, {
 						tab: originFor(key) + url.slice(location.origin.length),
+						sub,
 						inline: url,
 						shell: shellOrigin + "/#" + encodeURIComponent(target.href),
 					});
-					// Only a frame inside a page carries on in this origin. Its
-					// site isn't this origin's, so unless a page of that site
-					// asked, the request is another site's.
+					// A frame inside a page carries on with the page as its
+					// asker. Its site isn't the page's, so unless a page of that
+					// site asked, the request is another site's.
 					if (page && who)
 						keep(hops, pageKey(url), {
 							who: { ...who, framed: true, site: who.from ? who.site : "cross-site" },
@@ -1156,6 +1644,7 @@ function go(key) {
 				}
 			}
 
+			const certificate = revocation(target);
 			const threat = await checkNavigation(target.hostname);
 			if (
 				threat &&
@@ -1163,6 +1652,10 @@ function go(key) {
 				!bypassed.has(target.hostname.toLowerCase())
 			)
 				return interstitial({ kind: threat, host: target.hostname, url });
+			// a slow answer (a big list the server is still fetching) lets the
+			// page load; the verdict is kept for the next one
+			const cert = await Promise.race([certificate, new Promise((resolve) => setTimeout(resolve, 2500, null))]);
+			if (cert?.revoked === true) return interstitial({ kind: "revoked", host: target.hostname, url });
 		} else {
 			await getSettings();
 		}
@@ -1190,6 +1683,12 @@ function go(key) {
 						{ headers: { ...headers(redirect.contentType.split(";")[0]) } }
 					);
 				}
+				// A tracker hiding behind one of the site's own subdomains
+				// (a CNAME): the server says what the name points to.
+				if (!match && !isPage && (await cloakedTracker(target, source, destination))) {
+					countBlocked(pageFor(request.referrer, source), target.hostname);
+					return blocked(destination);
+				}
 				if (match) {
 					// An embedded player whose ad script sends its own frame to
 					// an ad: answer with nothing, and the frame stays as it is.
@@ -1211,6 +1710,9 @@ function go(key) {
 				hostname: target.hostname,
 				cosmetic: blocking && settings.cosmetic,
 				notices: blocking && settings.notices,
+				consent: blocking && settings.consent,
+				// fingerprinting protection, off with the rest for a site the person switched it off for
+				farble: !isAllowed(target.hostname),
 				videoAds: settings.videoAds && !isAllowed(target.hostname),
 				safer: hardened(),
 				// "Safest", or "Safer" on a plain http page: none of the page's own scripts run
@@ -1219,7 +1721,13 @@ function go(key) {
 		}
 		failures.delete(target.href);
 		if (who) keep(asked, target.href, who);
-		const response = await scramjet.fetch(event);
+		// a worker gets its page's fingerprinting protection (client/worker.js)
+		if (destination === "worker" || destination === "sharedworker")
+			keep(workerLevels, target.href, hardened() ? "safer" : isAllowed(source?.hostname) ? null : "standard");
+		// A navigation gets no page that started it: Scramjet would read that
+		// page's address as a site's, and one of ours (a frame's way in,
+		// __bios/frame) isn't one. What sites are told is worked out above.
+		const response = await scramjet.fetch(isPage ? { request, clientId: "no page" } : event);
 		if (isPage && who && response.status >= 300 && response.status < 400) {
 			const to = response.headers.get("location");
 			if (to) keep(hops, pageKey(new URL(to, url).href), { who, redirect: true, at: Date.now() });
@@ -1257,6 +1765,7 @@ function go(key) {
 			cosmetic: page.cosmetic || page.notices,
 			videoAds: page.videoAds,
 			safer: page.safer,
+			farble: page.farble,
 			// left out when the site has no framing rule
 			ancestors: page.ancestors || undefined,
 		};
@@ -1265,6 +1774,8 @@ function go(key) {
 		let after =
 			`<script${nonce}>self.__biosPage=${scriptJson(flags)};document.currentScript.remove();</script>` +
 			`<script src="${location.origin}/bios/page.js"></script>`;
+		// cookie notices answered "reject" (client/consent.js), on the site's own pages
+		if (page.consent) after += `<script src="${location.origin}/bios/consent.js"></script>`;
 		if (styles)
 			after += `<style>${styles.replace(/<\/style/gi, "<\\/style")}</style>`;
 		if (scripts.length)
@@ -1294,7 +1805,9 @@ function go(key) {
 	// too, and frames a page writes itself inherit it.
 	// ponytail: no browser has a rule like this for WebRTC; page.js is the only block.
 	const socket = (location.protocol === "https:" ? "wss://" : "ws://") + location.host;
-	const NETWORK_LOCK = `default-src 'self' ${socket} data: blob: 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'; frame-src 'self'`;
+	// (Frames: this origin, or another site origin of the app: a frame from
+	// another site gets one of its own, see inFrame.)
+	const NETWORK_LOCK = `default-src 'self' ${socket} data: blob: 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'; frame-src 'self' ${siteOrigins}; ${FRAMED_BY}`;
 
 	// The policy for a proxied response; `page` is set for the pages we inject.
 	function policyFor(page) {
@@ -1318,7 +1831,24 @@ function go(key) {
 		// Link headers ask the browser to preload or preconnect to the site's
 		// servers itself, around the proxy (and Scramjet garbles their URLs).
 		delete event.responseHeaders.link;
+		// A worker's script: our protection loads first, before Scramjet's
+		// own code (which the rewritten script starts with).
+		const level = workerLevels.get(event.url.href);
+		if (level !== undefined && typeof event.responseBody === "string") {
+			workerLevels.delete(event.url.href);
+			const shim = `${location.origin}/bios/worker${level === "safer" ? "-safer" : ""}.js`;
+			if (level)
+				event.responseBody = (event.responseBody.startsWith("import ") ? `import "${shim}";\n` : `importScripts("${shim}");\n`) + event.responseBody;
+		}
 		const page = pages.get(pageKey(event.url.href));
+		// a file to save: the download list, not the browser's sheet
+		const file = page && downloadOf(event);
+		if (file) {
+			pages.delete(pageKey(event.url.href));
+			event.responseBody = downloadPage(startDownload(event, file), file);
+			event.responseHeaders = { ...headers(), "content-security-policy": NETWORK_LOCK };
+			return;
+		}
 		event.responseHeaders["content-security-policy"] = policyFor(page);
 		if (!page) return;
 		pages.delete(pageKey(event.url.href));
@@ -1333,11 +1863,19 @@ function go(key) {
 		const type = event.responseHeaders["content-type"] || "";
 		if (typeof event.responseBody === "string" && /^text\/html/i.test(type)) {
 			page.ancestors = framingRule(event.rawResponse?.rawHeaders);
+			// A frame's own origin knows the site of the page it's in, so the
+			// site's rule against being framed holds here, in the worker,
+			// even for a frame whose scripts the page switched off.
+			if (inFrame && page.ancestors && !framingAllows(page.ancestors, topSite)) {
+				event.responseBody = "<!doctype html><title></title>";
+				return;
+			}
 			event.responseBody = injectHtml(event.responseBody, page);
 		}
 	});
 
 	loadEngine();
+	loadPrivacyRules();
 
 	return {
 		handle(event) {

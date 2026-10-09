@@ -7,6 +7,8 @@ app/           server (express + wisp-js) and the PWA shell; Scramjet comes from
 desktop/       Windows app (Electron) that opens your server in its own window
 ```
 
+How it measures up against Brave, DuckDuckGo, Safari and Tor Browser, and what's left: `SECURITY-GAPS.md`. The open-source projects it's built from, and their licenses: `THIRD-PARTY.md`.
+
 ## Deploy to Railway (one command)
 
 From this folder, run:
@@ -51,7 +53,7 @@ The terms and privacy notice is at `/terms` and linked from the start page and t
 
 So neither one user nor everyone together can run up the bandwidth bill:
 
-- The proxy only connects to ports 80 and 443 over TCP. Mail ports, other ports and UDP are refused, so the server can't be used for spam or port scans. Sites on unusual ports (like `:8080`) won't load.
+- The proxy only connects to the web's ports over TCP: 80 and 443, and the ones web servers commonly use besides (8080, 8443, 8000 and 8888; `EXTRA_PORTS` replaces those, or `none`). Mail ports, other ports and UDP are refused, so the server can't be used for spam or port scans.
 - Each address may hold 16 proxy connections open, with up to 128 site connections in each.
 - Each address may move 2 GB a day through the server (`DAILY_GB_PER_CLIENT`). After that, new connections and videos are refused until the day resets.
 - The whole server moves at most 50 GB a day (`DAILY_GB_TOTAL`). At 80% the logs say `bandwidth: 80% of DAILY_GB_TOTAL used today`; at 100% everyone is refused until the day resets. Set Railway to alert you on those log lines, and set a spending limit in Railway's billing settings as a backstop.
@@ -75,7 +77,8 @@ The server has no database and keeps no accounts, history or site data. The only
 - **Logins and cookies stay on the phone.** Sites' cookies, logins and storage live in the app's own browser storage on each device, not on the server. They stay until the person clears them (shield menu → **Clear history and site data now**, or the "clear when the app opens" switch).
 - **History and bookmarks stay on the phone too.** They're kept in the app's own storage on the device and never sent to the server. Star a page in the address bar to bookmark it; bookmarks show in the bookmarks bar and as shortcuts on the new tab page, and **History** is in the ⋯ menu. The new tab's "trackers blocked this week" count is kept on the device too. Clearing site data also clears history but keeps bookmarks. With site isolation, sites can't read either, because they run on other addresses.
 - **HTTPS is encrypted on the phone.** The encryption (TLS) runs inside the app on the phone, and the server only relays encrypted bytes. It can't read passwords, cookies or pages of `https://` sites.
-- **What the server does learn:** the name of each site opened (for example `example.com`), so it can check it against the malware and phishing lists. It's used for that check and not logged. Videos that iOS plays with its own player are fetched by the server itself, so for those the server sees the video's address, and the host's request logs (Railway's HTTP logs) record it.
+- **What the server does learn:** the name of each site opened (for example `example.com`), so it can check it against the malware and phishing lists. It's used for that check and not logged. Videos that iOS plays with its own player are fetched by the server itself, so for those the server sees the video's address, and the host's request logs (Railway's HTTP logs) record it. For the same sites, the server also looks up what a site's own subdomains are aliases of (to catch trackers hiding behind them) and opens a connection of its own to read the site's certificate and check it hasn't been revoked; for Tor tabs it does neither. With `WEB_RISK_API_KEY`, it checks sites against Google Web Risk the private way: Google only ever gets a short hash prefix, for the rare site that matches one.
+- **Sync** passes two sealed boxes between a person's devices (bookmarks, history, passwords, passkeys), encrypted with the one-time code before they leave the device. The server keeps them in memory for at most ten minutes, or until the other device takes them, and can't read them.
 - **Cookies the app sets:** a pass from the bot check (30 days) or the password sign-in, and the person's settings. Neither identifies anyone. The settings cookie belongs to the app's own address only (`__Host-`), so a site on its walled-off subdomain can't plant a copy with protections switched off.
 - **Logs** contain errors, startup messages and bandwidth warnings, never the sites people visit.
 - **Trust:** the server delivers the app's code, so the people using it are trusting whoever runs the server, like any website.
@@ -105,6 +108,14 @@ It needs a domain you own, because Railway's free `*.up.railway.app` address can
 
 The shield menu says whether isolation is on.
 
+A frame from another site inside a page (a video player, a widget, an ad that got through) gets an origin of its own too, one for each pair of sites, so the browser keeps it and the page apart as it would without the proxy: it can't read or change the page around it, and its site's cookies stay apart under every site that embeds it. The two still exchange messages, each learning the other's real address.
+
+## Tor tabs
+
+With site isolation, the ⋯ menu offers **New Tor tab**, as Brave's private window with Tor: its sites' connections leave the server through Tor, a separate circuit for each site, so sites see a Tor exit instead of the server, and onion (`.onion`) sites open. A Tor tab keeps no history, isn't brought back when the app opens, and its sites' cookies and storage go with the last Tor tab. The server still sees which sites a Tor tab opens, as it does for every tab: it hands the connections to Tor.
+
+The Docker image installs Tor and the server starts it; `TOR=off` switches Tor tabs off, and elsewhere `TOR_BIN` names the program.
+
 ## Desktop app (Windows)
 
 `desktop/` is an installable Windows app that opens your Badger server (the Railway deploy) in its own window. It works like the phone app: sites see the server's address, not the computer's, and it gets around network filters the same way. Blocking, warnings, isolation, tabs and sign-in all come from the server.
@@ -122,7 +133,7 @@ Running `Badger-Setup.exe` installs Badger for the current user, with a Start me
 How it's locked down:
 
 - **Everything goes through the server:** the window may only contact your server and its per-site subdomains. A page that slips past the proxy still can't reach the internet directly, open a window, or hand a link to the system browser.
-- **Permissions are refused:** camera, microphone, location, notifications and the like are all turned down. Full screen, copying to the clipboard and pointer lock are allowed.
+- **Permissions:** location, camera and microphone only after the app's own prompt, and only for the server's own addresses; notifications and the like are refused. Full screen, copying to the clipboard and pointer lock are allowed.
 - **No WebRTC around the lock:** its UDP is turned off inside Chromium, and anything that isn't the server is sent to a proxy that doesn't exist, so its TCP connections fail too. It can't show sites the computer's real address.
 - **Electron hardened:**
   - Fuses: Node mode, `NODE_OPTIONS` and the inspector are off, and the app only loads from its own (integrity-checked) package.
@@ -178,6 +189,11 @@ The browser under test sends everything except the app's own addresses to a smal
 
 | Variable | What it does |
 | --- | --- |
+| `EXTRA_PORTS` | Ports besides 80 and 443 sites may be on (default `8080,8443,8000,8888`; `none` for none). |
+| `THREAT_REFRESH_MINUTES` | How often the phishing and malware lists are asked again (default 30). |
+| `WEB_RISK_API_KEY` | Also check sites against Google Web Risk, privately (hash prefixes). Optional, paid. |
+| `TOR` | `off` switches Tor tabs off. |
+| `TOR_BIN`, `TOR_DATA_DIR` | Where the Tor program is (default: `tor` on the path) and where it keeps its state. |
 | `AUTH_SECRET` | Secret (32+ random characters) that signs every cookie. Required in production (`NODE_ENV=production`, which the Docker image sets). |
 | `APP_PASSWORD` | Makes the instance private, behind a password screen. Without it the app is public. |
 | `ISOLATION_DOMAIN` | Turns on site isolation (see above). Required in production when public. |
@@ -208,6 +224,10 @@ Tap the shield or lock icon at the left of the address bar to see what's on and 
 | No WebRTC | WebRTC talks to servers over UDP straight from the device, around the proxy, and would show sites the device's real IP address. The app's page script takes WebRTC away from every page and every frame a page makes. That is script against script, not a browser rule (browsers have none for WebRTC), so a page built to get around it may find a way; the desktop app also cuts WebRTC's UDP off inside Chromium. Video calls in the browser don't work through the proxy anyway. |
 | Network lock | Every proxied page and worker carries a Content-Security-Policy that only lets it talk to the app's own address, which is the proxy. A page that gets around the proxy's hooks (a fresh frame has the browser's own `fetch` and `WebSocket`) still can't reach a site directly. |
 | Strict policy on the app's own pages | The app's pages run only their own scripts (a Content-Security-Policy with hashes of the few inline ones), may only be framed by the app, and are HTTPS-only for six months once visited over HTTPS (HSTS). |
+| Answer cookie notices | On unless switched off. DuckDuckGo's autoconsent says no to tracking where a notice offers that, and hides notices that offer no way to say no. The shield menu says when it answered one. |
+| Bounce tracking and cloaked trackers | An affiliate or mail-click link goes straight to where it leads, without visiting the tracker (Brave's debounce rules; AMP pages go to the publisher's own). Trackers hiding behind a site's own subdomain are caught by Brave's list and by a live check of what the subdomain points to. |
+| Fingerprinting protection | On everywhere but sites with blocking off, as in Brave: what a canvas or a sound reads back carries a little noise, and scripts get a common processor count and memory, one language, an always-full battery, the same storage allowance as everyone and WebGL's generic graphics-card names. Inside workers too. Safer adds more (above). |
+| Revoked certificates | The server checks each site's certificate against its authority's revocation list; a revoked one gets a warning with no way past it. **Certificate** in the shield menu shows who a certificate belongs to. |
 | Clear site data on launch | On by default, so a lost or shared device doesn't keep the last session's logins (turn it off in Settings to stay signed in). Each fresh launch deletes every site's cookies, storage and logins, the history and the open tabs (bookmarks are kept). A phone rarely closes a home-screen app, so coming back after 15 minutes away counts as a fresh launch too. **Clear history and site data now** does it on demand. |
 | Passphrase lock | Optional (Settings → **Lock history and bookmarks with a passphrase**). History, bookmarks and open tabs are stored on the device encrypted (AES-GCM, with a key made from the passphrase by PBKDF2-SHA256 at 600,000 rounds). The key is only ever in memory, so the passphrase is asked each time the app opens. A phone keeps the app alive in the background, so coming back after five minutes away asks again too. A forgotten passphrase can't be recovered: **Erase and start over** deletes them along with every site's logins. Site logins themselves aren't encrypted; clearing on launch covers them. |
 | Password | See above. It also guards the proxy connection itself, not only the page. |
@@ -217,13 +237,21 @@ Tap the shield or lock icon at the left of the address bar to see what's on and 
 Limits:
 
 - The security levels hold for what the browser kept from before a switch: pages always ask the service worker again, and the no-scripts and no-fonts rules are part of the page's policy, which the browser enforces itself.
-- Safer's protection against telling devices apart is page script, like the WebRTC block: it doesn't reach inside workers, and leaves the screen's size and the installed fonts readable. Tor Browser does all of that in the browser itself.
-- The framing rule is page script too: a framing page that switches scripts off in its frame still gets the page shown, without the person's sign-in (embedded sites keep separate cookies).
+- The protection against telling devices apart is page script, like the WebRTC block (it reaches workers too): it leaves the installed fonts and what CSS media queries say about the screen readable. Tor Browser does that in the browser itself.
 - No blocker catches everything. Sites change their ads to get around block lists, which is why the lists are refreshed daily. If an ad gets through, it's usually fixed in a list update within a day or two.
-- Rules that hide elements by their link or image address don't apply, because the proxy rewrites those addresses.
-- With isolation on, a frame from another site embedded *inside* a page (an ad, a video player) runs in that page's space, the way Safari partitions embedded frames. It can't see other sites' data, its own site's cookies from elsewhere, or the app. But it can read and change the page that embeds it, which a browser would refuse: nothing but Scramjet's and the app's page scripts stand between the two (`SECURITY-GAPS.md`).
-- With isolation on, each site you visit costs a little more at first: its own service worker, its own proxy connection and its own copy of the block list in memory.
+- With isolation on, each site you visit costs a little more at first: its own service worker, its own proxy connection and its own copy of the block list in memory. So does each site whose frames appear inside a page.
 - The proxy refuses to connect to private, loopback and link-local addresses, so pages can't reach the server's own network. Sites that only exist on a private network can't be opened through it.
+
+## Everyday features
+
+- **Find in page** counts the matches and marks them all. **Zoom** (the − and + in the shield menu) is kept per site. **Print** prints the page.
+- **Reader view** shows the page's article by itself: the page sends its markup, the app picks out the article (Mozilla's Readability), cleans it (DOMPurify) and shows it; the page fetches the pictures. Nothing from the site runs in the app.
+- **Translate** opens the page in Google's page translator, through the proxy like any site. Google fetches the page itself, without the person's cookies, so it learns the page's address.
+- **Downloads**: a file a site sends to be saved (or one a page makes, like an export) goes to the app's download list, with progress in the tab, instead of a sheet that leaves the app. From the list it goes to Files or another app through the share sheet. Kept on the device, encrypted with the passphrase lock.
+- **Passwords**: a password used to sign in is offered to keep. The key in the address bar fills it in on that site, only when tapped (and can make up a strong one on a sign-up form). Kept encrypted: with the passphrase, or without it, with a key the browser keeps and won't hand out.
+- **Passkeys**: when a site offers to make one, the app makes it and keeps it, encrypted with the passphrase (passkeys need the passphrase lock), and signs in with it after the person says yes. Each one belongs to the site whose address the app verified, so no other site can use it.
+- **Location, camera and microphone**: a site asks, and the app asks the person with its own prompt (location can be approximate, within about a kilometre). Answers can be kept for the site, and taken back in the shield menu.
+- **Sync with another device**: one device shows a code, the other types it in, and both end up with each other's bookmarks, history, passwords and passkeys.
 
 ## What "no popups" covers
 
@@ -237,7 +265,9 @@ Most of this lives in `app/src/client/page.js` (`noPopups`). It runs inside ever
 | `mailto:`, `tel:`, `sms:`, `maps:`, app-store links hand off to another app | blocked |
 | `alert` / `print` | silenced |
 | `confirm` / `prompt` | the real in-app dialog right after a click or tap; without one they answer "no" (`false` / `null`), so pages can't loop dialogs or get anything agreed to unseen |
-| location, camera/mic, notifications, motion sensors, share sheet, passkeys, Apple Pay, clipboard paste, storage-access prompts | denied without showing a prompt |
+| location, camera, microphone | the app's own prompt first (see Everyday features) |
+| passkeys | the app's own (see Everyday features) |
+| notifications, motion sensors, share sheet, Apple Pay, clipboard paste, storage-access prompts | denied without showing a prompt |
 | long-press link/image previews | disabled |
 | a proxied page escaping to the top level | gets wrapped back into the shell |
 | a page reaching around all of the above through a frame of its own, for the browser's own `window.open`, dialogs and links | refused there too: such a frame gets no windows, no dialogs, and links only to the proxy. On phones and tablets the browser enforces it as well: tabs are sandboxed frames without permission to open windows or replace the app |
@@ -265,4 +295,6 @@ Scramjet is used unmodified from npm. Everything app-specific is around it:
 - `app/public/register-sw.js`: registers the worker, waits for it to activate (`serviceWorker.ready` never settles because the shell is outside the worker's scope), removes the old Ultraviolet worker, and answers the worker's reconnect requests.
 - `app/src/index.js`: serves Scramjet's files at `/scram/`, sends `Cache-Control: no-cache` because iOS PWAs cache aggressively, and has a recovery page that re-registers the service worker when iOS evicts it. It also runs the password gate (`auth.js`), the block lists (`filters.js`), the signed settings cookie, and the site-isolation host rules. At startup it bundles `shield.js`, `page.js` and `sitekey.js` with esbuild.
 - `app/src/media.js`: iOS plays video with its own media engine, which skips the service worker and asks the server for the proxied URL directly. The server fetches the video itself and rewrites HLS playlists so every segment in them is proxied too.
-- `app/src/wisp.js`: the wisp server (wisp-js) only connects to ports 80 and 443 over TCP, and refuses private, loopback and link-local addresses. wisp-js has its own check, but it misses IPv6 private addresses (`fc00::/7`) and IPv4-mapped ones, so ours runs in front of it.
+- `app/src/wisp.js`: the wisp server (wisp-js) only connects to the web's ports over TCP, and refuses private, loopback and link-local addresses. wisp-js has its own check, but it misses IPv6 private addresses (`fc00::/7`) and IPv4-mapped ones, so ours runs in front of it.
+- `app/src/client/fingerprint.js` (page and workers), `consent.js` (cookie notices), `logins.js` (passwords and passkeys, the page's side), `reader.js` (reader view, in the shell), `worker.js` (workers' protection): bundled at startup like `page.js`.
+- `app/src/privacyrules.js` (Brave's debounce and query rules), `cname.js` (what a subdomain is an alias of), `certs.js` (certificates and revocation), `webrisk.js` (Google Web Risk, optional), `sync.js` (the sync relay), `tor.js` (Tor tabs).

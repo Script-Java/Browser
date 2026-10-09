@@ -1,7 +1,9 @@
-// Filter lists: the ad/tracker engine (shipped to the service worker) and the
-// malware/phishing host lists (checked by the server on every page load).
-// Everything is rebuilt from the upstream lists every REFRESH_HOURS and cached
-// on disk so a restart doesn't have to download it all again.
+// Filter lists: the ad/tracker engine (shipped to the service worker), Brave's
+// navigation-tracking rules (privacyrules.js, shipped to the worker too) and
+// the malware/phishing host lists (checked by the server on every page load).
+// The ad lists are rebuilt from upstream every REFRESH_HOURS, the threat lists
+// every THREAT_REFRESH_MINUTES (they change by the hour), and everything is
+// cached on disk so a restart doesn't have to download it all again.
 
 import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile, rename } from "node:fs/promises";
@@ -9,11 +11,14 @@ import { get } from "node:https";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 import { FiltersEngine } from "@ghostery/adblocker";
+import { compileRules } from "./privacyrules.js";
 
 // Ghostery mirrors the same lists; used when an upstream host is down.
 const MIRROR =
 	"https://raw.githubusercontent.com/ghostery/adblocker/master/packages/adblocker/assets";
 const UASSETS = "https://ublockorigin.github.io/uAssets/filters";
+const BRAVE = "https://raw.githubusercontent.com/brave/adblock-lists/master/brave-lists";
+const ADGUARD_CNAME = "https://raw.githubusercontent.com/AdguardTeam/cname-trackers/master/data";
 
 const AD_LISTS = [
 	[
@@ -44,7 +49,18 @@ const AD_LISTS = [
 		`${UASSETS}/resource-abuse.txt`,
 		`${MIRROR}/ublock-origin/resource-abuse.txt`,
 	],
+	// Trackers disguised as a site's own subdomain (a CNAME pointing at the
+	// tracker), as Brave lists them for its iOS app, which can't look the
+	// names up either.
+	[`${BRAVE}/brave-firstparty-cname.txt`],
+	// The trackers those subdomains point at, for the live check (cname.js):
+	// the server looks the name up and the worker matches what it points to.
+	[`${ADGUARD_CNAME}/combined_original_trackers.txt`],
 ];
+
+// Brave's navigation-tracking rules (privacyrules.js).
+const DEBOUNCE_RULES = [`${BRAVE}/debounce.json`];
+const QUERY_RULES = [`${BRAVE}/query-filter.json`];
 
 // "Hide cookie notices": an engine of their own, so only people who switch
 // it on carry these lists in every site's service worker.
@@ -94,15 +110,24 @@ const MAX_LIST_BYTES = 64 * 1024 ** 2;
 // node:https rather than fetch(): Node 22's built-in fetch (undici) can crash
 // the whole process with an internal assert, not a catchable error, when a
 // download's connection ends mid-body. These run while people are browsing.
-export function fetchText(url, redirects = 0) {
+// With `since` (an ETag or Last-Modified from before), an unchanged list
+// answers null instead of coming down again.
+export function fetchText(url, since = null, redirects = 0) {
 	return new Promise((resolve, reject) => {
 		if (!url.startsWith("https://")) return reject(new Error("not https"));
-		const req = get(url, { timeout: 60_000 }, (res) => {
+		const headers = {};
+		if (since?.etag) headers["if-none-match"] = since.etag;
+		else if (since?.modified) headers["if-modified-since"] = since.modified;
+		const req = get(url, { timeout: 60_000, headers }, (res) => {
 			const { statusCode, headers } = res;
-			if (statusCode >= 300 && statusCode < 400 && headers.location) {
+			if (statusCode >= 300 && statusCode < 400 && headers.location && statusCode !== 304) {
 				res.resume();
 				if (redirects >= 5) return reject(new Error("too many redirects"));
-				return resolve(fetchText(new URL(headers.location, url).href, redirects + 1));
+				return resolve(fetchText(new URL(headers.location, url).href, since, redirects + 1));
+			}
+			if (statusCode === 304 && since) {
+				res.resume();
+				return resolve(null);
 			}
 			if (statusCode !== 200) {
 				res.resume();
@@ -115,7 +140,14 @@ export function fetchText(url, redirects = 0) {
 				if (size > MAX_LIST_BYTES) req.destroy(new Error("list too large"));
 				else chunks.push(chunk);
 			});
-			res.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+			res.on("end", () =>
+				resolve({
+					text: Buffer.concat(chunks).toString("utf8"),
+					// for the next conditional request
+					etag: headers.etag || null,
+					modified: headers["last-modified"] || null,
+				})
+			);
 			res.on("error", reject);
 		});
 		req.on("timeout", () => req.destroy(new Error("timed out")));
@@ -123,12 +155,14 @@ export function fetchText(url, redirects = 0) {
 	});
 }
 
-async function download(urls) {
+// The first of `urls` that answers: { text, etag, modified }, or null when
+// the first one says it hasn't changed since `since`.
+async function fetchFirst(urls, since = null) {
 	let lastError;
 	for (const url of urls) {
 		for (let attempt = 0; attempt < 2; attempt++) {
 			try {
-				return await fetchText(url);
+				return await fetchText(url, url === urls[0] ? since : null);
 			} catch (err) {
 				lastError = new Error(`${url}: ${err.message}`);
 			}
@@ -136,6 +170,8 @@ async function download(urls) {
 	}
 	throw lastError;
 }
+
+const download = async (urls) => (await fetchFirst(urls)).text;
 
 function parseHosts(text) {
 	const hosts = [];
@@ -150,24 +186,32 @@ function parseHosts(text) {
 
 export class Filters {
 	/**
-	 * @param {{ cacheDir: string, refreshHours: number }} options
+	 * @param {{ cacheDir: string, refreshHours: number, threatMinutes?: number }} options
 	 */
-	constructor({ cacheDir, refreshHours }) {
+	constructor({ cacheDir, refreshHours, threatMinutes = 30 }) {
 		this.cacheDir = cacheDir;
 		this.refreshMs = refreshHours * 3_600_000;
+		this.threatMs = threatMinutes * 60_000;
 		this.engine = null; // { raw, gzip, etag }
 		this.notices = null; // the cookie-notice engine, the same way
+		this.privacy = null; // Brave's navigation-tracking rules, as JSON the same way
 		this.threats = new Map(); // host -> "phishing" | "malware"
+		// per threat list: { etag, modified, hosts } from its last download
+		this.threatSources = {};
 		this.updatedAt = 0;
+		this.threatsAt = 0;
 		this.stats = {};
 		this.building = null;
+		this.checkingThreats = null;
 	}
 
 	async start() {
 		await this.loadCache().catch(() => {});
 		this.refresh();
+		this.refreshThreats();
 		// Checks hourly; build() only downloads once the lists are stale.
 		setInterval(() => this.refresh(), 3_600_000).unref();
+		setInterval(() => this.refreshThreats(), this.threatMs).unref();
 	}
 
 	refresh() {
@@ -179,11 +223,21 @@ export class Filters {
 		return this.building;
 	}
 
+	refreshThreats() {
+		this.checkingThreats ||= this.buildThreats()
+			.catch((err) => console.error("filters: threat lists failed:", err.message))
+			.finally(() => {
+				this.checkingThreats = null;
+			});
+		return this.checkingThreats;
+	}
+
 	async build() {
-		// (a cache from before the cookie-notice lists has none: fetch them once)
+		// (a cache from before the cookie-notice lists or the privacy rules
+		// has none: fetch them once)
 		const fresh = Date.now() - this.updatedAt < this.refreshMs;
-		if (fresh && (this.notices || this.noticesTried)) return;
-		this.noticesTried = true;
+		if (fresh && (this.notices || this.noticesTried) && (this.privacy || this.privacyTried)) return;
+		this.noticesTried = this.privacyTried = true;
 		console.log("filters: downloading lists");
 		const started = Date.now();
 		const optional = (urls) =>
@@ -192,28 +246,12 @@ export class Filters {
 				return "";
 			});
 
-		const [lists, noticeLists, resources, threatTexts] = await Promise.all([
-			Promise.all(
-				AD_LISTS.map((urls) =>
-					download(urls).catch((err) => {
-						console.warn("filters: skipping list:", err.message);
-						return "";
-					})
-				)
-			),
+		const [lists, noticeLists, resources, debounceText, queryText] = await Promise.all([
+			Promise.all(AD_LISTS.map(optional)),
 			Promise.all(NOTICE_LISTS.map(optional)),
 			download(RESOURCES),
-			Promise.all(
-				THREAT_LISTS.map(([kind, ...urls]) =>
-					download(urls).then(
-						(text) => [kind, parseHosts(text)],
-						(err) => {
-							console.warn("filters: skipping threat list:", err.message);
-							return [kind, null];
-						}
-					)
-				)
-			),
+			optional(DEBOUNCE_RULES),
+			optional(QUERY_RULES),
 		]);
 
 		const loaded = lists.filter(Boolean);
@@ -235,32 +273,75 @@ export class Filters {
 			noticeFilters = found.networkFilters.length + found.cosmeticFilters.length;
 		}
 
-		const threats = new Map();
-		const threatStats = {};
-		for (const [kind, hosts] of threatTexts) {
-			// keep the previous copy of a list that failed to download
-			const list =
-				hosts ||
-				[...this.threats].filter(([, k]) => k === kind).map(([h]) => h);
-			for (const host of list) threats.set(host, kind);
-			threatStats[kind] = list.length;
+		// the same: a rule list that didn't come down keeps its last copy
+		let { debounceRules = 0, paramRules = 0 } = this.stats;
+		if (debounceText || queryText) {
+			try {
+				const before = this.privacy ? JSON.parse(this.privacy.raw) : { debounce: [], params: [] };
+				const rules = compileRules(debounceText, queryText);
+				if (!debounceText) rules.debounce = before.debounce;
+				if (!queryText) rules.params = before.params;
+				this.privacy = pack(Buffer.from(JSON.stringify(rules)));
+				debounceRules = rules.debounce.length;
+				paramRules = rules.params.length;
+			} catch (err) {
+				console.warn("filters: skipping Brave's rules:", err.message);
+			}
 		}
 
 		this.setEngine(raw);
-		this.threats = threats;
 		this.updatedAt = Date.now();
+		const found = engine.getFilters();
 		this.stats = {
+			...this.stats,
 			lists: loaded.length,
-			networkFilters: engine.getFilters().networkFilters.length,
-			cosmeticFilters: engine.getFilters().cosmeticFilters.length,
+			networkFilters: found.networkFilters.length,
+			cosmeticFilters: found.cosmeticFilters.length,
 			noticeFilters,
-			...threatStats,
+			debounceRules,
+			paramRules,
 		};
 		console.log(
 			`filters: ready in ${((Date.now() - started) / 1000).toFixed(1)}s`,
 			this.stats
 		);
-		await this.saveCache(raw).catch((err) =>
+		await this.saveCache().catch((err) =>
+			console.warn("filters: could not write cache:", err.message)
+		);
+	}
+
+	// The malware and phishing lists, asked again every THREAT_REFRESH_MINUTES:
+	// one that hasn't changed answers "not modified" and costs next to nothing.
+	async buildThreats() {
+		let changed = false;
+		await Promise.all(
+			THREAT_LISTS.map(async ([kind, ...urls]) => {
+				const before = this.threatSources[kind];
+				try {
+					const got = await fetchFirst(urls, before?.hosts ? before : null);
+					if (!got) return;
+					this.threatSources[kind] = { etag: got.etag, modified: got.modified, hosts: parseHosts(got.text) };
+					changed = true;
+				} catch (err) {
+					// keep the previous copy of a list that failed to download
+					console.warn("filters: skipping threat list:", err.message);
+				}
+			})
+		);
+		this.threatsAt = Date.now();
+		if (!changed) return;
+		const threats = new Map();
+		const counts = {};
+		for (const [kind] of THREAT_LISTS) {
+			// (a list never downloaded since the old cache format: that cache's copy)
+			const hosts =
+				this.threatSources[kind]?.hosts || [...this.threats].filter(([, k]) => k === kind).map(([h]) => h);
+			for (const host of hosts) threats.set(host, kind);
+			counts[kind] = hosts.length;
+		}
+		this.threats = threats;
+		this.stats = { ...this.stats, ...counts };
+		await this.saveCache().catch((err) =>
 			console.warn("filters: could not write cache:", err.message)
 		);
 	}
@@ -269,20 +350,22 @@ export class Filters {
 		this.engine = pack(raw);
 	}
 
-	async saveCache(raw) {
+	async saveCache() {
 		await mkdir(this.cacheDir, { recursive: true });
 		const meta = {
 			updatedAt: this.updatedAt,
+			threatsAt: this.threatsAt,
 			stats: this.stats,
-			threats: [...this.threats],
+			threatSources: this.threatSources,
 		};
 		const write = async (name, data) => {
 			const path = join(this.cacheDir, name);
 			await writeFile(path + ".tmp", data);
 			await rename(path + ".tmp", path);
 		};
-		await write("engine.bin", raw);
+		if (this.engine) await write("engine.bin", this.engine.raw);
 		if (this.notices) await write("notices.bin", this.notices.raw);
+		if (this.privacy) await write("privacy.json", this.privacy.raw);
 		await write("meta.json", JSON.stringify(meta));
 	}
 
@@ -301,9 +384,22 @@ export class Filters {
 		} catch {
 			// none cached yet: build() fetches the lists
 		}
-		this.threats = new Map(meta.threats);
+		try {
+			const privacy = await readFile(join(this.cacheDir, "privacy.json"));
+			JSON.parse(privacy);
+			this.privacy = pack(privacy);
+		} catch {
+			// none cached yet: build() fetches the rules
+		}
+		// (a cache from before the threat lists had their own refresh kept a plain list)
+		this.threatSources = meta.threatSources || {};
+		const threats = new Map(meta.threats || []);
+		for (const [kind] of THREAT_LISTS)
+			for (const host of this.threatSources[kind]?.hosts || []) threats.set(host, kind);
+		this.threats = threats;
 		this.stats = meta.stats;
 		this.updatedAt = meta.updatedAt;
+		this.threatsAt = meta.threatsAt || 0;
 		console.log("filters: loaded cached lists from", new Date(this.updatedAt));
 	}
 
@@ -324,6 +420,6 @@ export class Filters {
 	}
 
 	status() {
-		return { updatedAt: this.updatedAt, ...this.stats };
+		return { updatedAt: this.updatedAt, threatsAt: this.threatsAt, ...this.stats };
 	}
 }

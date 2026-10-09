@@ -19,16 +19,21 @@ const isolated = !!config.isolation && location.hostname === config.isolation;
 const port = location.port ? ":" + location.port : "";
 const originFor = (key) =>
 	`${location.protocol}//${key}.${config.isolation}${port}`;
-const SITE_ORIGIN = config.isolation
-	? new RegExp(
-			"^" +
-				location.protocol.replace(":", "") +
-				"://(s[a-z2-7]{25})\\." +
-				config.isolation.replace(/\./g, "\\.") +
-				port.replace(/\W/g, "\\$&") +
-				"$"
-		)
-	: null;
+const siteOrigin = (labels) =>
+	config.isolation
+		? new RegExp(
+				"^" +
+					location.protocol.replace(":", "") +
+					`://(${labels}[a-z2-7]{25})\\.` +
+					config.isolation.replace(/\./g, "\\.") +
+					port.replace(/\W/g, "\\$&") +
+					"$"
+			)
+		: null;
+// A tab's site's origin (s…, or t… in a Tor tab)...
+const SITE_ORIGIN = siteOrigin("[st]");
+// ...or a frame's of another site inside a page (f…, g…; see shield.js inFrame).
+const ANY_SITE_ORIGIN = siteOrigin("[stfg]");
 
 const $ = (id) => document.getElementById(id);
 // not `chrome`: Chromium browsers have a global of that name
@@ -172,11 +177,26 @@ function rememberOrigin(key) {
 
 // With a passphrase lock (see "passphrase lock" below) these live only in the
 // encrypted vault, decrypted in memory.
-const PRIVATE = new Set(["bios:history", "bios:bookmarks", "bios:tabs"]);
+const PRIVATE = new Set([
+	"bios:history",
+	"bios:bookmarks",
+	"bios:tabs",
+	"bios:zoom",
+	"bios:downloads",
+	"bios:permissions",
+	"bios:logins",
+	"bios:passkeys",
+	"bios:never",
+]);
+// Without the passphrase lock these still never sit in storage as text: they
+// are sealed with a key that can't leave this browser (see "secrets" below).
+const SEALED = new Set(["bios:logins", "bios:passkeys", "bios:never"]);
 let vault = null;
+let sealedData = {};
 
 function readList(name) {
 	if (vault && PRIVATE.has(name)) return vault.data[name] ?? [];
+	if (SEALED.has(name)) return sealedData[name] ?? [];
 	try {
 		return JSON.parse(localStorage.getItem(name) || "[]");
 	} catch {
@@ -201,7 +221,8 @@ function proxyPath(url) {
 async function frameUrlFor(url, tab) {
 	const path = proxyPath(url);
 	if (!isolated) return path;
-	const key = await BiosSiteKey.siteKey(new URL(url).hostname);
+	// a Tor tab's sites have origins of their own, connected through Tor
+	const key = tab.tor ? await BiosSiteKey.torKey(new URL(url).hostname) : await BiosSiteKey.siteKey(new URL(url).hostname);
 	rememberOrigin(key);
 	const origin = originFor(key);
 	tab.siteOrigin = origin;
@@ -212,7 +233,8 @@ async function frameUrlFor(url, tab) {
 // Isolation mode: one hidden /anchor.html frame per recently used site
 // origin. It registers that origin's service worker and keeps its proxy
 // connection open while the site's own pages come and go.
-const MAX_ANCHORS = 4;
+// (frames of other sites inside pages have origins, and anchors, of their own)
+const MAX_ANCHORS = 8;
 const anchors = new Map(); // origin -> { frame, ready }
 
 function ensureAnchor(origin) {
@@ -277,15 +299,43 @@ let split = null;
 let nextTabId = 1;
 const MAX_TABS = 50;
 
-function createTab(url = "", { after = null, lazy = false, title = "", select = true } = {}) {
+// Workspaces keep each task's tabs together (like Min's tasks or Zen's
+// workspaces): the strip and the phone's switcher show only the current
+// workspace's tabs, and the others' pages stay as they were, out of sight.
+const WS_COLORS = {
+	gray: "#6f6c68",
+	blue: "#3a6fd8",
+	green: "#2f9e64",
+	amber: "#c98418",
+	red: "#d0473f",
+	purple: "#8a55d6",
+	pink: "#cf4a8e",
+};
+const MAX_WORKSPACES = 12;
+/**
+ * @typedef {{ id: number, name: string, color: string, last: Tab | null }} Workspace
+ * `last`: its tab that was showing, to come back to.
+ */
+/** @type {Workspace[]} */
+let workspaces = [{ id: 1, name: "Personal", color: "gray", last: null }];
+let currentWs = 1;
+const wsById = (id) => workspaces.find((w) => w.id === id);
+const wsTabs = (id = currentWs) => tabs.filter((t) => t.ws === id);
+
+function createTab(
+	url = "",
+	{ after = null, lazy = false, title = "", select = true, openedBy = null, tor = false, ws = null } = {}
+) {
+	if (tor && !torAvailable) return null;
 	if (tabs.length >= MAX_TABS) return null;
 	const id = nextTabId++;
 	const frame = document.createElement("iframe");
 	// unique per tab: page.js aims links at its own tab's name
 	frame.name = `uvframe-${id}`;
 	frame.title = "Page";
+	// location, camera and microphone only after the app's own prompt (page.js asks it)
 	frame.allow =
-		"autoplay; fullscreen; encrypted-media; picture-in-picture; clipboard-write";
+		"autoplay; fullscreen; encrypted-media; picture-in-picture; clipboard-write; geolocation; camera; microphone";
 	// Phones and tablets: the browser itself keeps a page from opening a
 	// window or replacing the app (no allow-popups, no allow-top-navigation),
 	// which would load a site directly, around the proxy. page.js already
@@ -314,6 +364,13 @@ function createTab(url = "", { after = null, lazy = false, title = "", select = 
 		landing: false,
 		navigated: false,
 		ownHistory: true,
+		// the page that opened this tab, for its first navigation
+		openedBy,
+		// a Tor tab: its sites' connections go through Tor (src/tor.js), and
+		// it keeps no history and isn't kept when the app closes
+		tor,
+		// its workspace: the opener's, or the one showing
+		ws: ws ?? (after && tabs.includes(after) ? after.ws : currentWs),
 	};
 	frame.addEventListener("load", () => {
 		if (!tab.url || tab.pending) return;
@@ -337,12 +394,19 @@ function createTab(url = "", { after = null, lazy = false, title = "", select = 
 		homeInput.focus({ preventScroll: true });
 		pulse($("newtab"), RISE);
 	}
-	if (!lazy) pulse($("tabs").children[at], RISE);
+	if (!lazy) pulse($("tabs").querySelector(`[data-tab="${id}"]`), RISE);
 	return tab;
 }
 
 function selectTab(tab) {
 	if (active && active !== tab) lastActive = active;
+	// a tab in another workspace (a page asking for the camera, say) brings it along
+	if (tab.ws !== currentWs) {
+		currentWs = tab.ws;
+		split = null;
+	}
+	const ws = wsById(tab.ws);
+	if (ws) ws.last = tab;
 	active = tab;
 	if (split && !split.includes(tab)) {
 		// a tab picked from the strip replaces the pane that was focused
@@ -368,13 +432,28 @@ function closeTab(tab) {
 	if (split?.includes(tab)) split = null;
 	tabs.splice(i, 1);
 	tab.frame.remove();
+	// the last Tor tab took its sites' cookies and storage with it
+	if (tab.tor && !tabs.some((t) => t.tor)) setTimeout(forgetTor, 50);
 	if (lastActive === tab) lastActive = null;
-	if (!tabs.length) createTab();
-	else if (tab === active) selectTab(tabs[Math.min(i, tabs.length - 1)]);
-	else {
+	if (tab !== active) {
 		layout();
 		renderTabs();
+		return;
 	}
+	const next = neighbour(tab, i);
+	active = null;
+	if (next) selectTab(next);
+	// the last tab of a workspace leaves a new tab there; of a deleted one,
+	// another workspace
+	else if (wsById(tab.ws)) createTab();
+	else switchWorkspace((workspaces.find((w) => wsTabs(w.id).length) || workspaces[0]).id);
+}
+
+// The tab to show once `tab` (at index `i`) closes or leaves its workspace:
+// the next one in the workspace, or else the one before.
+function neighbour(tab, i) {
+	const same = (t) => t !== tab && t.ws === tab.ws;
+	return tabs.slice(i).find(same) || tabs.slice(0, i).findLast(same) || null;
 }
 
 function setLoading(tab, loading) {
@@ -393,6 +472,7 @@ function layout() {
 	}
 	framesEl.classList.toggle("split", !!split);
 	document.body.classList.toggle("browsing", !!active.url);
+	document.body.classList.toggle("tor", !!active.tor);
 	document.body.classList.toggle("loading", active.loading);
 }
 
@@ -401,10 +481,12 @@ function tabLabel(tab) {
 }
 
 function renderTabs() {
+	const shown = wsTabs();
 	$("tabs").replaceChildren(
-		...tabs.map((tab) => {
+		...shown.map((tab) => {
 			const el = document.createElement("div");
-			el.className = "tab";
+			el.dataset.tab = String(tab.id);
+			el.className = tab.tor ? "tab tor" : "tab";
 			el.classList.toggle("paired", !!split && split.includes(tab) && tab !== active);
 			el.setAttribute("role", "tab");
 			el.setAttribute("aria-selected", String(tab === active));
@@ -431,7 +513,7 @@ function renderTabs() {
 					event.preventDefault();
 					selectTab(tab);
 				} else if (event.key === "ArrowRight" || event.key === "ArrowLeft") {
-					const next = tabs[tabs.indexOf(tab) + (event.key === "ArrowRight" ? 1 : -1)];
+					const next = shown[shown.indexOf(tab) + (event.key === "ArrowRight" ? 1 : -1)];
 					if (next) {
 						selectTab(next);
 						$("tabs").querySelector('[aria-selected="true"]')?.focus();
@@ -446,6 +528,7 @@ function renderTabs() {
 		})
 	);
 	$("tabs").querySelector('[aria-selected="true"]')?.scrollIntoView({ block: "nearest", inline: "nearest" });
+	renderWorkspaceButton();
 	renderSwitcher();
 	document.title = active?.url ? tabLabel(active) : "Badger";
 
@@ -463,14 +546,20 @@ function renderTabs() {
 // Phones have no room for a tab strip: a button in the bottom bar shows how
 // many tabs are open, and lists them.
 function renderSwitcher() {
+	const shown = wsTabs();
 	const count = $("tab-count");
-	if (count.textContent !== String(tabs.length)) {
-		count.textContent = String(tabs.length);
+	if (count.textContent !== String(shown.length)) {
+		count.textContent = String(shown.length);
 		pulse(count, [{ transform: "scale(1.5)" }, { transform: "none" }], 350);
 	}
-	$("tabs-btn").setAttribute("aria-label", `Tabs: ${tabs.length} open`);
+	const ws = wsById(currentWs);
+	$("tabs-btn").setAttribute(
+		"aria-label",
+		workspaces.length > 1 ? `Tabs: ${shown.length} open in ${ws.name}` : `Tabs: ${shown.length} open`
+	);
+	renderWorkspaceChips();
 	$("tab-list").replaceChildren(
-		...tabs.map((tab) => {
+		...shown.map((tab) => {
 			const li = document.createElement("li");
 			const open = document.createElement("button");
 			open.type = "button";
@@ -503,6 +592,7 @@ function renderSwitcher() {
 $("tabs-btn").addEventListener("click", () => {
 	switcher.hidden = false;
 	$("tab-list").querySelector("[aria-current]")?.scrollIntoView({ block: "nearest" });
+	$("ws-chips").querySelector('[aria-pressed="true"]')?.scrollIntoView({ block: "nearest", inline: "nearest" });
 });
 $("switcher-close").addEventListener("click", () => {
 	switcher.hidden = true;
@@ -512,6 +602,299 @@ for (const id of ["dock-new", "switcher-new"])
 		switcher.hidden = true;
 		createTab();
 	});
+
+// ------------------------------------------------------------- workspaces
+
+const PLUS_GLYPH = '<path d="M12 5v14M5 12h14"/>';
+const EDIT_GLYPH = '<path d="M4 20h4L19 9l-4-4L4 16v4zM13.5 6.5l4 4"/>';
+
+function wsDot(ws) {
+	const dot = document.createElement("span");
+	dot.className = "ws-dot";
+	dot.style.background = WS_COLORS[ws.color];
+	return dot;
+}
+
+function plural(n, word) {
+	return n === 0 ? `No ${word}s` : `${n} ${word}${n === 1 ? "" : "s"}`;
+}
+
+function switchWorkspace(id) {
+	const ws = wsById(id);
+	if (!ws) return;
+	const tab = (ws.last?.ws === id && tabs.includes(ws.last) && ws.last) || wsTabs(id)[0];
+	if (tab) selectTab(tab);
+	else if (tabs.length >= MAX_TABS) toast(`Close a tab first: up to ${MAX_TABS} tabs can be open.`);
+	else {
+		currentWs = id;
+		split = null;
+		createTab();
+	}
+	pulse($("ws-btn"), [{ transform: "scale(0.94)" }, { transform: "none" }]);
+}
+
+function newWorkspace() {
+	if (workspaces.length >= MAX_WORKSPACES) return toast(`Up to ${MAX_WORKSPACES} workspaces`);
+	if (tabs.length >= MAX_TABS) return toast(`Close a tab first: up to ${MAX_TABS} tabs can be open.`);
+	const id = Math.max(0, ...workspaces.map((w) => w.id)) + 1;
+	const used = new Set(workspaces.map((w) => w.color));
+	const color = Object.keys(WS_COLORS).find((c) => !used.has(c)) || "gray";
+	workspaces.push({ id, name: `Workspace ${workspaces.length + 1}`, color, last: null });
+	switchWorkspace(id);
+	// named first thing, while it's clear what it's for
+	openWorkspaces(id);
+}
+
+// Sends a tab to another workspace, where it goes last. The workspace on show
+// stays, unless that was its only tab.
+function moveTab(tab, id) {
+	const ws = wsById(id);
+	if (!ws || !tabs.includes(tab) || tab.ws === id) return;
+	if (split?.includes(tab)) split = null;
+	const i = tabs.indexOf(tab);
+	const next = tab === active ? neighbour(tab, i) : null;
+	tabs.splice(i, 1);
+	tabs.push(tab);
+	tab.ws = id;
+	ws.last = tab;
+	if (next) selectTab(next);
+	else if (tab === active) selectTab(tab);
+	else {
+		layout();
+		renderTabs();
+	}
+	renderWorkspaces();
+	if (currentWs !== id) toast(`Moved to ${ws.name}`, "Show", () => switchWorkspace(id));
+}
+
+async function deleteWorkspace(ws) {
+	if (workspaces.length < 2) return;
+	const open = wsTabs(ws.id).filter((t) => t.url).length;
+	if (open) {
+		const sure = await choose({
+			title: `Delete ${ws.name}?`,
+			note: open === 1 ? "Its tab closes too." : `Its ${open} tabs close too.`,
+			ok: "Delete",
+		});
+		if (!sure) return;
+	}
+	if (!workspaces.includes(ws)) return;
+	workspaces = workspaces.filter((w) => w !== ws);
+	if (editingWs === ws.id) editingWs = null;
+	// the tab on show last, so the others' places are free for its replacement
+	const doomed = wsTabs(ws.id).sort((a, b) => (a === active) - (b === active));
+	for (const tab of doomed) closeTab(tab);
+	if (currentWs === ws.id) switchWorkspace(workspaces[0].id);
+	renderTabs();
+	renderWorkspaces();
+}
+
+function workspaceCommands() {
+	return workspaces
+		.filter((w) => w.id !== currentWs)
+		.flatMap((w) => [
+			{ name: `Switch to ${w.name}`, run: () => switchWorkspace(w.id) },
+			{ name: `Move tab to ${w.name}`, when: () => !!active?.url, run: () => moveTab(active, w.id) },
+		]);
+}
+
+// Desktop: the current workspace at the start of the tab strip.
+function renderWorkspaceButton() {
+	const ws = wsById(currentWs);
+	if (!ws) return;
+	$("ws-name").textContent = ws.name;
+	$("ws-btn").setAttribute("aria-label", `Workspace: ${ws.name}. Switch workspaces`);
+	$("ws-btn").title = "Workspaces";
+	$("ws-btn").querySelector(".ws-dot").style.background = WS_COLORS[ws.color];
+	// with more than one, the workspace's color marks the phone's tab button
+	if (workspaces.length > 1) document.documentElement.style.setProperty("--ws", WS_COLORS[ws.color]);
+	else document.documentElement.style.removeProperty("--ws");
+}
+
+// Phones: the workspaces as chips above the tab list, to flip between.
+function renderWorkspaceChips() {
+	const chip = (onClick) => {
+		const button = document.createElement("button");
+		button.type = "button";
+		button.className = "ws-chip";
+		button.addEventListener("click", onClick);
+		return button;
+	};
+	const iconChip = (label, glyph, onClick) => {
+		const button = chip(onClick);
+		button.classList.add("ws-icon");
+		button.setAttribute("aria-label", label);
+		button.append(svgIcon(glyph));
+		return button;
+	};
+	$("ws-chips").replaceChildren(
+		...workspaces.map((ws) => {
+			const button = chip(() => {
+				if (ws.id === currentWs) return;
+				// an empty workspace opens a new tab, which wants the whole screen
+				if (!wsTabs(ws.id).length) switcher.hidden = true;
+				switchWorkspace(ws.id);
+			});
+			button.setAttribute("aria-pressed", String(ws.id === currentWs));
+			const name = document.createElement("span");
+			name.className = "ws-chip-name";
+			name.textContent = ws.name;
+			const count = document.createElement("small");
+			count.textContent = String(wsTabs(ws.id).length);
+			button.setAttribute("aria-label", `${ws.name}: ${plural(wsTabs(ws.id).length, "tab")}`);
+			button.append(wsDot(ws), name, count);
+			return button;
+		}),
+		iconChip("New workspace", PLUS_GLYPH, () => {
+			switcher.hidden = true;
+			newWorkspace();
+		}),
+		iconChip("Edit workspaces", EDIT_GLYPH, () => openWorkspaces())
+	);
+}
+
+// The workspaces panel: switch, send the tab on show to another, rename,
+// recolor, delete.
+const wsPanel = $("workspaces");
+let editingWs = null;
+let commitEdit = null;
+
+function openWorkspaces(edit = null) {
+	editingWs = edit;
+	switcher.hidden = true;
+	wsPanel.hidden = false;
+	renderWorkspaces();
+	if (edit === null) $("ws-list").querySelector("[aria-current]")?.focus();
+}
+
+function closeWorkspaces() {
+	commitEdit?.();
+	wsPanel.hidden = true;
+}
+
+function renderWorkspaces() {
+	if (wsPanel.hidden) return;
+	commitEdit = null;
+	$("ws-new").disabled = workspaces.length >= MAX_WORKSPACES;
+	$("ws-list").replaceChildren(...workspaces.map((ws) => (ws.id === editingWs ? editRow(ws) : wsRow(ws))));
+}
+
+function smallButton(label, onClick) {
+	const button = document.createElement("button");
+	button.type = "button";
+	button.textContent = label;
+	button.addEventListener("click", onClick);
+	return button;
+}
+
+function wsRow(ws) {
+	const li = document.createElement("li");
+	const open = document.createElement("button");
+	open.type = "button";
+	open.className = "link";
+	if (ws.id === currentWs) open.setAttribute("aria-current", "true");
+	const text = document.createElement("span");
+	text.className = "text";
+	const name = document.createElement("span");
+	name.textContent = ws.name;
+	const small = document.createElement("small");
+	small.textContent = ws.id === currentWs ? `${plural(wsTabs(ws.id).length, "tab")} · Showing` : plural(wsTabs(ws.id).length, "tab");
+	text.append(name, small);
+	open.append(wsDot(ws), text);
+	open.addEventListener("click", () => {
+		wsPanel.hidden = true;
+		if (ws.id !== currentWs) switchWorkspace(ws.id);
+	});
+	const actions = document.createElement("span");
+	actions.className = "row-actions";
+	if (active?.url && ws.id !== currentWs) {
+		const move = smallButton("Move tab here", () => moveTab(active, ws.id));
+		move.title = `Move ${tabLabel(active)} to ${ws.name}`;
+		actions.append(move);
+	}
+	const edit = smallButton("Edit", () => {
+		commitEdit?.();
+		editingWs = ws.id;
+		renderWorkspaces();
+	});
+	edit.setAttribute("aria-label", `Edit ${ws.name}`);
+	actions.append(edit);
+	li.append(open, actions);
+	return li;
+}
+
+function editRow(ws) {
+	const li = document.createElement("li");
+	li.className = "ws-edit";
+	const form = document.createElement("form");
+	form.autocomplete = "off";
+	const name = document.createElement("input");
+	name.type = "text";
+	name.value = ws.name;
+	name.maxLength = 40;
+	name.enterKeyHint = "done";
+	name.spellcheck = false;
+	name.setAttribute("aria-label", "Workspace name");
+	const colors = document.createElement("div");
+	colors.className = "ws-colors";
+	colors.setAttribute("role", "radiogroup");
+	colors.setAttribute("aria-label", "Color");
+	for (const [key, hex] of Object.entries(WS_COLORS)) {
+		const swatch = document.createElement("button");
+		swatch.type = "button";
+		swatch.className = "ws-swatch";
+		swatch.style.background = hex;
+		swatch.setAttribute("role", "radio");
+		swatch.setAttribute("aria-label", key[0].toUpperCase() + key.slice(1));
+		swatch.setAttribute("aria-checked", String(key === ws.color));
+		swatch.addEventListener("click", () => {
+			ws.color = key;
+			for (const s of colors.children) s.setAttribute("aria-checked", String(s === swatch));
+			renderTabs();
+		});
+		colors.append(swatch);
+	}
+	const tools = document.createElement("div");
+	tools.className = "tools";
+	const remove = smallButton("Delete", () => deleteWorkspace(ws));
+	remove.className = "danger";
+	remove.disabled = workspaces.length < 2;
+	if (remove.disabled) remove.title = "There has to be one workspace";
+	const save = document.createElement("button");
+	save.type = "submit";
+	save.textContent = "Save";
+	tools.append(remove, save);
+	commitEdit = () => {
+		commitEdit = null;
+		ws.name = name.value.trim().slice(0, 40) || ws.name;
+		editingWs = null;
+		renderTabs();
+	};
+	form.addEventListener("submit", (event) => {
+		event.preventDefault();
+		commitEdit();
+		renderWorkspaces();
+	});
+	form.append(name, colors, tools);
+	li.append(form);
+	requestAnimationFrame(() => {
+		name.focus({ preventScroll: true });
+		name.select();
+		li.scrollIntoView({ block: "nearest" });
+	});
+	return li;
+}
+
+$("ws-btn").addEventListener("click", () => openWorkspaces());
+$("workspaces-close").addEventListener("click", closeWorkspaces);
+$("ws-new").addEventListener("click", () => {
+	commitEdit?.();
+	newWorkspace();
+});
+// a tap outside the card, as with the other panels
+wsPanel.addEventListener("click", (event) => {
+	if (event.target === wsPanel) closeWorkspaces();
+});
 
 // On a phone, back, forward and the menu move to the bar at the bottom, in
 // reach of a thumb; on a wider screen they go back to the toolbar.
@@ -538,25 +921,57 @@ placeControls();
 const TABS = "bios:tabs";
 
 function saveTabs() {
-	const open = tabs.filter((t) => t.url);
+	const open = tabs.filter((t) => t.url && !t.tor);
 	saveEntries(TABS, {
-		tabs: open.map(({ url, title }) => ({ url, title })),
+		tabs: open.map(({ url, title, ws }) => ({ url, title, ws })),
 		active: open.indexOf(active),
+		workspaces: workspaces.map(({ id, name, color, last }) => ({ id, name, color, last: open.indexOf(last) })),
+		current: currentWs,
 	});
 }
 
+// Whether a tab was opened: false when the current workspace has none, for
+// the caller to open one.
 function restoreTabs() {
 	const saved = readList(TABS);
-	const list = Array.isArray(saved?.tabs)
-		? saved.tabs
-				.filter((t) => typeof t?.url === "string" && /^https?:/.test(t.url))
-				.slice(0, MAX_TABS)
+	const kept = Array.isArray(saved?.workspaces)
+		? saved.workspaces.filter((w, i, all) =>
+				Number.isInteger(w?.id) && w.id > 0 && typeof w.name === "string" &&
+				all.findIndex((o) => o?.id === w.id) === i
+			)
 		: [];
-	if (!list.length) return false;
-	const made = list.map((t) =>
-		createTab(t.url, { lazy: true, title: String(t.title || "").slice(0, 300), select: false })
+	if (kept.length) {
+		workspaces = kept.slice(0, MAX_WORKSPACES).map((w) => ({
+			id: w.id,
+			name: w.name.trim().slice(0, 40) || "Workspace",
+			color: Object.hasOwn(WS_COLORS, w.color) ? w.color : "gray",
+			last: null,
+		}));
+		currentWs = wsById(saved.current) ? saved.current : workspaces[0].id;
+	}
+	// indexed like the saved list, so `active` and `last` still point right
+	let count = 0;
+	const made = (Array.isArray(saved?.tabs) ? saved.tabs : []).map((t) =>
+		typeof t?.url === "string" && /^https?:/.test(t.url) && count++ < MAX_TABS
+			? createTab(t.url, {
+					lazy: true,
+					title: String(t.title || "").slice(0, 300),
+					select: false,
+					ws: wsById(t.ws) ? t.ws : workspaces[0].id,
+				})
+			: null
 	);
-	selectTab((Number.isInteger(saved.active) && made[saved.active]) || made[0]);
+	for (const w of kept) {
+		const ws = wsById(w.id);
+		if (ws && Number.isInteger(w.last)) ws.last = made[w.last] || null;
+	}
+	const want = Number.isInteger(saved?.active) ? made[saved.active] : null;
+	const pick = want?.ws === currentWs ? want : wsTabs()[0];
+	if (!pick) {
+		renderTabs();
+		return false;
+	}
+	selectTab(pick);
 	return true;
 }
 
@@ -565,7 +980,7 @@ function restoreTabs() {
 const wide = matchMedia("(min-width: 900px)");
 
 function canSplit() {
-	return wide.matches && !!active?.url && tabs.some((t) => t !== active && t.url);
+	return wide.matches && !!active?.url && tabs.some((t) => t !== active && t.url && t.ws === active.ws);
 }
 
 function toggleSplit() {
@@ -573,7 +988,7 @@ function toggleSplit() {
 	else {
 		if (!canSplit()) return;
 		const partner = [lastActive, ...tabs].find(
-			(t) => t && t !== active && t.url && tabs.includes(t)
+			(t) => t && t !== active && t.url && tabs.includes(t) && t.ws === active.ws
 		);
 		if (partner.pending) {
 			partner.pending = false;
@@ -612,6 +1027,14 @@ async function go(input, tab = active, record = true) {
 		await startup;
 		await ensureReady();
 		const url = toUrl(input);
+		// an onion site only opens in a Tor tab
+		if (!tab.tor && /\.onion$/i.test(new URL(url).hostname)) {
+			if (!torAvailable) throw new Error("Onion sites open in Tor tabs, which this server doesn't offer.");
+			if (!tab.url) closeTab(tab);
+			createTab(url, { tor: true, after: tab });
+			return;
+		}
+		if (tab.tor) await torReady(tab);
 		// before touching the tab: throws for addresses that can't be opened
 		const src = await frameUrlFor(url, tab);
 		if (!tabs.includes(tab)) return;
@@ -630,10 +1053,37 @@ async function go(input, tab = active, record = true) {
 			showAddress();
 		}
 		renderTabs();
+		await announce(tab, src);
 		tab.frame.src = src;
 	} catch (err) {
 		error.textContent = err.message || String(err);
 	}
+}
+
+// Isolation: tells the site's service worker that the navigation to `src`
+// is the app's own (the person's, or from the page that opened the tab), so
+// the site is told so. Any other navigation without a referrer counts as
+// another site's (shield.js, "announced").
+let announceId = 0;
+function announce(tab, src) {
+	const from = tab.openedBy || null;
+	tab.openedBy = null;
+	const anchor = isolated && tab.siteOrigin ? anchors.get(tab.siteOrigin) : null;
+	if (!anchor) return;
+	const id = ++announceId;
+	return new Promise((resolve) => {
+		const timer = setTimeout(done, 1000);
+		function done() {
+			clearTimeout(timer);
+			window.removeEventListener("message", onMessage);
+			resolve();
+		}
+		function onMessage(event) {
+			if (event.source === anchor.frame.contentWindow && event.data?.bios === "typed-ok" && event.data.id === id) done();
+		}
+		window.addEventListener("message", onMessage);
+		anchor.frame.contentWindow.postMessage({ bios: "typed", id, url: src, from }, tab.siteOrigin);
+	});
 }
 
 // The site address a proxied address stands for (the reverse of proxyPath), or "".
@@ -655,6 +1105,7 @@ function showAddress() {
 	else if (url.startsWith("http:")) state = "warn";
 	siteBtn.dataset.state = state;
 	star.hidden = !url;
+	showKeyButton();
 	$("back").disabled = !active?.back.length;
 	$("forward").disabled = !active?.fwd.length;
 	$("reload").disabled = !url;
@@ -693,6 +1144,8 @@ function updateTab(tab, url, title) {
 	}
 	tab.url = url;
 	tab.title = title;
+	// a page that loaded keeps its site's zoom
+	if (zoomOf(siteFor(url)) !== 100) toTab(tab, { cmd: "zoom", level: zoomOf(siteFor(url)) });
 	if (!changed) return;
 	recordVisit(tab);
 	renderTabs();
@@ -742,7 +1195,7 @@ let lastOpen = 0;
 function openFromPage(event) {
 	const tab = tabOf(event.source);
 	if (!tab || typeof event.data.url !== "string") return;
-	if (isolated ? !SITE_ORIGIN.test(event.origin) : event.origin !== location.origin) return;
+	if (isolated ? !ANY_SITE_ORIGIN.test(event.origin) : event.origin !== location.origin) return;
 	if (navigator.userActivation && !navigator.userActivation.isActive) return;
 	if (Date.now() - lastOpen < 400) return;
 	let url;
@@ -753,7 +1206,8 @@ function openFromPage(event) {
 	}
 	if (url.protocol !== "http:" && url.protocol !== "https:") return;
 	lastOpen = Date.now();
-	createTab(url.href, { after: tab, select: !event.data.background });
+	// the site is told the page that opened it asked, as a browser does
+	createTab(url.href, { after: tab, select: !event.data.background, openedBy: tab.url });
 }
 
 async function onFrameMessage(event) {
@@ -771,6 +1225,57 @@ async function onFrameMessage(event) {
 	}
 
 	if (data?.bios === "open") return openFromPage(event);
+
+	// "Open in a Tor tab", from the warning an onion address gets in an ordinary tab
+	if (data?.bios === "open-tor") {
+		const from = tabOf(event.source);
+		if (!from || !torAvailable || (navigator.userActivation && !navigator.userActivation.isActive)) return;
+		try {
+			const url = new URL(data.url);
+			if (/^https?:$/.test(url.protocol)) createTab(url.href, { tor: true, after: from });
+		} catch {
+			// not an address
+		}
+		return;
+	}
+
+	// a page in a tab, or a frame in one, asks for location, camera or
+	// microphone; the tab's own page, for a passkey
+	if (data?.bios === "ask") return data.kind === "passkey-create" || data.kind === "passkey-get" ? passkeyAsked(event) : askPerson(event);
+
+	// A frame on its own origin (see shield.js inFrame): kept in mind, so
+	// clearing site data reaches it.
+	if (data?.bios === "frame-origin") {
+		const key = ANY_SITE_ORIGIN?.exec(event.origin)?.[1];
+		if (key && /^[fg]/.test(key) && tabOf(event.source)) rememberOrigin(key);
+		return;
+	}
+
+	// A frame on its own origin, sending the tab's page elsewhere (a link
+	// meant for the top, frame-busting): the app does it, after a tap.
+	if (data?.bios === "navigate") {
+		const tab = tabOf(event.source);
+		if (!tab || !isolated || !ANY_SITE_ORIGIN.test(event.origin)) return;
+		if (navigator.userActivation && !navigator.userActivation.isActive) return;
+		try {
+			const url = new URL(data.url);
+			if (/^https?:$/.test(url.protocol)) {
+				tab.openedBy = tab.url;
+				go(url.href, tab);
+			}
+		} catch {
+			// not an address
+		}
+		return;
+	}
+
+	// A file from a page in a tab, or from a frame inside one (the worker's
+	// download page, or an <a download> the person tapped).
+	if (data?.bios === "download") {
+		const tab = tabOf(event.source);
+		if (!tab || (isolated ? !ANY_SITE_ORIGIN.test(event.origin) : event.origin !== location.origin)) return;
+		return addDownload(tab, data).catch((err) => toast("Couldn't save the download: " + (err.message || err)));
+	}
 
 	// Isolation mode: a site's anchor frame saying where the pages of its
 	// site are that can't say so themselves (a JSON file, an image, a PDF, a
@@ -791,7 +1296,7 @@ async function onFrameMessage(event) {
 			tab.asked = null;
 			// while the shell loads a page into the tab, the old one is still there
 			if (tab.loading || url === tab.url) return;
-			if ((await BiosSiteKey.siteKey(new URL(url).hostname)) !== key) return;
+			if ((await BiosSiteKey.keyLike(key, new URL(url).hostname)) !== key) return;
 			tab.siteOrigin = event.origin;
 			updateTab(tab, url, "");
 			return;
@@ -807,22 +1312,58 @@ async function onFrameMessage(event) {
 		return;
 	}
 
+	// An anchor frame for a site origin: the tab's own, which it landed on
+	// with no proxy connection yet; another site's, which its page is about
+	// to post a form to; or, from a frame inside a page, the origin of its
+	// own that a frame of another site is about to load on (shield.js
+	// inFrame). The anchor registers that origin's worker and holds its proxy
+	// connection, so the page never waits for either.
+	if (isolated && data?.bios === "need-anchor" && ANY_SITE_ORIGIN.test(event.origin) && tabOf(event.source)) {
+		const other = typeof data.origin === "string" && ANY_SITE_ORIGIN.test(data.origin) ? data.origin : null;
+		if (!other && !SITE_ORIGIN.test(event.origin)) return;
+		await ensureAnchor(other || event.origin);
+		window.postMessage.call(event.source, { bios: "anchor-ready" }, event.origin);
+		return;
+	}
+
 	const tab = tabFor(event.source);
 	if (!tab) return;
 
 	// the page's answer to the find bar
 	if (data?.bios === "found") {
-		if (tab === active && !findBar.hidden && data.text === findInput.value)
-			$("find-status").textContent = data.found || !data.text ? "" : "No matches";
+		if (tab === active && !findBar.hidden && data.text === findInput.value) {
+			const total = Math.max(0, Math.floor(Number(data.total) || 0));
+			const index = Math.min(Math.max(0, Math.floor(Number(data.index) || 0)), total);
+			$("find-status").textContent = !data.text
+				? ""
+				: !data.found
+					? "No matches"
+					: total
+						? `${index} of ${total >= 1000 ? "1000+" : total}`
+						: "";
+		}
 		return;
 	}
 
-	// The tab landed on a site origin with no proxy connection yet.
-	if (isolated && data?.bios === "need-anchor" && SITE_ORIGIN.test(event.origin)) {
-		await ensureAnchor(event.origin);
-		event.source.postMessage({ bios: "anchor-ready" }, event.origin);
+	// a sign-in form on the page, and a password just used in one (client/logins.js)
+	if (data?.bios === "login-form") {
+		tab.loginForm = ["login", "new"].includes(data.form) ? data.form : "";
+		if (tab === active) showKeyButton();
 		return;
 	}
+	if (data?.bios === "login-seen") return offerToKeep(tab, data);
+
+	// the page answered a cookie notice (client/consent.js)
+	if (data?.bios === "consent") {
+		tab.consent = { url: tab.url, cmp: String(data.cmp || "").slice(0, 60), result: !!data.result };
+		if (tab === active && !sheet.hidden) renderSheet();
+		return;
+	}
+
+	// reader view: the page's markup, then its images
+	if (data?.bios === "reader-source") return showReader(tab, data);
+	if (data?.bios === "images") return readerImagesArrived(tab, data.images);
+
 
 	if (!data || data.bios !== "nav" || typeof data.url !== "string") return;
 
@@ -840,7 +1381,7 @@ async function onFrameMessage(event) {
 		// can't fake it.
 		const match = SITE_ORIGIN.exec(event.origin);
 		if (!match) return;
-		if ((await BiosSiteKey.siteKey(url.hostname)) !== match[1]) {
+		if ((await BiosSiteKey.keyLike(match[1], url.hostname)) !== match[1]) {
 			console.warn("Ignored address from the wrong site:", url.href);
 			return;
 		}
@@ -864,15 +1405,18 @@ setInterval(() => {
 
 // Back and forward act on the tab's own page. In isolation mode the frame is
 // cross-origin, so the page does it when the shell asks.
-function tabCommand(cmd, tab = active) {
+async function tabCommand(cmd, tab = active) {
 	if (!tab?.url) return;
 	try {
 		const win = tab.frame.contentWindow;
 		if (cmd === "back") win.history.back();
 		else win.history.forward();
 	} catch {
-		if (tab.siteOrigin)
-			tab.frame.contentWindow.postMessage({ bios: "cmd", cmd }, tab.siteOrigin);
+		if (!tab.siteOrigin) return;
+		// a page the person typed comes back without a referrer: say it's theirs
+		const to = cmd === "back" ? tab.back.at(-1) : tab.fwd.at(-1);
+		if (to) await announce(tab, tab.siteOrigin + proxyPath(to)).catch(() => {});
+		tab.frame.contentWindow.postMessage({ bios: "cmd", cmd }, tab.siteOrigin);
 	}
 }
 
@@ -892,9 +1436,10 @@ function reload(tab = active) {
 	} catch {
 		frameUrlFor(tab.url, tab)
 			.then((src) => {
-				const load = () => {
+				const load = async () => {
 					tab.landing = true;
 					setLoading(tab, true);
+					await announce(tab, src);
 					win.location.replace(src);
 				};
 				if (!tab.url.includes("#")) return load();
@@ -935,18 +1480,24 @@ function step(dir, tab = active) {
 const findBar = $("find");
 const findInput = $("find-input");
 
+// A command for the page in `tab` (page.js answers it). The shell's own
+// postMessage, applied to the frame: without isolation the frame's is
+// Scramjet's stand-in, which builds a function from a string in the caller's
+// window, and the shell's policy forbids that here.
+function toTab(tab, message) {
+	if (!tab?.url) return;
+	try {
+		window.postMessage.call(tab.frame.contentWindow, { bios: "cmd", ...message }, tab.siteOrigin || location.origin);
+	} catch {
+		// the frame is between pages
+	}
+}
+
 // `again`: the next match (or the one before, with `back`) rather than the first
 function findInPage(text, back = false, again = false) {
 	$("find-status").textContent = "";
 	if (!active?.url) return;
-	// The shell's own postMessage, applied to the frame: without isolation
-	// the frame's is Scramjet's stand-in, which builds a function from a
-	// string in the caller's window, and the shell's policy forbids that here.
-	window.postMessage.call(
-		active.frame.contentWindow,
-		{ bios: "cmd", cmd: "find", text, back, again },
-		active.siteOrigin || location.origin
-	);
+	toTab(active, { cmd: "find", text, back, again });
 }
 
 function openFind() {
@@ -976,6 +1527,154 @@ findBar.addEventListener("submit", (event) => {
 $("find-prev").addEventListener("click", () => findInPage(findInput.value, true, true));
 $("find-close").addEventListener("click", closeFind);
 $("find-open").addEventListener("click", openFind);
+
+// ------------------------------------------------------------- page tools
+
+function siteFor(url) {
+	try {
+		return BiosSiteKey.siteOf(new URL(url).hostname);
+	} catch {
+		return "";
+	}
+}
+
+// Zoom, per site, kept on this device: the page's own size, as a browser zooms.
+const ZOOM = "bios:zoom";
+const ZOOM_STEPS = [50, 67, 75, 80, 90, 100, 110, 125, 150, 175, 200, 250];
+function zoomOf(site) {
+	const levels = readList(ZOOM);
+	const level = levels && typeof levels === "object" && !Array.isArray(levels) ? Number(levels[site]) : 0;
+	return ZOOM_STEPS.includes(level) ? level : 100;
+}
+
+function zoomBy(step) {
+	const site = currentSite();
+	if (!site) return;
+	const at = ZOOM_STEPS.indexOf(zoomOf(site));
+	const level = ZOOM_STEPS[Math.min(Math.max(at + step, 0), ZOOM_STEPS.length - 1)];
+	const levels = readList(ZOOM);
+	const next = levels && typeof levels === "object" && !Array.isArray(levels) ? levels : {};
+	if (level === 100) delete next[site];
+	else next[site] = level;
+	saveEntries(ZOOM, next);
+	$("zoom-level").textContent = level + "%";
+	for (const tab of tabs) if (siteFor(tab.url) === site) toTab(tab, { cmd: "zoom", level });
+}
+$("zoom-in").addEventListener("click", () => zoomBy(1));
+$("zoom-out").addEventListener("click", () => zoomBy(-1));
+
+$("print-page").addEventListener("click", () => {
+	sheet.hidden = true;
+	toTab(active, { cmd: "print" });
+});
+
+// Translation by Google's page translator, which fetches the page itself (as
+// a visitor without cookies) and shows it translated, through the proxy like
+// any site. Google learns the address; the page's own visit stays private.
+function translateUrl(url) {
+	const to = (navigator.language || "en").split("-")[0].toLowerCase() || "en";
+	return `https://translate.google.com/translate?sl=auto&tl=${encodeURIComponent(to)}&u=${encodeURIComponent(url)}`;
+}
+$("translate-page").addEventListener("click", () => {
+	sheet.hidden = true;
+	if (active?.url) go(translateUrl(active.url));
+});
+
+// Reader view: the page sends its markup, the shell finds the article in it
+// (Readability) and cleans it (DOMPurify, client/reader.js), and the page
+// fetches the article's images through the proxy. Nothing here loads or runs
+// anything from the site.
+const readerPanel = $("reader");
+let reading = null; // { tab, images: Map<url, img[]> }
+let readerLib = null;
+
+function loadReader() {
+	readerLib ||= new Promise((resolve, reject) => {
+		const script = document.createElement("script");
+		script.src = "/bios/reader.js";
+		script.onload = () => resolve(window.BiosReader);
+		script.onerror = () => {
+			readerLib = null;
+			reject(new Error("Couldn't load reader view."));
+		};
+		document.head.append(script);
+	});
+	return readerLib;
+}
+
+function openReader() {
+	if (!active?.url) return;
+	sheet.hidden = true;
+	reading = { tab: active, images: new Map() };
+	$("reader-site").textContent = displayHost(active.url);
+	$("reader-title").textContent = active.title || "Reader view";
+	$("reader-byline").textContent = "";
+	$("reader-article").replaceChildren();
+	$("reader-status").textContent = "Loading…";
+	readerPanel.hidden = false;
+	loadReader().catch(() => {});
+	toTab(active, { cmd: "reader" });
+}
+
+async function showReader(tab, data) {
+	if (!reading || reading.tab !== tab || readerPanel.hidden) return;
+	let article = null;
+	try {
+		const lib = await loadReader();
+		if (typeof data.html === "string" && typeof data.url === "string" && /^https?:/.test(data.url))
+			article = lib.extract(data.html, data.url);
+	} catch {
+		// shown as "no article" below
+	}
+	if (!reading || reading.tab !== tab) return;
+	if (!article) {
+		$("reader-status").textContent = "Reader view isn't available for this page.";
+		return;
+	}
+	$("reader-site").textContent = article.siteName || displayHost(tab.url);
+	$("reader-title").textContent = article.title || tab.title || displayHost(tab.url);
+	$("reader-byline").textContent = article.byline;
+	$("reader-status").textContent = "";
+	$("reader-article").replaceChildren(article.content);
+	for (const img of $("reader-article").querySelectorAll("img[data-src]")) {
+		const list = reading.images.get(img.dataset.src) || [];
+		list.push(img);
+		reading.images.set(img.dataset.src, list);
+	}
+	if (article.images.length) toTab(tab, { cmd: "images", urls: article.images });
+}
+
+function readerImagesArrived(tab, images) {
+	if (!reading || reading.tab !== tab || !Array.isArray(images)) return;
+	for (const pair of images.slice(0, 40)) {
+		const [url, data] = Array.isArray(pair) ? pair : [];
+		// only pictures, as data: addresses: the app's policy refuses anything else
+		if (typeof data !== "string" || !/^data:image\/(png|jpe?g|gif|webp|avif|bmp|x-icon|vnd\.microsoft\.icon);base64,[a-z0-9+/=]+$/i.test(data)) continue;
+		for (const img of reading.images.get(url) || []) img.src = data;
+	}
+}
+
+function closeReader() {
+	readerPanel.hidden = true;
+	reading = null;
+	$("reader-article").replaceChildren();
+}
+
+$("reader-open").addEventListener("click", openReader);
+$("reader-close").addEventListener("click", closeReader);
+$("reader-article").addEventListener("click", (event) => {
+	const link = event.target.closest?.("a[data-href]");
+	if (!link) return;
+	event.preventDefault();
+	closeReader();
+	go(link.dataset.href);
+});
+$("reader-article").addEventListener("keydown", (event) => {
+	const link = event.target.closest?.("a[data-href]");
+	if (!link || event.key !== "Enter") return;
+	closeReader();
+	go(link.dataset.href);
+});
 
 $("back").addEventListener("click", () => step(-1));
 $("forward").addEventListener("click", () => step(1));
@@ -1007,6 +1706,10 @@ barInput.addEventListener("blur", showAddress);
 document.addEventListener("keydown", (event) => {
 	if (event.key === "Escape") {
 		sheet.hidden = library.hidden = switcher.hidden = true;
+		if (!$("workspaces").hidden) closeWorkspaces();
+		if (!readerPanel.hidden) closeReader();
+		$("downloads").hidden = $("cert").hidden = $("passwords").hidden = $("offer").hidden = true;
+		if (!$("choice").hidden) finishChoice(null);
 		hideSuggest();
 		closeFind();
 		return;
@@ -1022,8 +1725,15 @@ document.addEventListener("keydown", (event) => {
 
 const COMMANDS = [
 	{ name: "New tab", run: () => createTab() },
+	{ name: "New Tor tab", when: () => torAvailable, run: () => newTorTab() },
 	{ name: "Close tab", run: () => closeTab(active) },
+	{ name: "Workspaces", run: () => openWorkspaces() },
+	{ name: "New workspace", run: () => newWorkspace() },
 	{ name: "History", run: openHistory },
+	{ name: "Downloads", run: openDownloads },
+	{ name: "Passwords", run: openPasswords },
+	{ name: "Sync with another device", run: openSyncPanel },
+	{ name: "Certificate", when: () => !!active?.url?.startsWith("https:"), run: openCert },
 	{ name: "Settings", run: openSheet },
 	{ name: "Bookmark this page", when: () => !!active?.url && !isBookmarked(active.url), run: toggleBookmark },
 	{ name: "Remove bookmark", when: () => isBookmarked(active?.url), run: toggleBookmark },
@@ -1031,6 +1741,11 @@ const COMMANDS = [
 	{ name: "Close split view", when: () => !!split, run: toggleSplit },
 	{ name: "Reload page", when: () => !!active?.url, run: () => reload() },
 	{ name: "Find in page", when: () => !!active?.url, run: () => openFind() },
+	{ name: "Reader view", when: () => !!active?.url, run: () => openReader() },
+	{ name: "Print", when: () => !!active?.url, run: () => toTab(active, { cmd: "print" }) },
+	{ name: "Translate page", when: () => !!active?.url, run: () => go(translateUrl(active.url)) },
+	{ name: "Zoom in", when: () => !!active?.url, run: () => zoomBy(1) },
+	{ name: "Zoom out", when: () => !!active?.url, run: () => zoomBy(-1) },
 	{ name: "New identity", run: () => newIdentity() },
 	// opens Settings on the button rather than wiping from a typo
 	{
@@ -1059,7 +1774,7 @@ function suggestions(query) {
 		},
 	];
 	if (q.length >= 2)
-		for (const c of COMMANDS)
+		for (const c of [...COMMANDS, ...workspaceCommands()])
 			if ((!c.when || c.when()) && c.name.toLowerCase().includes(q))
 				items.push({ glyph: COMMAND_GLYPH, label: c.name, detail: "Command", run: c.run });
 	const seen = new Set();
@@ -1214,7 +1929,16 @@ function renderSheet() {
 			"Address verified. This site runs walled off from other sites.";
 	else trust.textContent = "Encrypted connection.";
 
-	$("site-row").hidden = $("scripts-row").hidden = $("find-open").hidden = !site;
+	$("site-row").hidden = $("scripts-row").hidden = $("page-tools").hidden = $("zoom-row").hidden = !site;
+	$("cert-open").hidden = !site || !active.url.startsWith("https:");
+	$("zoom-level").textContent = zoomOf(site) + "%";
+	renderPermissions(site);
+	const consent = active?.consent?.url === active?.url ? active.consent : null;
+	$("consent-here").hidden = !consent;
+	if (consent)
+		$("consent-here").textContent = consent.result
+			? `Cookie notice answered: no to tracking${consent.cmp ? ` (${consent.cmp})` : ""}.`
+			: "A cookie notice was found here, but it couldn't be answered.";
 	// only with isolation does a site have storage of its own to keep
 	$("keep-row").hidden = !site || !isolated;
 	$("site-toggle").checked = !settings.allow.includes(site);
@@ -1348,9 +2072,10 @@ async function clearStorageHere() {
 		if (!keep(key)) localStorage.removeItem(key);
 	for (const key of Object.keys(sessionStorage))
 		if (!keep(key)) sessionStorage.removeItem(key);
+	// the downloads are the person's files, not a site's data
 	const names = (
 		indexedDB.databases ? (await indexedDB.databases()).map((db) => db.name) : []
-	).filter((name) => name !== "$scramjet");
+	).filter((name) => name !== "$scramjet" && name !== DOWNLOAD_DB && name !== KEY_DB);
 	await clearProxyCookies();
 	await Promise.all(
 		names.map(
@@ -1399,7 +2124,7 @@ async function clearAllSiteData(everything = false) {
 	await new Promise((resolve) => setTimeout(resolve, 50));
 	await clearStorageHere();
 	if (config.isolation) {
-		const keys = readList("bios:origins").filter((key) => /^s[a-z2-7]{25}$/.test(key));
+		const keys = readList("bios:origins").filter((key) => /^[stfg][a-z2-7]{25}$/.test(key));
 		const kept = new Set(
 			everything ? [] : await Promise.all((settings?.keep || []).map((site) => BiosSiteKey.siteKey(site)))
 		);
@@ -1464,11 +2189,1175 @@ function saveEntries(name, list) {
 		seal();
 		return;
 	}
+	if (SEALED.has(name)) {
+		sealedData[name] = list;
+		sealOnDevice();
+		return;
+	}
 	try {
 		localStorage.setItem(name, JSON.stringify(list));
 	} catch {
 		// storage full or blocked: skip rather than break browsing
 	}
+}
+
+// ------------------------------------------------------------ permissions
+// Location, camera and microphone: a page asks the app (page.js, askApp), and
+// the app asks the person, with a prompt the page can't draw or answer. The
+// answer can be kept for the site (the tab's site, as browsers keep it).
+
+const PERMISSIONS = "bios:permissions";
+const PERMISSION_KINDS = { location: "your location", camera: "your camera", microphone: "your microphone", "camera+microphone": "your camera and microphone" };
+const askQueue = [];
+let askShown = null;
+
+function savedPermissions() {
+	const saved = readList(PERMISSIONS);
+	return saved && typeof saved === "object" && !Array.isArray(saved) ? saved : {};
+}
+
+// "allow", "approximate", "deny", or undefined (ask)
+function permissionFor(site, kind) {
+	const kept = savedPermissions()[site] || {};
+	const answers = kind.split("+").map((k) => kept[k]);
+	if (answers.some((a) => a === "deny")) return "deny";
+	if (answers.every((a) => a === "allow" || a === "approximate")) return answers[0];
+	return undefined;
+}
+
+function keepPermission(site, kind, answer) {
+	const saved = savedPermissions();
+	const kept = { ...(saved[site] || {}) };
+	for (const k of kind.split("+")) kept[k] = answer;
+	saved[site] = kept;
+	saveEntries(PERMISSIONS, saved);
+}
+
+function answerPage(event, id, answer) {
+	try {
+		// the shell's own postMessage (see toTab): a same-origin page's is Scramjet's
+		window.postMessage.call(event.source, { bios: "answer", id, ...answer }, event.origin);
+	} catch {
+		// the page is gone
+	}
+}
+
+function askPerson(event) {
+	const data = event.data;
+	const tab = tabOf(event.source);
+	if (!tab?.url || typeof data.id !== "string" || !PERMISSION_KINDS[data.kind]) return;
+	if (isolated ? !ANY_SITE_ORIGIN.test(event.origin) : event.origin !== location.origin) return;
+	const site = siteFor(tab.url);
+	const kept = permissionFor(site, data.kind);
+	if (kept) return answerPage(event, data.id, { allow: kept !== "deny", approximate: kept === "approximate" });
+	askQueue.push({ event, id: data.id, kind: data.kind, site, tab });
+	showNextAsk();
+}
+
+function showNextAsk() {
+	if (askShown || !askQueue.length) return;
+	askShown = askQueue.shift();
+	const { kind, site, tab } = askShown;
+	$("ask-title").textContent = `${site} wants to use ${PERMISSION_KINDS[kind]}`;
+	$("ask-note").textContent =
+		kind === "location"
+			? "Sites learn where you are. Approximate tells them roughly, within about a kilometre."
+			: "The site can see and hear what the camera and microphone pick up while it's open.";
+	$("ask-remember").checked = false;
+	$("ask-approximate").hidden = kind !== "location";
+	$("ask").hidden = false;
+	if (tab !== active) selectTab(tab);
+	$("ask-allow").focus();
+}
+
+function finishAsk(answer) {
+	const asked = askShown;
+	askShown = null;
+	$("ask").hidden = true;
+	if (!asked) return;
+	if ($("ask-remember").checked) keepPermission(asked.site, asked.kind, answer);
+	answerPage(asked.event, asked.id, { allow: answer !== "deny", approximate: answer === "approximate" });
+	// the same question from the same site, waiting behind this one, gets the same answer
+	for (let i = askQueue.length - 1; i >= 0; i--) {
+		const next = askQueue[i];
+		if (next.site === asked.site && next.kind === asked.kind) {
+			askQueue.splice(i, 1);
+			answerPage(next.event, next.id, { allow: answer !== "deny", approximate: answer === "approximate" });
+		}
+	}
+	showNextAsk();
+}
+
+$("ask-form").addEventListener("submit", (event) => {
+	event.preventDefault();
+	finishAsk("allow");
+});
+$("ask-deny").addEventListener("click", () => finishAsk("deny"));
+$("ask-approximate").addEventListener("click", () => finishAsk("approximate"));
+
+const ANSWER_TEXT = { allow: "Allowed", approximate: "Approximate", deny: "Not allowed" };
+
+function renderPermissions(site) {
+	const kept = site ? savedPermissions()[site] || {} : {};
+	const entries = Object.entries(kept).filter(([kind]) => PERMISSION_KINDS[kind]);
+	$("permissions-here").hidden = !entries.length;
+	$("permissions-list").replaceChildren(
+		...entries.map(([kind, answer]) => {
+			const li = document.createElement("li");
+			const text = document.createElement("span");
+			text.className = "text link";
+			const title = document.createElement("span");
+			title.textContent = PERMISSION_KINDS[kind].replace(/^your /, "").replace(/^./, (c) => c.toUpperCase());
+			const small = document.createElement("small");
+			small.textContent = ANSWER_TEXT[answer] || answer;
+			text.append(title, small);
+			const forget = document.createElement("button");
+			forget.type = "button";
+			forget.className = "text-btn";
+			forget.textContent = "Ask again";
+			forget.addEventListener("click", () => {
+				const saved = savedPermissions();
+				delete saved[site]?.[kind];
+				if (saved[site] && !Object.keys(saved[site]).length) delete saved[site];
+				saveEntries(PERMISSIONS, saved);
+				renderPermissions(site);
+			});
+			li.append(text, forget);
+			return li;
+		})
+	);
+}
+
+// --------------------------------------------------------------- Tor tabs
+// A Tor tab's sites run on origins of their own (t<key>, src/client/sitekey.js)
+// whose connections go out through Tor from the server (src/tor.js): sites
+// see a Tor exit, a different one for each site, and onion sites open. Like
+// a private window, a Tor tab keeps no history, isn't brought back when the
+// app opens, and its sites' cookies and storage go with the last Tor tab.
+
+let torAvailable = false;
+
+async function torState() {
+	try {
+		return await (await fetch("/api/tor", { cache: "no-store" })).json();
+	} catch {
+		return { available: false };
+	}
+}
+
+// Waits (up to a minute and a half) for Tor to finish connecting, saying how far it is.
+async function torReady(tab) {
+	for (let tries = 0; tries < 90; tries++) {
+		const state = await torState();
+		if (!state.available) throw new Error("Tor isn't available on this server.");
+		if (state.ready) {
+			if (tab === active) error.textContent = "";
+			return;
+		}
+		if (tab === active) error.textContent = `Connecting to Tor… ${state.progress || 0}%`;
+		await new Promise((resolve) => setTimeout(resolve, 1000));
+	}
+	throw new Error("Tor didn't connect. Try again in a minute.");
+}
+
+function newTorTab(url = "") {
+	sheet.hidden = true;
+	const tab = createTab(url, { tor: true });
+	if (!tab) return;
+	if (!url) torReady(tab).catch((err) => (error.textContent = err.message));
+}
+
+// Every Tor origin's cookies and storage: when the last Tor tab closes, and
+// when the app opens (a Tor tab never outlives the app).
+async function forgetTor() {
+	if (!config.isolation) return;
+	const keys = readList("bios:origins").filter((key) => /^[stfg][a-z2-7]{25}$/.test(key));
+	const tor = keys.filter((key) => /^[tg]/.test(key));
+	if (!tor.length) return;
+	await Promise.all(tor.map((key) => clearOrigin(originFor(key))));
+	localStorage.setItem("bios:origins", JSON.stringify(keys.filter((key) => !/^[tg]/.test(key))));
+	for (const key of tor) {
+		const anchor = anchors.get(originFor(key));
+		anchor?.frame.remove();
+		anchors.delete(originFor(key));
+	}
+}
+
+$("tor-tab").addEventListener("click", () => newTorTab());
+
+// ---------------------------------------------------------------- secrets
+// Passwords and passkeys. With the passphrase lock they live in its vault;
+// without it, they are sealed with an AES key the browser keeps and won't
+// hand out (a non-extractable key in IndexedDB), so they never sit in
+// storage as text. Either way they stay on this device.
+
+const SEALED_KEY = "bios:sealed";
+const KEY_DB = "bios-keys";
+let deviceKey = null;
+
+function keyStore(mode, work) {
+	return new Promise((resolve, reject) => {
+		const req = indexedDB.open(KEY_DB, 1);
+		req.onupgradeneeded = () => req.result.createObjectStore("keys");
+		req.onerror = () => reject(req.error);
+		req.onsuccess = () => {
+			const db = req.result;
+			const tx = db.transaction("keys", mode);
+			const result = work(tx.objectStore("keys"));
+			tx.oncomplete = () => {
+				db.close();
+				resolve(result?.result);
+			};
+			tx.onerror = tx.onabort = () => {
+				db.close();
+				reject(tx.error);
+			};
+		};
+	});
+}
+
+async function openOnDevice() {
+	try {
+		deviceKey = await keyStore("readonly", (store) => store.get("device"));
+		if (!deviceKey) {
+			deviceKey = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
+			await keyStore("readwrite", (store) => store.put(deviceKey, "device"));
+		}
+		const sealed = JSON.parse(localStorage.getItem(SEALED_KEY) || "null");
+		if (!sealed) return;
+		const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv: fromBase64(sealed.iv) }, deviceKey, fromBase64(sealed.box));
+		sealedData = JSON.parse(new TextDecoder().decode(plain));
+	} catch (err) {
+		// a browser that won't keep the key: passwords last until the app closes
+		console.warn("secrets:", err);
+	}
+}
+
+let sealingOnDevice = Promise.resolve();
+function sealOnDevice() {
+	if (!deviceKey) return;
+	const plain = encoder.encode(JSON.stringify(sealedData));
+	sealingOnDevice = sealingOnDevice.then(async () => {
+		try {
+			const iv = crypto.getRandomValues(new Uint8Array(12));
+			const box = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, deviceKey, plain));
+			localStorage.setItem(SEALED_KEY, JSON.stringify({ iv: toBase64(iv), box: toBase64(box) }));
+		} catch {
+			// storage full or blocked
+		}
+	});
+}
+
+// ---------------------------------------------------------------- choices
+// The app's own question with a list to pick from (an account, a passkey),
+// which a page can't draw or answer.
+
+let choiceDone = null;
+function choose({ title, note = "", options = [], ok = "" }) {
+	choiceDone?.(null);
+	$("choice-title").textContent = title;
+	$("choice-note").textContent = note;
+	$("choice-ok").textContent = ok;
+	$("choice-ok").hidden = !ok;
+	$("choice-list").replaceChildren(
+		...options.map((option) => {
+			const li = document.createElement("li");
+			const button = document.createElement("button");
+			button.type = "button";
+			button.className = "link";
+			const text = document.createElement("span");
+			text.className = "text";
+			const label = document.createElement("span");
+			label.textContent = option.label;
+			text.append(label);
+			if (option.detail) {
+				const small = document.createElement("small");
+				small.textContent = option.detail;
+				text.append(small);
+			}
+			button.append(text);
+			button.addEventListener("click", () => finishChoice(option.value));
+			li.append(button);
+			return li;
+		})
+	);
+	$("choice").hidden = false;
+	($("choice-list").querySelector("button") || $("choice-ok")).focus();
+	return new Promise((resolve) => (choiceDone = resolve));
+}
+
+function finishChoice(value) {
+	$("choice").hidden = true;
+	const done = choiceDone;
+	choiceDone = null;
+	done?.(value);
+}
+
+$("choice-cancel").addEventListener("click", () => finishChoice(null));
+$("choice-ok").addEventListener("click", () => finishChoice(true));
+
+// An offer at the bottom of the screen that waits for an answer.
+function offer(text, actions) {
+	$("offer-text").textContent = text;
+	$("offer").querySelector(".offer-actions").replaceChildren(
+		...actions.map(({ label, primary, run }) => {
+			const button = document.createElement("button");
+			button.type = "button";
+			button.textContent = label;
+			if (primary) button.className = "primary";
+			button.addEventListener("click", () => {
+				$("offer").hidden = true;
+				run?.();
+			});
+			return button;
+		})
+	);
+	$("offer").hidden = false;
+	pulse($("offer"), RISE);
+}
+
+// -------------------------------------------------------------- passwords
+
+const LOGINS = "bios:logins";
+const NEVER = "bios:never";
+
+function readLogins() {
+	const list = readList(LOGINS);
+	return Array.isArray(list) ? list.filter((l) => typeof l?.site === "string" && typeof l?.password === "string") : [];
+}
+
+const loginsFor = (site) => readLogins().filter((l) => l.site === site);
+
+function showKeyButton() {
+	const btn = $("key-btn");
+	const site = currentSite();
+	const form = active?.url?.startsWith("https:") ? active.loginForm : "";
+	btn.hidden = !site || !form || (form === "login" && !loginsFor(site).length);
+	btn.setAttribute("aria-label", form === "new" && !loginsFor(site).length ? "Suggest a strong password" : "Sign in with a saved password");
+}
+
+function strongPassword() {
+	const letters = "abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+	const bytes = crypto.getRandomValues(new Uint8Array(18));
+	const chars = [...bytes].map((b) => letters[b % letters.length]);
+	// three groups, as Safari suggests them: easier to read out, as strong
+	return [chars.slice(0, 6), chars.slice(6, 12), chars.slice(12)].map((g) => g.join("")).join("-");
+}
+
+async function fillFromKey() {
+	const tab = active;
+	const site = currentSite();
+	if (!tab?.url?.startsWith("https:") || !site) return;
+	const options = loginsFor(site).map((login) => ({
+		label: login.username || "(no username)",
+		detail: `${login.site} · saved ${timeAgo(login.created || Date.now())}`,
+		value: login,
+	}));
+	if (tab.loginForm === "new") options.push({ label: "Use a strong password", detail: "Made up here and filled in; saved when you sign up", value: "new" });
+	const picked = options.length === 1 && options[0].value !== "new" ? options[0].value : await choose({ title: `Sign in to ${site}`, options });
+	if (!picked || tab !== active) return;
+	const login = picked === "new" ? { username: "", password: strongPassword() } : picked;
+	toTab(tab, { cmd: "fill", username: login.username, password: login.password });
+	if (picked !== "new") {
+		picked.used = Date.now();
+		saveEntries(LOGINS, readLogins().map((l) => (l.id === picked.id ? { ...l, used: picked.used } : l)));
+	}
+}
+
+$("key-btn").addEventListener("click", fillFromKey);
+
+// A password the person just used on the tab's site: keep it?
+function offerToKeep(tab, data) {
+	const site = siteFor(tab.url);
+	if (!site || typeof data.password !== "string" || !data.password) return;
+	if (!tab.url.startsWith("https:")) return;
+	const never = readList(NEVER);
+	if (Array.isArray(never) && never.includes(site)) return;
+	const username = String(data.username || "").slice(0, 300);
+	const password = data.password.slice(0, 500);
+	const logins = readLogins();
+	const same = logins.find((l) => l.site === site && l.username === username);
+	if (same?.password === password) return;
+	const keep = () => {
+		const now = Date.now();
+		const rest = readLogins().filter((l) => !(l.site === site && l.username === username));
+		rest.unshift({ id: same?.id || crypto.randomUUID(), site, origin: new URL(tab.url).origin, username, password, created: same?.created || now, used: now });
+		saveEntries(LOGINS, rest);
+		showKeyButton();
+		toast(same ? "Password updated" : "Password saved", "Show", openPasswords);
+	};
+	offer(same ? `Update the saved password for ${username || site}?` : `Save the password${username ? ` for ${username}` : ""} on ${site}?`, [
+		{
+			label: "Never for this site",
+			run: () => saveEntries(NEVER, [...(Array.isArray(never) ? never : []), site].slice(-500)),
+		},
+		{ label: "Not now" },
+		{ label: same ? "Update" : "Save", primary: true, run: keep },
+	]);
+}
+
+// --------------------------------------------------------------- passkeys
+// The app is the passkey's authenticator, as a password manager's is: it
+// makes a key pair for the site, keeps the private key (in the vault, so
+// passkeys need the passphrase lock), and signs the site's challenges after
+// the person says yes. Each passkey belongs to the site whose real address
+// the tab shows (the address the app verified), so another site can't use
+// it, and the site sees an ordinary passkey (ES256, no attestation).
+
+const PASSKEYS = "bios:passkeys";
+const bytesOf = (buffer) => new Uint8Array(buffer instanceof ArrayBuffer ? buffer : ArrayBuffer.isView(buffer) ? buffer.buffer : new ArrayBuffer(0));
+const b64url = (buffer) => toBase64(bytesOf(buffer)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+const fromB64url = (text) => fromBase64(text.replace(/-/g, "+").replace(/_/g, "/") + "==".slice(0, (4 - (text.length % 4)) % 4));
+const sha256 = async (bytes) => new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+const concat = (...parts) => {
+	const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+	let at = 0;
+	for (const part of parts) {
+		out.set(part, at);
+		at += part.length;
+	}
+	return out;
+};
+
+// CBOR, the little of it WebAuthn needs: integers, text, bytes and maps.
+function cbor(value) {
+	const out = [];
+	const head = (major, n) => {
+		if (n < 24) out.push((major << 5) | n);
+		else if (n < 0x100) out.push((major << 5) | 24, n);
+		else if (n < 0x10000) out.push((major << 5) | 25, n >> 8, n & 255);
+		else out.push((major << 5) | 26, (n >>> 24) & 255, (n >> 16) & 255, (n >> 8) & 255, n & 255);
+	};
+	const write = (v) => {
+		if (typeof v === "number") return v >= 0 ? head(0, v) : head(1, -1 - v);
+		if (typeof v === "string") {
+			const bytes = encoder.encode(v);
+			head(3, bytes.length);
+			for (const b of bytes) out.push(b);
+			return;
+		}
+		if (v instanceof Uint8Array) {
+			head(2, v.length);
+			for (const b of v) out.push(b);
+			return;
+		}
+		if (v instanceof Map) {
+			head(5, v.size);
+			for (const [k, x] of v) {
+				write(k);
+				write(x);
+			}
+			return;
+		}
+		throw new Error("can't encode that");
+	};
+	write(value);
+	return new Uint8Array(out);
+}
+
+// WebCrypto signs ECDSA as r||s; WebAuthn wants it in DER.
+function derSignature(raw) {
+	const integer = (bytes) => {
+		let i = 0;
+		while (i < bytes.length - 1 && bytes[i] === 0) i++;
+		let body = [...bytes.slice(i)];
+		if (body[0] & 0x80) body = [0, ...body];
+		return [0x02, body.length, ...body];
+	};
+	const body = [...integer(raw.slice(0, raw.length / 2)), ...integer(raw.slice(raw.length / 2))];
+	return new Uint8Array([0x30, body.length, ...body]);
+}
+
+// A relying party id the page's real address may claim: its own host, or a
+// domain it is under, but never a public suffix (WebAuthn's rule).
+function validRpId(rpId, host) {
+	rpId = String(rpId || host).toLowerCase();
+	if (host !== rpId && !host.endsWith("." + rpId)) return null;
+	const site = BiosSiteKey.siteOf(host);
+	return rpId === site || rpId.endsWith("." + site) ? rpId : null;
+}
+
+function readPasskeys() {
+	const list = readList(PASSKEYS);
+	return Array.isArray(list) ? list.filter((k) => typeof k?.id === "string" && typeof k?.rpId === "string" && k.key) : [];
+}
+
+const FLAGS = { up: 0x01, uv: 0x04, at: 0x40 };
+
+async function passkeyAsked(event) {
+	const data = event.data;
+	const tab = tabFor(event.source);
+	const answer = (result) => answerPage(event, data.id, result);
+	const refuse = (error, name = "NotAllowedError") => answer({ ok: false, error, name });
+	// only the tab's own page, on its verified address, over https
+	if (!tab?.url?.startsWith("https:")) return refuse("Passkeys need a secure page.", "SecurityError");
+	if (isolated ? !SITE_ORIGIN.test(event.origin) : event.origin !== location.origin) return refuse();
+	const page = new URL(tab.url);
+	const request = data.request || {};
+	try {
+		if (data.kind === "passkey-create") return answer(await makePasskey(tab, page, request));
+		return answer(await usePasskey(tab, page, request));
+	} catch (err) {
+		return refuse(err.message || String(err), err.name || "NotAllowedError");
+	}
+}
+
+function failure(message, name = "NotAllowedError") {
+	return Object.assign(new Error(message), { name });
+}
+
+async function needVault() {
+	if (vault) return true;
+	const set = await choose({
+		title: "Passkeys need the passphrase lock",
+		note: "The app keeps passkeys encrypted with your passphrase, and asks for it when the app opens.",
+		ok: "Set a passphrase",
+	});
+	if (set) await askPassphrase("set");
+	return !!vault;
+}
+
+async function makePasskey(tab, page, request) {
+	const rpId = validRpId(request.rp?.id || page.hostname, page.hostname);
+	if (!rpId) throw failure("That site name doesn't match the page's address.", "SecurityError");
+	const algorithms = Array.isArray(request.algorithms) ? request.algorithms : [];
+	if (algorithms.length && !algorithms.includes(-7)) throw failure("The site asked for a kind of key this app doesn't make.", "NotSupportedError");
+	const userId = bytesOf(request.user?.id);
+	if (!userId.length || userId.length > 64) throw failure("The site gave no valid user.", "TypeError");
+	const known = new Set(readPasskeys().filter((k) => k.rpId === rpId).map((k) => k.id));
+	if ((request.exclude || []).some((id) => known.has(b64url(id)))) throw failure("A passkey for this account is already here.", "InvalidStateError");
+	if (!(await needVault())) throw failure("No passkey was made.");
+	const name = String(request.user?.name || "").slice(0, 200);
+	const yes = await choose({
+		title: `Make a passkey for ${rpId}?`,
+		note: `${name ? `For ${name}. ` : ""}Kept in this app, encrypted with your passphrase. Sites can't use it except ${rpId}.`,
+		ok: "Make passkey",
+	});
+	if (!yes || tab.url !== tab.url) throw failure("No passkey was made.");
+
+	const pair = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
+	const raw = new Uint8Array(await crypto.subtle.exportKey("raw", pair.publicKey));
+	const spki = await crypto.subtle.exportKey("spki", pair.publicKey);
+	const key = await crypto.subtle.exportKey("jwk", pair.privateKey);
+	const credentialId = crypto.getRandomValues(new Uint8Array(16));
+	const cose = cbor(new Map([[1, 2], [3, -7], [-1, 1], [-2, raw.slice(1, 33)], [-3, raw.slice(33, 65)]]));
+	const authData = concat(
+		await sha256(encoder.encode(rpId)),
+		new Uint8Array([FLAGS.up | FLAGS.uv | FLAGS.at, 0, 0, 0, 0]),
+		new Uint8Array(16), // AAGUID: none
+		new Uint8Array([credentialId.length >> 8, credentialId.length & 255]),
+		credentialId,
+		cose
+	);
+	const clientData = encoder.encode(
+		JSON.stringify({ type: "webauthn.create", challenge: b64url(request.challenge), origin: page.origin, crossOrigin: false })
+	);
+	const attestation = cbor(new Map([["fmt", "none"], ["attStmt", new Map()], ["authData", authData]]));
+	const list = readPasskeys();
+	list.unshift({
+		id: b64url(credentialId),
+		rpId,
+		user: b64url(userId),
+		name,
+		displayName: String(request.user?.displayName || "").slice(0, 200),
+		key,
+		created: Date.now(),
+	});
+	saveEntries(PASSKEYS, list);
+	toast(`Passkey made for ${rpId}`, "Show", openPasswords);
+	return {
+		ok: true,
+		credentialId: credentialId.buffer,
+		clientDataJSON: clientData.buffer,
+		attestationObject: attestation.buffer,
+		authenticatorData: authData.buffer,
+		publicKey: spki,
+	};
+}
+
+async function usePasskey(tab, page, request) {
+	const rpId = validRpId(request.rpId || page.hostname, page.hostname);
+	if (!rpId) throw failure("That site name doesn't match the page's address.", "SecurityError");
+	const allowed = new Set((request.allow || []).map(b64url));
+	const candidates = readPasskeys().filter((k) => k.rpId === rpId && (!allowed.size || allowed.has(k.id)));
+	if (!vault && !candidates.length && readList(PASSKEYS).length === 0 && localStorage.getItem(VAULT))
+		throw failure("Unlock the app first.");
+	if (!candidates.length) {
+		await choose({ title: `No passkey for ${rpId} here`, note: "This app has no passkey this site accepts. Use another way to sign in." });
+		throw failure("No passkey for this site.");
+	}
+	const picked = await choose({
+		title: `Sign in to ${rpId} with a passkey?`,
+		options: candidates.map((k) => ({ label: k.name || k.displayName || "(no name)", detail: `Made ${timeAgo(k.created)}`, value: k })),
+	});
+	if (!picked) throw failure("The sign-in was cancelled.");
+	const clientData = encoder.encode(
+		JSON.stringify({ type: "webauthn.get", challenge: b64url(request.challenge), origin: page.origin, crossOrigin: false })
+	);
+	const authData = concat(await sha256(encoder.encode(rpId)), new Uint8Array([FLAGS.up | FLAGS.uv, 0, 0, 0, 0]));
+	const privateKey = await crypto.subtle.importKey("jwk", picked.key, { name: "ECDSA", namedCurve: "P-256" }, false, ["sign"]);
+	const raw = new Uint8Array(
+		await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, privateKey, concat(authData, await sha256(clientData)))
+	);
+	return {
+		ok: true,
+		credentialId: fromB64url(picked.id).buffer,
+		clientDataJSON: clientData.buffer,
+		authenticatorData: authData.buffer,
+		signature: derSignature(raw).buffer,
+		userHandle: fromB64url(picked.user).buffer,
+	};
+}
+
+// ------------------------------------------------------- passwords panel
+
+function openPasswords() {
+	sheet.hidden = true;
+	renderPasswords();
+	$("passwords").hidden = false;
+}
+
+function renderPasswords() {
+	$("passwords-note").textContent = vault
+		? "Kept on this device, encrypted with your passphrase."
+		: "Kept on this device, encrypted with a key this browser keeps. Set a passphrase to lock them with one of your own; passkeys need it.";
+	const logins = readLogins();
+	$("logins-empty").hidden = logins.length > 0;
+	$("logins-list").replaceChildren(
+		...logins.map((login) => {
+			const li = document.createElement("li");
+			const text = document.createElement("span");
+			text.className = "text link";
+			const title = document.createElement("span");
+			title.textContent = `${login.site} · ${login.username || "(no username)"}`;
+			const small = document.createElement("small");
+			small.className = "secret";
+			small.textContent = "••••••••";
+			text.append(title, small);
+			const actions = document.createElement("span");
+			actions.className = "row-actions";
+			const show = document.createElement("button");
+			show.type = "button";
+			show.textContent = "Show";
+			show.addEventListener("click", () => {
+				const hidden = small.textContent === "••••••••";
+				small.textContent = hidden ? login.password : "••••••••";
+				show.textContent = hidden ? "Hide" : "Show";
+			});
+			const copy = document.createElement("button");
+			copy.type = "button";
+			copy.textContent = "Copy";
+			copy.addEventListener("click", () =>
+				navigator.clipboard?.writeText(login.password).then(
+					() => toast("Password copied"),
+					() => toast("Couldn't copy it")
+				)
+			);
+			const remove = document.createElement("button");
+			remove.type = "button";
+			remove.textContent = "Delete";
+			remove.addEventListener("click", () => {
+				if (!confirm(`Delete the password for ${login.username || login.site}?`)) return;
+				saveEntries(LOGINS, readLogins().filter((l) => l.id !== login.id));
+				renderPasswords();
+				showKeyButton();
+			});
+			actions.append(show, copy, remove);
+			li.append(text, actions);
+			return li;
+		})
+	);
+	const keys = readPasskeys();
+	$("passkeys-empty").hidden = keys.length > 0;
+	$("passkeys-list").replaceChildren(
+		...keys.map((key) => {
+			const li = document.createElement("li");
+			const text = document.createElement("span");
+			text.className = "text link";
+			const title = document.createElement("span");
+			title.textContent = `${key.rpId} · ${key.name || key.displayName || "(no name)"}`;
+			const small = document.createElement("small");
+			small.textContent = `Made ${timeAgo(key.created)}`;
+			text.append(title, small);
+			const remove = document.createElement("button");
+			remove.type = "button";
+			remove.className = "text-btn";
+			remove.textContent = "Delete";
+			remove.addEventListener("click", () => {
+				if (!confirm(`Delete the passkey for ${key.rpId}? You won't be able to sign in with it again.`)) return;
+				saveEntries(PASSKEYS, readPasskeys().filter((k) => k.id !== key.id));
+				renderPasswords();
+			});
+			li.append(text, remove);
+			return li;
+		})
+	);
+}
+
+$("passwords-open").addEventListener("click", openPasswords);
+$("passwords-close").addEventListener("click", () => ($("passwords").hidden = true));
+$("passwords").addEventListener("click", (event) => {
+	if (event.target === $("passwords")) $("passwords").hidden = true;
+});
+
+// ------------------------------------------------------------------- sync
+// Two of the person's devices swap their bookmarks, history, passwords and
+// passkeys once, and both merge (src/sync.js is the server's relay). The
+// code one shows and the other types is 80 random bits; the key that seals
+// what's sent and the relay's channel names both come from it (HKDF), so
+// the server can't read what passes through, nor tell whose it is.
+
+const SYNC_LETTERS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+let syncRun = 0;
+
+function makeSyncCode() {
+	const bytes = crypto.getRandomValues(new Uint8Array(10));
+	let bits = 0;
+	let value = 0;
+	let code = "";
+	for (const byte of bytes) {
+		value = (value << 8) | byte;
+		bits += 8;
+		while (bits >= 5) {
+			code += SYNC_LETTERS[(value >>> (bits - 5)) & 31];
+			bits -= 5;
+		}
+	}
+	return code.match(/.{4}/g).join("-");
+}
+
+function syncSecret(code) {
+	// (the code's letters leave out I, O, 0 and 1, which look alike)
+	const letters = String(code).toUpperCase().replace(/[^A-Z0-9]/g, "");
+	if (letters.length !== 16 || [...letters].some((c) => !SYNC_LETTERS.includes(c))) return null;
+	const out = new Uint8Array(10);
+	let bits = 0;
+	let value = 0;
+	let at = 0;
+	for (const c of letters) {
+		value = (value << 5) | SYNC_LETTERS.indexOf(c);
+		bits += 5;
+		if (bits >= 8) {
+			out[at++] = (value >>> (bits - 8)) & 255;
+			bits -= 8;
+		}
+	}
+	return out;
+}
+
+async function syncKeys(secret) {
+	const base = await crypto.subtle.importKey("raw", secret, "HKDF", false, ["deriveKey", "deriveBits"]);
+	const params = (info) => ({ name: "HKDF", hash: "SHA-256", salt: encoder.encode("badger-sync-1"), info: encoder.encode(info) });
+	const channel = async (info) =>
+		[...new Uint8Array(await crypto.subtle.deriveBits(params(info), base, 128))].map((b) => b.toString(16).padStart(2, "0")).join("");
+	return {
+		key: await crypto.subtle.deriveKey(params("key"), base, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]),
+		shower: await channel("from the device showing the code"),
+		typer: await channel("from the device the code was typed into"),
+	};
+}
+
+function syncPayload() {
+	return {
+		v: 1,
+		bookmarks: readEntries(BOOKMARKS),
+		history: readEntries(HISTORY),
+		logins: readLogins(),
+		passkeys: readPasskeys(),
+		never: readList(NEVER),
+	};
+}
+
+async function sealSync(key, payload) {
+	const iv = crypto.getRandomValues(new Uint8Array(12));
+	const box = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, encoder.encode(JSON.stringify(payload))));
+	return toBase64(concat(iv, box));
+}
+
+async function unsealSync(key, text) {
+	const raw = fromBase64(text);
+	const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv: raw.slice(0, 12) }, key, raw.slice(12));
+	return JSON.parse(new TextDecoder().decode(plain));
+}
+
+// What came from the other device joins what's here. Returns what was added.
+function mergeSync(theirs) {
+	const added = { bookmarks: 0, history: 0, logins: 0, passkeys: 0 };
+	const list = (value) => (Array.isArray(value) ? value : []);
+	const http = (e) => typeof e?.url === "string" && /^https?:/.test(e.url);
+
+	const marks = readEntries(BOOKMARKS);
+	const known = new Set(marks.map((b) => b.url));
+	for (const b of list(theirs.bookmarks).filter(http))
+		if (!known.has(b.url)) {
+			known.add(b.url);
+			marks.push({ url: b.url, title: String(b.title || "").slice(0, 200) });
+			added.bookmarks++;
+		}
+	saveEntries(BOOKMARKS, marks);
+
+	const visits = new Map(readEntries(HISTORY).map((h) => [`${h.at}\n${h.url}`, h]));
+	for (const h of list(theirs.history).filter(http))
+		if (!visits.has(`${h.at}\n${h.url}`)) {
+			visits.set(`${h.at}\n${h.url}`, { url: h.url, title: String(h.title || "").slice(0, 200), at: Number(h.at) || 0 });
+			added.history++;
+		}
+	saveEntries(HISTORY, [...visits.values()].sort((a, b) => b.at - a.at).slice(0, MAX_HISTORY));
+
+	const logins = new Map(readLogins().map((l) => [`${l.site}\n${l.username}`, l]));
+	for (const l of list(theirs.logins)) {
+		if (typeof l?.site !== "string" || typeof l?.password !== "string") continue;
+		const key = `${l.site}\n${l.username || ""}`;
+		const mine = logins.get(key);
+		const newer = (x) => Number(x?.used || x?.created) || 0;
+		if (!mine) added.logins++;
+		if (!mine || newer(l) > newer(mine)) logins.set(key, { ...l, id: mine?.id || l.id || crypto.randomUUID() });
+	}
+	saveEntries(LOGINS, [...logins.values()]);
+
+	// passkeys only into a vault: they're never kept any other way here
+	if (vault) {
+		const keys = readPasskeys();
+		const ids = new Set(keys.map((k) => k.id));
+		for (const k of list(theirs.passkeys))
+			if (typeof k?.id === "string" && typeof k?.rpId === "string" && k.key && !ids.has(k.id)) {
+				ids.add(k.id);
+				keys.push(k);
+				added.passkeys++;
+			}
+		saveEntries(PASSKEYS, keys);
+	}
+
+	const never = new Set([...list(readList(NEVER)), ...list(theirs.never).filter((x) => typeof x === "string")]);
+	saveEntries(NEVER, [...never].slice(-500));
+	renderBookmarksBar();
+	if (!active?.url) renderNewTab();
+	return added;
+}
+
+function syncDone(added) {
+	const parts = [
+		[added.bookmarks, "bookmark"],
+		[added.history, "page in history"],
+		[added.logins, "password"],
+		[added.passkeys, "passkey"],
+	]
+		.filter(([n]) => n)
+		.map(([n, what]) => `${n} ${what}${n === 1 ? "" : what.endsWith("history") ? "" : "s"}`);
+	$("sync-status").textContent = parts.length ? `Synced. Added here: ${parts.join(", ")}.` : "Synced. Nothing new on the other device.";
+}
+
+const syncFetch = (channel, init) => fetch("/api/sync/" + channel, { cache: "no-store", ...init });
+
+async function syncShowing() {
+	const run = ++syncRun;
+	const code = makeSyncCode();
+	const { key, shower, typer } = await syncKeys(syncSecret(code));
+	$("sync-start").hidden = true;
+	$("sync-code").textContent = code;
+	$("sync-code").hidden = false;
+	$("sync-status").textContent = "On the other device, choose Enter a code and type this. Waiting…";
+	const res = await syncFetch(shower, { method: "PUT", body: await sealSync(key, syncPayload()) });
+	if (!res.ok) return void ($("sync-status").textContent = `Couldn't start (${res.status}). Try again later.`);
+	const until = Date.now() + 10 * 60_000;
+	while (run === syncRun && Date.now() < until) {
+		const answer = await syncFetch(typer).catch(() => null);
+		if (answer?.ok) {
+			try {
+				return syncDone(mergeSync(await unsealSync(key, await answer.text())));
+			} catch {
+				return void ($("sync-status").textContent = "What came back couldn't be opened. Try again with a new code.");
+			}
+		}
+		await new Promise((resolve) => setTimeout(resolve, 2000));
+	}
+	if (run === syncRun) $("sync-status").textContent = "The code ran out. Start again for a new one.";
+}
+
+async function syncTyped(code) {
+	const secret = syncSecret(code);
+	if (!secret) return void ($("sync-status").textContent = "That isn't a code from the app: 16 letters and digits.");
+	const run = ++syncRun;
+	const { key, shower, typer } = await syncKeys(secret);
+	$("sync-status").textContent = "Syncing…";
+	for (let tries = 0; tries < 5 && run === syncRun; tries++) {
+		const theirs = await syncFetch(shower).catch(() => null);
+		if (theirs?.ok) {
+			let added;
+			try {
+				added = mergeSync(await unsealSync(key, await theirs.text()));
+			} catch {
+				return void ($("sync-status").textContent = "That code doesn't match. Check it and try again.");
+			}
+			// ours goes back after theirs is merged, so the other device gets both
+			await syncFetch(typer, { method: "PUT", body: await sealSync(key, syncPayload()) });
+			$("sync-form").hidden = true;
+			return syncDone(added);
+		}
+		await new Promise((resolve) => setTimeout(resolve, 1500));
+	}
+	if (run === syncRun) $("sync-status").textContent = "Nothing is waiting under that code. Check it, or start again on the other device.";
+}
+
+function openSyncPanel() {
+	syncRun++;
+	sheet.hidden = true;
+	$("sync-start").hidden = false;
+	$("sync-code").hidden = true;
+	$("sync-form").hidden = true;
+	$("sync-form").reset();
+	$("sync-status").textContent = "";
+	$("sync").hidden = false;
+}
+
+$("sync-open").addEventListener("click", openSyncPanel);
+$("sync-close").addEventListener("click", () => {
+	syncRun++;
+	$("sync").hidden = true;
+});
+$("sync-show").addEventListener("click", () => syncShowing().catch((err) => ($("sync-status").textContent = err.message || String(err))));
+$("sync-enter").addEventListener("click", () => {
+	$("sync-start").hidden = true;
+	$("sync-form").hidden = false;
+	$("sync-input").focus();
+});
+$("sync-form").addEventListener("submit", (event) => {
+	event.preventDefault();
+	syncTyped($("sync-input").value).catch((err) => ($("sync-status").textContent = err.message || String(err)));
+});
+
+// ------------------------------------------------------------ certificate
+// The site's certificate as the server sees it, and whether its authority
+// has revoked it (src/certs.js).
+
+async function openCert() {
+	if (!active?.url?.startsWith("https:")) return;
+	const url = new URL(active.url);
+	sheet.hidden = true;
+	$("cert-host").textContent = url.hostname;
+	$("cert-status").textContent = "Checking…";
+	$("cert-details").replaceChildren();
+	$("cert").hidden = false;
+	let cert;
+	try {
+		const res = await fetch("/api/cert", {
+			cache: "no-store",
+			headers: { "x-bios-host": url.hostname, "x-bios-port": url.port || "443" },
+		});
+		cert = await res.json();
+		if (!res.ok) throw new Error(cert.error || `HTTP ${res.status}`);
+	} catch (err) {
+		$("cert-status").textContent = "Couldn't read the certificate: " + (err.message || err);
+		return;
+	}
+	if ($("cert-host").textContent !== url.hostname) return;
+	const when = (iso) => new Date(iso).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+	$("cert-status").textContent =
+		cert.revoked === true
+			? "Revoked: the authority that issued it says it must not be trusted."
+			: !cert.trusted
+				? `Not trusted: ${cert.problem || "it doesn't check out"}.`
+				: cert.revoked === false
+					? "Valid, and not on its authority's list of revoked certificates."
+					: "Valid. Whether it was revoked couldn't be checked.";
+	const rows = [
+		["Issued to", [cert.commonName, cert.organization].filter(Boolean).join(", ") || cert.subject],
+		["Names it covers", (cert.names || []).join(", ")],
+		["Issued by", [cert.issuerName, cert.issuerOrganization].filter((v, i, all) => v && all.indexOf(v) === i).join(", ") || cert.issuer],
+		["Valid", `${when(cert.validFrom)} to ${when(cert.validTo)}`],
+		["Chain", (cert.chain || []).map((c) => c.commonName || c.subject).join(" → ")],
+		["SHA-256 fingerprint", cert.fingerprint, true],
+		["Serial number", cert.serial, true],
+	];
+	$("cert-details").replaceChildren(
+		...rows
+			.filter(([, value]) => value)
+			.flatMap(([label, value, mono]) => {
+				const dt = document.createElement("dt");
+				dt.textContent = label;
+				const dd = document.createElement("dd");
+				dd.textContent = value;
+				if (mono) dd.className = "mono";
+				return [dt, dd];
+			})
+	);
+}
+
+$("cert-open").addEventListener("click", openCert);
+$("cert-close").addEventListener("click", () => ($("cert").hidden = true));
+$("cert").addEventListener("click", (event) => {
+	if (event.target === $("cert")) $("cert").hidden = true;
+});
+
+// --------------------------------------------------------------- downloads
+// Files sites send to be saved come here (see shield.js and page.js) rather
+// than to the browser's own sheet, which leaves a home-screen app. Kept in the
+// app's own storage on this device; with the passphrase lock, encrypted with
+// its key like the history. The list of them is private data like the history.
+
+const DOWNLOADS = "bios:downloads";
+const DOWNLOAD_DB = "bios-downloads";
+const MAX_DOWNLOAD = 200 * 1024 * 1024;
+
+function downloadStore(mode, work) {
+	return new Promise((resolve, reject) => {
+		const req = indexedDB.open(DOWNLOAD_DB, 1);
+		req.onupgradeneeded = () => req.result.createObjectStore("files", { keyPath: "id" });
+		req.onerror = () => reject(req.error);
+		req.onsuccess = () => {
+			const db = req.result;
+			const tx = db.transaction("files", mode);
+			const result = work(tx.objectStore("files"));
+			tx.oncomplete = () => {
+				db.close();
+				resolve(result?.result);
+			};
+			tx.onerror = tx.onabort = () => {
+				db.close();
+				reject(tx.error);
+			};
+		};
+	});
+}
+
+// Stored as bytes, not as a Blob: some browsers can't keep a Blob in
+// IndexedDB (Safari's private windows among them).
+async function sealBlob(blob) {
+	const plain = await blob.arrayBuffer();
+	if (!vault) return { plain };
+	const iv = crypto.getRandomValues(new Uint8Array(12));
+	return { iv, data: await crypto.subtle.encrypt({ name: "AES-GCM", iv }, vault.key, plain) };
+}
+
+async function openBlob(record, type) {
+	if (record.plain) return new Blob([record.plain], { type });
+	if (!vault) throw new Error("Unlock the app to open this download.");
+	return new Blob([await crypto.subtle.decrypt({ name: "AES-GCM", iv: record.iv }, vault.key, record.data)], { type });
+}
+
+async function addDownload(tab, data) {
+	if (!(data.blob instanceof Blob)) return;
+	if (data.blob.size > MAX_DOWNLOAD) return toast("That download is larger than 200 MB, so it wasn't kept.");
+	const name = String(data.name || "download").replace(/[\\/:*?"<>|\u0000-\u001f]/g, "_").slice(0, 200) || "download";
+	const type = typeof data.type === "string" && /^[\w.+-]+\/[\w.+-]+$/.test(data.type) ? data.type : "application/octet-stream";
+	const id = crypto.randomUUID();
+	const sealed = await sealBlob(data.blob);
+	await downloadStore("readwrite", (store) => store.put({ id, ...sealed }));
+	const list = readEntriesOf(DOWNLOADS);
+	list.unshift({ id, name, type, size: data.blob.size, url: tab.url, at: Date.now() });
+	for (const old of list.splice(100)) downloadStore("readwrite", (store) => store.delete(old.id)).catch(() => {});
+	saveEntries(DOWNLOADS, list);
+	if (!$("downloads").hidden) renderDownloads();
+	toast(`Downloaded ${name}`, "Show", openDownloads);
+}
+
+// the download list's entries (they have no address of their own to check)
+function readEntriesOf(name) {
+	const list = readList(name);
+	return Array.isArray(list) ? list.filter((e) => typeof e?.id === "string" && typeof e?.name === "string") : [];
+}
+
+const sizeText = (n) => (n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : Math.max(1, Math.ceil(n / 1024)) + " KB");
+
+// Save or share: on a phone, the share sheet (Save to Files, AirDrop, another
+// app); elsewhere, the browser's own download of the file.
+async function saveDownload(entry) {
+	const record = await downloadStore("readonly", (store) => store.get(entry.id));
+	if (!record) throw new Error("This download is gone.");
+	const blob = await openBlob(record, entry.type);
+	const file = new File([blob], entry.name, { type: entry.type });
+	if (MOBILE && navigator.canShare?.({ files: [file] })) {
+		try {
+			await navigator.share({ files: [file] });
+			return;
+		} catch (err) {
+			if (err?.name === "AbortError") return;
+		}
+	}
+	const link = document.createElement("a");
+	link.href = URL.createObjectURL(file);
+	link.download = entry.name;
+	document.body.append(link);
+	link.click();
+	link.remove();
+	setTimeout(() => URL.revokeObjectURL(link.href), 60_000);
+}
+
+async function deleteDownload(id) {
+	await downloadStore("readwrite", (store) => store.delete(id)).catch(() => {});
+	saveEntries(
+		DOWNLOADS,
+		readEntriesOf(DOWNLOADS).filter((e) => e.id !== id)
+	);
+	renderDownloads();
+}
+
+async function deleteAllDownloads() {
+	saveEntries(DOWNLOADS, []);
+	await downloadStore("readwrite", (store) => store.clear()).catch(() => {});
+	renderDownloads();
+}
+
+function renderDownloads() {
+	const list = readEntriesOf(DOWNLOADS);
+	$("downloads-empty").hidden = list.length > 0;
+	$("downloads-clear").hidden = !list.length;
+	$("downloads-list").replaceChildren(
+		...list.map((entry) => {
+			const li = document.createElement("li");
+			const text = document.createElement("span");
+			text.className = "text link";
+			const title = document.createElement("span");
+			title.textContent = entry.name;
+			const small = document.createElement("small");
+			small.textContent = `${sizeText(entry.size || 0)} · ${entry.url ? displayHost(entry.url) : ""} · ${timeAgo(entry.at || Date.now())}`;
+			text.append(title, small);
+			const actions = document.createElement("span");
+			actions.className = "row-actions";
+			const save = document.createElement("button");
+			save.type = "button";
+			save.textContent = MOBILE ? "Save or share" : "Save";
+			save.addEventListener("click", () => saveDownload(entry).catch((err) => toast(err.message || String(err))));
+			const remove = document.createElement("button");
+			remove.type = "button";
+			remove.textContent = "Delete";
+			remove.setAttribute("aria-label", `Delete ${entry.name}`);
+			remove.addEventListener("click", () => deleteDownload(entry.id));
+			actions.append(save, remove);
+			li.append(text, actions);
+			return li;
+		})
+	);
+}
+
+function openDownloads() {
+	sheet.hidden = library.hidden = true;
+	renderDownloads();
+	$("downloads").hidden = false;
+}
+
+$("downloads-open").addEventListener("click", openDownloads);
+$("downloads-close").addEventListener("click", () => ($("downloads").hidden = true));
+$("downloads").addEventListener("click", (event) => {
+	if (event.target === $("downloads")) $("downloads").hidden = true;
+});
+$("downloads-clear").addEventListener("click", () => {
+	if (confirm("Delete every download kept in the app?")) deleteAllDownloads();
+});
+
+// A short note at the bottom of the screen, with one action.
+let toastTimer = 0;
+function toast(text, action = "", run = null) {
+	$("toast-text").textContent = text;
+	$("toast-action").textContent = action;
+	$("toast-action").onclick = () => {
+		$("toast").hidden = true;
+		run?.();
+	};
+	$("toast").hidden = false;
+	pulse($("toast"), RISE);
+	clearTimeout(toastTimer);
+	toastTimer = setTimeout(() => ($("toast").hidden = true), 5000);
 }
 
 // ------------------------------------------------------- passphrase lock
@@ -1542,17 +3431,42 @@ async function setPassphrase(passphrase) {
 	if (passphrase.length < 8) throw new Error("Use at least 8 characters.");
 	const data = vault ? vault.data : Object.fromEntries([...PRIVATE].map((n) => [n, readList(n)]));
 	const salt = crypto.getRandomValues(new Uint8Array(16));
+	const oldKey = vault?.key || null;
 	vault = { key: await deriveKey(passphrase, salt), salt, data };
 	await seal();
 	for (const name of PRIVATE) localStorage.removeItem(name);
+	// the passwords sealed with this device's key move into the vault
+	sealedData = {};
+	localStorage.removeItem(SEALED_KEY);
+	await resealDownloads(oldKey, vault.key);
 }
 
 async function removePassphrase() {
-	const { data } = vault;
+	const { data, key } = vault;
 	vault = null;
 	await sealing;
 	for (const name of PRIVATE) saveEntries(name, data[name] ?? []);
 	localStorage.removeItem(VAULT);
+	await resealDownloads(key, null);
+}
+
+// The downloaded files follow the lock: encrypted with its new key, or
+// stored plainly again when it's turned off.
+async function resealDownloads(oldKey, newKey) {
+	const records = await downloadStore("readonly", (store) => store.getAll()).catch(() => []);
+	for (const record of records || []) {
+		try {
+			const plain = record.plain || (await crypto.subtle.decrypt({ name: "AES-GCM", iv: record.iv }, oldKey, record.data));
+			let next = { id: record.id, plain };
+			if (newKey) {
+				const iv = crypto.getRandomValues(new Uint8Array(12));
+				next = { id: record.id, iv, data: await crypto.subtle.encrypt({ name: "AES-GCM", iv }, newKey, plain) };
+			}
+			await downloadStore("readwrite", (store) => store.put(next));
+		} catch {
+			// one that can't be read with the old key is left as it was
+		}
+	}
 }
 
 // A phone keeps a home-screen app alive in the background for days, so "each
@@ -1652,6 +3566,8 @@ $("vault-erase").addEventListener("click", async () => {
 		return;
 	localStorage.removeItem(VAULT);
 	await clearAllSiteData(true);
+	// encrypted with the forgotten passphrase: gone with it
+	await deleteAllDownloads();
 	closeVaultPanel();
 });
 
@@ -1672,8 +3588,8 @@ $("vault-off").addEventListener("click", async () => {
 	showVaultButtons();
 });
 
-function recordVisit({ url, title }) {
-	if (!/^https?:/.test(url)) return;
+function recordVisit({ url, title, tor }) {
+	if (tor || !/^https?:/.test(url)) return;
 	const list = readEntries(HISTORY);
 	title = String(title || "").slice(0, 200);
 	// a page reporting its title after its address: update, don't duplicate
@@ -1887,11 +3803,17 @@ navigator.serviceWorker?.startMessages();
 // site data when that setting is on, and only then do the tabs open.
 startup = (async () => {
 	if (localStorage.getItem(VAULT)) await askPassphrase("unlock");
+	if (!vault) await openOnDevice();
 	showVaultButtons();
 	const firstLaunch = !sessionStorage.getItem("bios:session");
 	sessionStorage.setItem("bios:session", "1");
 	const loaded = await loadSettings().catch(() => null);
 	if (firstLaunch && loaded && loaded.wipe) await clearAllSiteData();
+	if (isolated) {
+		torAvailable = !!(await torState()).available;
+		$("tor-tab").hidden = !torAvailable;
+		if (firstLaunch) await forgetTor();
+	}
 })().catch((err) => console.warn("startup:", err));
 
 startup.then(() => {
@@ -1908,7 +3830,7 @@ startup.then(() => {
 		history.replaceState(null, "", "/");
 		restoreTabs();
 		if (target) createTab(target);
-		else if (!tabs.length) createTab();
+		else if (!active) createTab();
 	} else {
 		if (!restoreTabs()) createTab();
 		// warm up the service worker and transport so the first search is fast

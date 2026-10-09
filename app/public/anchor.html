@@ -55,6 +55,24 @@
 				if (docs.length) parent.postMessage({ bios: "docs", docs }, "*");
 			}, 500);
 
+			// The shell announces the navigations it starts in this origin's tabs
+			// (see shield.js, "announced"); the service worker answers when it has it.
+			addEventListener("message", async (event) => {
+				if (event.source !== parent || event.data?.bios !== "typed") return;
+				const done = () => parent.postMessage({ bios: "typed-ok", id: event.data.id }, "*");
+				try {
+					const registration = await navigator.serviceWorker.getRegistration("/scramjet/");
+					const worker = registration?.active;
+					if (!worker) return done();
+					const channel = new MessageChannel();
+					channel.port1.onmessage = done;
+					worker.postMessage({ bios: "typed", url: event.data.url, from: event.data.from }, [channel.port2]);
+					setTimeout(done, 1000);
+				} catch {
+					done();
+				}
+			});
+
 			registerSW()
 				.then(setupTransport)
 				.then(

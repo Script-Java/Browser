@@ -58,12 +58,26 @@ async function registerSW() {
  * Needs /baremux/index.js loaded first.
  */
 async function setupTransport(fresh = false) {
+	// One page of this origin at a time: two pages starting together would
+	// each set a transport, and the second would strand the first one's
+	// requests (frames of one site inside a page start together).
+	if (navigator.locks && !setupTransport.locked)
+		return navigator.locks.request("bios-transport", async () => {
+			setupTransport.locked = true;
+			try {
+				return await setupTransport(fresh);
+			} finally {
+				setupTransport.locked = false;
+			}
+		});
 	const connection = new BareMux.BareMuxConnection("/baremux/worker.js");
+	// a Tor tab's site connects through Tor (src/tor.js); the server holds it to that
+	const viaTor = /^[tg][a-z2-7]{25}\./.test(location.hostname);
 	const wispUrl =
 		(location.protocol === "https:" ? "wss" : "ws") +
 		"://" +
 		location.host +
-		"/wisp/";
+		(viaTor ? "/torwisp/" : "/wisp/");
 	// ponytail: replacing a live transport leaks its connection, so only
 	// `fresh` (the old one is known dead) replaces one that's set
 	if (fresh || (await connection.getTransport()) !== "/epoxy/index.mjs")

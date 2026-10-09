@@ -52,19 +52,39 @@ All in the service worker, which already sees every request.
 | 3.5 | Hostile-frame test | Tests in which an embedded third-party frame tries to read its parent's page, cookies and storage. This measures the deepest gap; what it finds decides whether anything can be done about it. | M |
 | 3.6 | Find in page | The one everyday feature in this plan, because its absence is felt daily. The app can't reach into an isolated tab, so the page script does the search on the app's request. | M |
 
+## Phase 4: closing the gaps against Brave and DuckDuckGo (done 2026-10-09)
+
+Each item has its test in `app/e2e/` or `app/src/*.test.js`; `SECURITY-GAPS.md` says what each closed. Built from the open-source projects in `THIRD-PARTY.md` where one fit.
+
+| # | Item | Where | Size |
+|---|---|---|---|
+| 4.1 | Frames of other sites on origins of their own (f…, g…), messages between page and frame with real origins, framing rules held by the frame's worker, `frame-ancestors` on every origin | `shield.js` (inFrame), `page.js` (standInWindow), `sitekey.js` (frameKey), `index.js` | L |
+| 4.2 | Revocation (CRLs, checked by the server) and a certificate viewer | `certs.js`, `shield.js`, shell | M |
+| 4.3 | Tor tabs and onion sites | `tor.js`, `sitekey.js` (torKey), `register-sw.js`, shell, Docker image | L |
+| 4.4 | Passkeys (the app as authenticator) and a password manager | `logins.js`, shell | L |
+| 4.5 | Fingerprinting protection at Standard, and in workers | `fingerprint.js`, `worker.js`, `shield.js` | M |
+| 4.6 | Cookie notices answered (autoconsent), bounce tracking (Brave's debounce), Brave's query filter, CNAME uncloaking (list and live), address-based hiding rules | `consent.js`, `privacyrules.js`, `cname.js`, `filters.js`, `shield.js` | M |
+| 4.7 | Threat lists every half hour; Google Web Risk, optional and private | `filters.js`, `webrisk.js` | M |
+| 4.8 | Only the app's navigations count as the person's; opened tabs as the opener's; forms to new sites keep their fields | `shield.js`, `anchor.html`, shell | M |
+| 4.9 | Downloads, reader view, zoom, print, translate, find with counts, location/camera/microphone after the app's prompt, sync with a code, more web ports | shell, `page.js`, `shield.js`, `sync.js`, `wisp.js` | L |
+
 ## Not planned
 
 | Item | Why |
 |---|---|
-| Full enforcement of sites' Content-Security-Policy | The proxy rewrites every script and address, so a site's policy no longer matches what the browser sees. Only the framing rules (1.3) carry over cleanly. |
-| Revoked-certificate checks | Needs revocation support in the TLS library inside the app. Chrome itself only does this in part. |
-| Several hops, or a different exit per site | Means sending traffic through Tor from the server: slow, and many sites block it. Without it the server operator can always see who opens what; the README says so. |
-| Passkeys and security keys | They are bound to the real address of a site, and every site here lives on the proxy's address. |
-| .onion sites, sync, password manager, signed web-app releases | Each is a project of its own; none fits a home-screen web app without a native part. |
+| Full enforcement of sites' Content-Security-Policy | The proxy rewrites every script and address, so a site's policy no longer matches what the browser sees. Only the framing rules carry over cleanly. |
+| Hiding which sites people open from the server | The server hands every connection on, Tor tabs' included. Only Tor running on the device (Arti, compiled for the web) would hide it, and it isn't ready for that. |
+| Security keys (USB, NFC) and passkeys from other devices | The app can't reach a device's security keys or its platform passkeys on a site's behalf: they're bound to the site's real address, and every site here lives on the proxy's. Passkeys the app keeps itself work. |
+| Signed web-app releases | Needs browser support for verified web apps (Isolated Web Apps, WAICT) or a native app. |
+| Encrypting sites' own storage | It's each site's, out of the app's reach; iOS encrypts it while the phone is locked. |
 
 ## Decisions needed
 
-1. **2.4**: send a fixed `Accept-Language`, or keep sending none?
-2. **2.3**: is more memory per site acceptable for cookie-banner blocking, if the measurement shows a real cost?
-3. **3.1**: Safer only, or a separate switch so Standard users can turn it on?
-4. **Order of phase 3**: the table is in suggested order (privacy first, then find in page); say if find in page should jump the queue.
+Phase 4 picked these defaults; each is one line to change.
+
+1. **Answer cookie notices**: on by default, as in DuckDuckGo (`settings.js`, `consent`).
+2. **Fingerprinting protection at Standard**: on for every site but those with blocking off, as in Brave. It changes a few answers sites read (one language in the list, 4 processors, a full battery).
+3. **Extra web ports**: 8080, 8443, 8000 and 8888 are open by default (`EXTRA_PORTS`).
+4. **Tor tabs**: on wherever the server can run Tor (the Docker image installs it); `TOR=off` to opt out.
+5. **Passkeys need the passphrase lock**: so their keys are always encrypted with something only the person knows.
+6. **Google Web Risk**: off unless a key is bought and set (`WEB_RISK_API_KEY`).
