@@ -72,6 +72,8 @@ function download(url, redirects = 0) {
 	return new Promise((resolve, reject) => {
 		const target = new URL(url);
 		if (target.protocol !== "http:") return reject(new Error("CRLs are fetched over http"));
+		// a certificate names the address: only the web's ports, as for the proxy
+		if (!WEB_PORTS.includes(Number(target.port || 80))) return reject(new Error("not a web port"));
 		const req = http.get(
 			target,
 			{

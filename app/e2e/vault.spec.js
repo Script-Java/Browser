@@ -64,3 +64,17 @@ test("passphrase lock encrypts history, bookmarks and tabs", async ({ app: page 
 	expect(await stored()).not.toContain("bios:vault");
 	expect(await page.evaluate(() => isBookmarked("https://example.com/"))).toBe(true);
 });
+
+test("turning the passphrase lock off keeps the saved passwords", async ({ app: page }) => {
+	await page.evaluate(() => saveEntries(LOGINS, [{ site: "example.com", username: "anne", password: "pw-a", added: Date.now() }]));
+	await page.evaluate(() => setPassphrase("correct horse"));
+	// a session unlocked with the passphrase, as after any relaunch
+	await page.reload();
+	await page.fill("#vault-pass", "correct horse");
+	await page.click("#vault-submit");
+	await expect(page.locator("#vault")).toBeHidden();
+	await page.evaluate(() => removePassphrase());
+	await page.reload();
+	await page.waitForFunction(() => typeof readLogins === "function" && readLogins().length > 0, null, { timeout: 15_000 });
+	expect(await page.evaluate(() => readLogins().map((l) => [l.site, l.username, l.password]))).toEqual([["example.com", "anne", "pw-a"]]);
+});

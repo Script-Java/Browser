@@ -57,6 +57,7 @@ Measured against Brave, DuckDuckGo, Safari and Tor Browser; built from their ope
 ## What's left, and why
 
 - **Sites' own script rules (`Content-Security-Policy: script-src`) aren't enforced.** The proxy rewrites every script and address, so a site's policy no longer matches what the browser sees. Only the framing rules carry over cleanly.
+- **The app's prompt for location, camera and microphone is page script.** For the app to ask and then pass the person's yes on, pages' `Permissions-Policy` allows the three (it used to refuse them outright). `page.js` hooks them in every window it reaches; a page that finds a same-origin frame the hooks miss gets the browser's own, which only asks if the browser hasn't already given the app that permission. The same limit as WebRTC's, below.
 - **WebRTC is removed by page script.** No browser has a rule that switches it off for a page; the desktop app also cuts its UDP inside Chromium.
 - **Site logins on the device aren't encrypted by the app.** They live in each site's own storage, out of the app's reach; iOS encrypts it at rest while the phone is locked, and wipe-on-launch clears it. The app's own data (history, bookmarks, tabs, passwords, passkeys, downloads) is encrypted with the passphrase lock.
 - **No signed releases of the web app.** The server delivers the app's code on every launch, so whoever runs it is trusted completely. Fixing that needs browser support for verified web apps (Chrome's Isolated Web Apps, the WAICT proposal), or a native app.

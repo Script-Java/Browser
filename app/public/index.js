@@ -2718,6 +2718,7 @@ async function needVault() {
 }
 
 async function makePasskey(tab, page, request) {
+	const url = tab.url;
 	const rpId = validRpId(request.rp?.id || page.hostname, page.hostname);
 	if (!rpId) throw failure("That site name doesn't match the page's address.", "SecurityError");
 	const algorithms = Array.isArray(request.algorithms) ? request.algorithms : [];
@@ -2733,7 +2734,7 @@ async function makePasskey(tab, page, request) {
 		note: `${name ? `For ${name}. ` : ""}Kept in this app, encrypted with your passphrase. Sites can't use it except ${rpId}.`,
 		ok: "Make passkey",
 	});
-	if (!yes || tab.url !== tab.url) throw failure("No passkey was made.");
+	if (!yes || tab.url !== url) throw failure("No passkey was made.");
 
 	const pair = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
 	const raw = new Uint8Array(await crypto.subtle.exportKey("raw", pair.publicKey));
@@ -3445,6 +3446,8 @@ async function removePassphrase() {
 	const { data, key } = vault;
 	vault = null;
 	await sealing;
+	// a session unlocked with the passphrase never opened this device's key: the passwords need it now
+	if (!deviceKey) await openOnDevice();
 	for (const name of PRIVATE) saveEntries(name, data[name] ?? []);
 	localStorage.removeItem(VAULT);
 	await resealDownloads(key, null);
