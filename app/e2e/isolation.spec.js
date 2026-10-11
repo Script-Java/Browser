@@ -337,3 +337,74 @@ test("a Tor tab's sites see a Tor exit, onion sites open, and nothing is kept", 
 	await frame.click("#onion");
 	await expect.poll(async () => (await tabFrame(page)).locator("h1").textContent().catch(() => "")).toBe("This is an onion site");
 });
+
+async function openIsolatedShell(page) {
+	await page.goto(ISOLATED_URL + "/");
+	await page.waitForFunction(() => typeof go === "function" && !!active, null, { timeout: 60_000 });
+	await page.evaluate(() => startup);
+}
+const ECHO = "https://httpbingo.org";
+const cookiesHere = async (page) => JSON.parse(await bodyText(await open(page, ECHO + "/cookies"))).cookies;
+const setCookie = (page, cookie) => open(page, `${ECHO}/response-headers?Set-Cookie=${encodeURIComponent(cookie + "; Max-Age=3600")}`);
+
+test("a private tab's sites keep their cookies apart, and nothing of it is kept", async ({ page }) => {
+	await openIsolatedShell(page);
+	await setCookie(page, "plain=1");
+	const plainTab = await page.evaluate(() => active.id);
+
+	await page.evaluate(() => newPrivateTab());
+	await page.waitForFunction(() => active.private);
+	// the ordinary tab's sign-ins aren't here
+	expect(await cookiesHere(page)).toEqual({});
+	expect(await page.evaluate(() => active.siteOrigin)).toMatch(/^http:\/\/s[a-z2-7]{25}-p[a-z2-7]{5}\.app\.localhost:\d+$/);
+	await setCookie(page, "secret=1");
+	expect(await cookiesHere(page)).toEqual({ secret: "1" });
+	await open(page, ECHO + "/anything/private-marker");
+	// no history, and it isn't brought back when the app opens
+	expect(await page.evaluate(() => JSON.stringify(readEntries(HISTORY)))).not.toContain("private-marker");
+	expect(await page.evaluate(() => JSON.stringify(readList(TABS)))).not.toContain("private-marker");
+
+	// and the private tab's aren't in the ordinary one
+	await page.evaluate((id) => selectTab(tabs.find((t) => t.id === id)), plainTab);
+	expect(await cookiesHere(page)).toEqual({ plain: "1" });
+
+	// the last private tab closing takes its sites' data along
+	await page.evaluate(() => {
+		for (const tab of [...tabs]) if (tab.private) closeTab(tab);
+	});
+	await page.waitForTimeout(1500);
+	await page.evaluate(() => newPrivateTab());
+	await page.waitForFunction(() => active.private);
+	expect(await cookiesHere(page)).toEqual({});
+});
+
+test("a workspace can keep its sign-ins separate, and give them up", async ({ page }) => {
+	await openIsolatedShell(page);
+	await setCookie(page, "plain=1");
+
+	await page.evaluate(() => {
+		newWorkspace();
+		closeWorkspaces();
+		return setSeparate(wsById(currentWs), true);
+	});
+	expect(await cookiesHere(page)).toEqual({});
+	expect(await page.evaluate(() => active.siteOrigin)).toMatch(/-w2\.app\.localhost:\d+$/);
+	await setCookie(page, "work=1");
+	expect(await cookiesHere(page)).toEqual({ work: "1" });
+
+	await page.evaluate(() => switchWorkspace(1));
+	expect(await cookiesHere(page)).toEqual({ plain: "1" });
+
+	// switched off: the workspace's tab comes back with the ordinary sign-ins, and its own are forgotten
+	const reloaded = async () => {
+		await page.waitForFunction(() => !active.loading, null, { timeout: 60_000 });
+		return JSON.parse(await bodyText(await tabFrame(page))).cookies;
+	};
+	await page.evaluate(() => {
+		switchWorkspace(2);
+		return setSeparate(wsById(2), false);
+	});
+	expect(await reloaded()).toEqual({ plain: "1" });
+	await page.evaluate(() => setSeparate(wsById(2), true));
+	expect(await reloaded()).toEqual({});
+});

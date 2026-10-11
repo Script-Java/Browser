@@ -9,9 +9,11 @@
 
 import { FiltersEngine, Request as FilterRequest } from "@ghostery/adblocker";
 import { parse } from "tldts";
-import { frameKey, siteOf, siteKey, torKey } from "../client/sitekey.js";
+import { frameKey, namespaceOf, siteOf, siteKey, torKey } from "../client/sitekey.js";
 import { DEFAULT_SETTINGS } from "../settings.js";
 import { PREFIX, decodeUrl, encodeUrl } from "../codec.js";
+import { expiresFromMaxAge } from "./cookies.js";
+import { lookalikeOf } from "./lookalike.js";
 
 const FILTER_CACHE = "bios-filters";
 const ENGINE_RECHECK_MS = 6 * 3_600_000;
@@ -114,7 +116,10 @@ export function createShield(scramjet, configStored) {
 	// sites it leads to open in Tor too, and the server never connects to a
 	// site for it (no certificate or CNAME lookups, which a site could see).
 	const viaTor = isolated && /^[tg]/.test(ownLabel);
-	const keyOf = (hostname) => (viaTor ? torKey(hostname) : siteKey(hostname));
+	// A private tab's or a separate workspace's sites (sitekey.js): the sites
+	// its pages lead to stay in it, and so do the frames inside them.
+	const ns = isolated ? namespaceOf(ownLabel) : "";
+	const keyOf = (hostname) => (viaTor ? torKey(hostname) : siteKey(hostname, ns));
 	// A frame from another site inside a page runs on an origin of its own
 	// (f<key>, g<key> in a Tor tab; see sitekey.js frameKey), so the browser
 	// itself keeps it and the page around it apart. This origin's worker
@@ -266,12 +271,70 @@ export function createShield(scramjet, configStored) {
 		event.ports[0]?.postMessage("ok");
 	});
 
+	// ------------------------------------------------------------- cookies
+
+	// Scramjet keeps the sites' cookies in its database, but its worker
+	// never reads them back (they come out as an object, and its load() only
+	// takes text), and saves only the ones a page's script sets. So every
+	// time the browser stopped this worker (Chrome does after half a minute
+	// without requests), the cookies sites had sent were gone: signed out.
+	// This worker reads them back when it starts, and saves them after
+	// every change. (Scramjet's database, as storeConfig made it.)
+	function cookieJar(mode, use) {
+		return new Promise((resolve, reject) => {
+			const open = indexedDB.open("$scramjet");
+			// not made here: storeConfig makes it, with all its tables
+			open.onupgradeneeded = () => open.transaction.abort();
+			open.onerror = () => reject(open.error);
+			open.onsuccess = () => {
+				const db = open.result;
+				try {
+					const tx = db.transaction("cookies", mode);
+					const req = use(tx.objectStore("cookies"));
+					tx.oncomplete = () => {
+						db.close();
+						resolve(req.result);
+					};
+					tx.onerror = tx.onabort = () => {
+						db.close();
+						reject(tx.error);
+					};
+				} catch (err) {
+					db.close();
+					reject(err);
+				}
+			};
+		});
+	}
+	const savedCookies = configStored
+		.then(() => cookieJar("readonly", (store) => store.get("cookies")))
+		.then((saved) => {
+			if (typeof saved === "string") saved = JSON.parse(saved);
+			if (!saved || typeof saved !== "object") return;
+			// what this worker has heard since it started is newer
+			scramjet.cookieStore.load(JSON.stringify({ ...saved, ...JSON.parse(scramjet.cookieStore.dump()) }));
+		})
+		.catch((err) => console.warn("bios: couldn't read the saved cookies:", err));
+	// one write at a time, each with the jar as it is then
+	let cookieWrites = Promise.resolve();
+	let cookiesChanged = false;
+	function saveCookies() {
+		cookiesChanged = false;
+		cookieWrites = cookieWrites
+			.then(() => savedCookies)
+			.then(() => cookieJar("readwrite", (store) => store.put(JSON.parse(scramjet.cookieStore.dump()), "cookies")))
+			.catch((err) => console.warn("bios: couldn't save the cookies:", err));
+		return cookieWrites;
+	}
+
 	// "Clear all site data" deleted Scramjet's cookie database; forget the
 	// copy this worker keeps in memory too.
 	self.addEventListener("message", (event) => {
 		if (event.origin !== location.origin) return;
 		if (event.data?.bios !== "wipe") return;
 		scramjet.cookieStore.load("{}");
+		// (and a write of the old jar still on its way lands before this one)
+		event.waitUntil(saveCookies());
 		// New Identity: forget the warnings the person clicked through too
 		for (const set of [bypassed, plainHttp, allowOnce, inlineOnce]) set.clear();
 	});
@@ -447,7 +510,7 @@ export function createShield(scramjet, configStored) {
 			type,
 		});
 		let answer = { match: false };
-		for (const list of [engine, settings.notices && notices]) {
+		for (const list of [custom, engine, settings.notices && notices]) {
 			if (!list) continue;
 			answer = list.match(request);
 			if (answer.match || answer.redirect) break;
@@ -475,9 +538,25 @@ export function createShield(scramjet, configStored) {
 
 	// -------------------------------------------------------------- settings
 
+	// The person's own rules (settings.rules, uBlock Origin's syntax): an
+	// engine of their own, rebuilt when they change, consulted first.
+	let custom = null;
+	let customText = "";
+	function applyRules(text) {
+		if (text === customText) return;
+		customText = text;
+		try {
+			custom = text ? FiltersEngine.parse(text, { loadCosmeticFilters: true, loadNetworkFilters: true }) : null;
+		} catch (err) {
+			console.warn("bios: couldn't read your own rules:", err);
+			custom = null;
+		}
+	}
+
 	function applySettings(next) {
 		settings = { ...DEFAULT_SETTINGS, ...(next || {}) };
 		settingsAt = Date.now();
+		applyRules(typeof settings.rules === "string" ? settings.rules : "");
 		if (settings.notices) loadNotices();
 		// This origin is one site's (isolation): is it one with scripts switched off?
 		// a frame's: the page it's in, whose tab it belongs to
@@ -499,10 +578,24 @@ export function createShield(scramjet, configStored) {
 		return settings;
 	}
 
-	// One round trip per page load: fresh settings plus the threat verdict,
-	// so a switch flipped in the shield menu applies to the very next page
-	// (on every site origin in isolation mode, too).
+	// A round trip before a page loads: fresh settings plus the threat
+	// verdict. A site's verdict is kept a few minutes (the server's lists
+	// change every quarter hour), and with settings from the last half
+	// minute a page goes ahead without asking. The shell says when the
+	// settings change (index.js settingsChanged, through the anchor frame), so
+	// a switch flipped in the shield menu still applies to the very next page.
+	// A frame's own origin has no anchor to hear that from: it always asks.
+	const VERDICT_TTL_MS = 5 * 60_000;
+	const verdicts = new Map(); // hostname -> { threat, at }
+	self.addEventListener("message", (event) => {
+		if (event.origin === location.origin && event.data?.bios === "settings") settingsAt = 0;
+	});
 	async function checkNavigation(hostname) {
+		const host = hostname.toLowerCase();
+		const known = verdicts.get(host);
+		const now = Date.now();
+		if (!inFrame && known && now - known.at < VERDICT_TTL_MS && settings && now - settingsAt < SETTINGS_TTL_MS)
+			return known.threat;
 		try {
 			const res = await shellFetch("/api/nav", {
 				cache: "no-store",
@@ -511,6 +604,8 @@ export function createShield(scramjet, configStored) {
 			if (!res.ok) throw new Error(`HTTP ${res.status}`);
 			const data = await res.json();
 			applySettings(data.settings);
+			if (verdicts.size > 500) verdicts.clear();
+			verdicts.set(host, { threat: data.threat, at: Date.now() });
 			return data.threat;
 		} catch {
 			await getSettings();
@@ -590,6 +685,22 @@ export function createShield(scramjet, configStored) {
 			title: "This connection isn't private",
 			text: "The authority that issued this site's security certificate has revoked it, so someone may be using a stolen certificate to pretend to be the site. It wasn't opened.",
 		},
+		// Not in the public Certificate Transparency logs browsers require
+		// (certs.js): issued in secret, maybe to impersonate the site. No way
+		// past, as in Chrome and Safari.
+		unlogged: {
+			danger: true,
+			title: "This connection isn't private",
+			text: "This site's security certificate isn't in the public logs browsers require, so it may have been issued in secret to pretend to be the site. It wasn't opened.",
+		},
+		// An address made to pass for a well-known site's (lookalike.js)
+		lookalike: {
+			danger: true,
+			title: "Is this the site you meant?",
+			text: "This address looks like {real}, but it's a different site. Sites like this pretend to be another to get passwords and card numbers.",
+			go: "Continue anyway",
+			action: "bypass",
+		},
 		unreachable: {
 			title: "Couldn't open this page",
 			text: "The site didn't answer. It may be down, the address may be wrong, or the connection dropped.",
@@ -614,11 +725,14 @@ export function createShield(scramjet, configStored) {
 	];
 
 	// `why`: what the transport said when the page couldn't be fetched.
-	function interstitial({ kind, host, url, why }) {
+	// `real`: the site a lookalike address passes for.
+	function interstitial({ kind, host, url, why, real }) {
 		const { danger, title, go, action } = WARNINGS[kind];
 		let { text } = WARNINGS[kind];
 		if (kind === "cert") text = CERT_PROBLEMS.find(([problem]) => problem.test(why))[1] + " " + text;
+		if (real) text = text.replace("{real}", real);
 		const proceed = action === "retry" || action === "tor" ? url : action ? goUrl(action, url) : "";
+		const realUrl = real ? location.origin + encodeUrl(`https://${real}/`) : "";
 		return new Response(
 			`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${htmlEscape(title)}</title>
 <style>
@@ -627,18 +741,20 @@ body{margin:0;padding:48px 24px;max-width:560px}
 h1{font-size:24px;margin:0 0 12px}p{margin:0 0 16px;opacity:.9}
 code{word-break:break-all;background:rgba(0,0,0,.25);padding:2px 6px;border-radius:6px}
 button{font:inherit;padding:10px 16px;border-radius:10px;border:0;margin:8px 8px 0 0}
-#back{background:#fff;color:#111}#go{background:transparent;color:#fff;text-decoration:underline;padding-left:0}
+#back,#real{background:#fff;color:#111}#go{background:transparent;color:#fff;text-decoration:underline;padding-left:0}
 body.sub{display:none}
 </style></head><body>
 <h1>${htmlEscape(title)}</h1>
 <p>${htmlEscape(text)}</p>
 <p><code>${htmlEscape(host)}</code></p>
-<button id="back" type="button">Go back</button>
+${realUrl ? `<button id="real" type="button">Go to ${htmlEscape(real)}</button>` : `<button id="back" type="button">Go back</button>`}
 ${proceed ? `<button id="go" type="button">${htmlEscape(go)}</button>` : ""}
 <script>
 ${WHERE}
 if (where() === "sub") document.body.className = "sub";
-document.getElementById("back").onclick = function () { history.length > 1 ? history.back() : location.replace("about:blank"); };
+var back = document.getElementById("back"), real = document.getElementById("real");
+if (back) back.onclick = function () { history.length > 1 ? history.back() : location.replace("about:blank"); };
+if (real) real.onclick = function () { location.replace(${scriptJson(realUrl)}); };
 var go = document.getElementById("go");
 if (go) go.onclick = ${kind === "onion" ? `function () { top.postMessage({ bios: "open-tor", url: ${scriptJson(url)} }, "*"); }` : `function () { location.replace(${scriptJson(proceed)}); }`};
 </script></body></html>`,
@@ -922,7 +1038,7 @@ poll();
 			const to = location.origin + String(params.get("u") || "");
 			const target = decode(to);
 			if (!inFrame || !target || !/^[a-z0-9.-]{1,253}$/.test(top)) return new Response(null, { status: 400 });
-			if ((await frameKey(top, target.hostname, viaTor)) !== ownLabel) return new Response(null, { status: 403 });
+			if ((await frameKey(top, target.hostname, viaTor, ns)) !== ownLabel) return new Response(null, { status: 403 });
 			keepTop(top);
 			if (request.method !== "GET") return redirect(to);
 			// A frame's origin has no anchor frame to hold its proxy connection
@@ -979,7 +1095,7 @@ poll();
 			const host = parse(url);
 			if (!host.hostname || isAllowed(host.hostname)) return json({ styles: "" });
 			await waitForNotices();
-			const result = hiding([settings.cosmetic && engine, settings.notices && notices], {
+			const result = hiding([settings.cosmetic && custom, settings.cosmetic && engine, settings.notices && notices], {
 				url,
 				hostname: host.hostname,
 				domain: host.domain || host.hostname,
@@ -1178,12 +1294,17 @@ poll();
 	// A cookie that doesn't say goes everywhere, as in Safari. (Scramjet's
 	// jar files it under Lax, which would keep it home with the ones that
 	// asked to stay; Chrome does that, with exceptions sign-ins depend on.)
+	// And its Max-Age counts (see cookies.js).
 	const setCookies = scramjet.cookieStore.setCookies.bind(scramjet.cookieStore);
-	scramjet.cookieStore.setCookies = (cookies, url) =>
-		setCookies(
-			cookies.map((cookie) => (/;\s*samesite\s*=/i.test(cookie) ? cookie : cookie + "; SameSite=None")),
+	scramjet.cookieStore.setCookies = (cookies, url) => {
+		cookiesChanged = true;
+		return setCookies(
+			cookies.map((cookie) =>
+				expiresFromMaxAge(/;\s*samesite\s*=/i.test(cookie) ? cookie : cookie + "; SameSite=None")
+			),
 			url
 		);
+	};
 
 	// Query parameters that only exist to follow a person from one site to
 	// the next: click ids and campaign tags (Brave's and DuckDuckGo's lists).
@@ -1477,6 +1598,7 @@ poll();
 		(!!url && settings.noScripts.includes(siteOf(url.hostname)));
 
 	const SCRIPTED = new Set(["script", "worker", "sharedworker", "serviceworker"]);
+	const DOCUMENTS = new Set(["document", "iframe", "frame", "object", "embed"]);
 
 	function saferBlock(destination, source) {
 		if (hardened() && destination === "font") return blocked(destination);
@@ -1494,8 +1616,9 @@ poll();
 		const res = await scramjet.fetch(event);
 		const page = isPage && { cosmetic: false, videoAds: false, safer: hardened(), farble: true, noScripts };
 		const resHeaders = new Headers(res.headers);
-		resHeaders.set("content-security-policy", policyFor(page));
-		const html = page && /^text\/html/i.test(resHeaders.get("content-type") || "");
+		const htmlType = /^text\/html/i.test(resHeaders.get("content-type") || "");
+		resHeaders.set("content-security-policy", policyFor(page, (isPage || DOCUMENTS.has(destination)) && !htmlType));
+		const html = page && htmlType;
 		// a worker made from a blob: (a favourite of fingerprinting scripts) gets
 		// the protection a worker from an address gets
 		if (destination === "worker" || destination === "sharedworker") {
@@ -1554,6 +1677,8 @@ poll();
 		// straight to Scramjet
 		const target = decode(url);
 		if (!target) {
+			// a video segment's sealed address (media.js): only the server reads it
+			if (url.startsWith(prefix + "__m/")) return fetch(request);
 			if (!/^(data|blob):/i.test(url.slice(prefix.length))) return scramjet.fetch(event);
 			return inline(event, destination, isPage);
 		}
@@ -1610,7 +1735,7 @@ poll();
 				// the page this frame is in: this origin's own site, or the
 				// one a frame's origin was opened for
 				const embedder = inFrame ? topSite : ownSite || (decode(request.referrer) && siteOf(decode(request.referrer).hostname));
-				const frameLabel = embedder ? await frameKey(embedder, target.hostname, viaTor) : null;
+				const frameLabel = embedder ? await frameKey(embedder, target.hostname, viaTor, ns) : null;
 				const here = inFrame ? frameLabel === ownLabel : key === ownLabel;
 				if (!inFrame && here) ownSite = siteOf(target.hostname);
 				if (!here) {
@@ -1652,10 +1777,16 @@ poll();
 				!bypassed.has(target.hostname.toLowerCase())
 			)
 				return interstitial({ kind: threat, host: target.hostname, url });
+			// an address made to pass for a well-known site's (a phishing warning too)
+			const real = settings.threats && !bypassed.has(target.hostname.toLowerCase()) && lookalikeOf(target.hostname);
+			if (real) return interstitial({ kind: "lookalike", host: target.hostname, url, real });
 			// a slow answer (a big list the server is still fetching) lets the
 			// page load; the verdict is kept for the next one
 			const cert = await Promise.race([certificate, new Promise((resolve) => setTimeout(resolve, 2500, null))]);
 			if (cert?.revoked === true) return interstitial({ kind: "revoked", host: target.hostname, url });
+			// (for a certificate a public authority vouches for, as in Chrome: one
+			// that isn't gets the device's own, more telling refusal)
+			if (cert?.logged === false && cert.trusted) return interstitial({ kind: "unlogged", host: target.hostname, url });
 		} else {
 			await getSettings();
 		}
@@ -1727,7 +1858,10 @@ poll();
 		// A navigation gets no page that started it: Scramjet would read that
 		// page's address as a site's, and one of ours (a frame's way in,
 		// __bios/frame) isn't one. What sites are told is worked out above.
+		await savedCookies;
 		const response = await scramjet.fetch(isPage ? { request, clientId: "no page" } : event);
+		// the site set a cookie: write it down before this worker can be stopped
+		if (cookiesChanged) event.waitUntil(saveCookies());
 		if (isPage && who && response.status >= 300 && response.status < 400) {
 			const to = response.headers.get("location");
 			if (to) keep(hops, pageKey(new URL(to, url).href), { who, redirect: true, at: Date.now() });
@@ -1749,7 +1883,7 @@ poll();
 	// -------------------------------------------- after Scramjet rewrites HTML
 
 	function injectHtml(html, page) {
-		const { styles, scripts } = hiding([page.cosmetic && engine, page.notices && notices], {
+		const { styles, scripts } = hiding([page.cosmetic && custom, page.cosmetic && engine, page.notices && notices], {
 			url: page.url,
 			hostname: page.hostname,
 			domain: parse(page.url).domain || page.hostname,
@@ -1810,10 +1944,17 @@ poll();
 	const NETWORK_LOCK = `default-src 'self' ${socket} data: blob: 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'; frame-src 'self' ${siteOrigins}; ${FRAMED_BY}`;
 
 	// The policy for a proxied response; `page` is set for the pages we inject.
-	function policyFor(page) {
+	// `inert`: a document that isn't HTML (an SVG, XML). The browser runs the
+	// scripts in it too, but our page script never goes in, and Scramjet
+	// doesn't rewrite them: they'd run with nothing of the proxy's around
+	// them (WebRTC, the browser's own location). None of its own start; eval
+	// stays, which only a page reaching in can call, and Scramjet hooks such
+	// a document with it.
+	function policyFor(page, inert = false) {
 		// "Safer": no web fonts. handle() refuses them too, but a font the
 		// browser kept from an earlier visit never gets there to be refused.
 		const lock = page?.safer ? `font-src 'none'; ${NETWORK_LOCK}` : NETWORK_LOCK;
+		if (inert) return `script-src 'unsafe-eval' 'wasm-unsafe-eval'; ${lock}`;
 		if (!page?.noScripts) return lock;
 		// Its inline scripts and handlers don't run; Scramjet's own scripts
 		// (its folder, and its data: one, which injectHtml gives the nonce)
@@ -1849,7 +1990,8 @@ poll();
 			event.responseHeaders = { ...headers(), "content-security-policy": NETWORK_LOCK };
 			return;
 		}
-		event.responseHeaders["content-security-policy"] = policyFor(page);
+		const html = typeof event.responseBody === "string" && /^text\/html/i.test(event.responseHeaders["content-type"] || "");
+		event.responseHeaders["content-security-policy"] = policyFor(page, (!!page || DOCUMENTS.has(event.destination)) && !html);
 		if (!page) return;
 		pages.delete(pageKey(event.url.href));
 		// A page carries its protection with it (the policy above, the page
@@ -1878,6 +2020,25 @@ poll();
 	loadPrivacyRules();
 
 	return {
+		/**
+		 * A page's script set a cookie (document.cookie). Scramjet would save
+		 * its jar for it, and right after this worker started that is a jar
+		 * without the cookies saved before: scramjet-sw.js hands these here.
+		 * @param {ExtendableMessageEvent} event
+		 */
+		pageCookie(event) {
+			const { cookie, url } = event.data;
+			event.waitUntil(
+				savedCookies.then(() => {
+					try {
+						scramjet.cookieStore.setCookies([String(cookie)], new URL(url));
+					} catch {
+						return;
+					}
+					return saveCookies();
+				})
+			);
+		},
 		handle(event) {
 			// A check that broke must not wave the request through unchecked.
 			return handle(event).catch((err) => {

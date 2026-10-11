@@ -21,6 +21,7 @@ import { tmpdir } from "node:os";
 import { randomBytes } from "node:crypto";
 import { SocksClient } from "socks";
 import { SocksProxyAgent } from "socks-proxy-agent";
+import { skipLookup } from "./wisp.js";
 
 const state = { enabled: false, ready: false, progress: 0, port: 0, error: null };
 
@@ -108,6 +109,8 @@ export function torSocket(key) {
 	const isolation = { userId: key, password: randomBytes(8).toString("hex") };
 	return class TorSocket {
 		constructor(hostname, port) {
+			// before wisp-js checks the name: no lookup of it on the server (wisp.js)
+			skipLookup(hostname);
 			this.hostname = hostname;
 			this.port = port;
 			this.socket = null;

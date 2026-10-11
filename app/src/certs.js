@@ -11,12 +11,13 @@
 
 // @peculiar/x509 needs this loaded before it (its dependency injection)
 import "reflect-metadata";
-import { X509Certificate as NodeCertificate, verify as cryptoVerify, webcrypto } from "node:crypto";
-import dns from "node:dns/promises";
+import { X509Certificate as NodeCertificate, createHash, verify as cryptoVerify, webcrypto } from "node:crypto";
+import { lookupAll } from "./dns.js";
 import http from "node:http";
 import tls from "node:tls";
 import { X509Certificate, CRLDistributionPointsExtension, SubjectAlternativeNameExtension, cryptoProvider } from "@peculiar/x509";
 import { WEB_PORTS, isBlockedAddress } from "./wisp.js";
+import { fetchText } from "./filters.js";
 
 cryptoProvider.set(webcrypto);
 
@@ -29,7 +30,7 @@ const certCache = new Map(); // "host:port" -> { at, result: Promise }
 const crlCache = new Map(); // url -> { until, crl: Promise, size }
 
 async function publicAddress(host) {
-	const found = (await dns.lookup(host, { all: true })).filter((a) => !isBlockedAddress(a.address));
+	const found = (await lookupAll(host)).filter((a) => !isBlockedAddress(a.address));
 	if (!found.length) throw new Error("private address");
 	return found[0].address;
 }
@@ -241,6 +242,154 @@ function fetchCrl(url, issuer, now) {
 	return crl;
 }
 
+// ------------------------------------------------- Certificate Transparency
+//
+// Chrome and Safari only accept a certificate its authority published in
+// public logs (CT): one issued in secret, to impersonate a site, would be
+// seen. The proof is in the certificate: signed timestamps (SCTs) from the
+// logs. rustls on the device doesn't check them; this does, against the
+// logs Chrome trusts (its list, refreshed daily), as Chrome's policy asks:
+// valid ones from two logs of two different operators.
+
+const LOG_LIST_URL = "https://www.gstatic.com/ct/log_list/v3/log_list.json";
+const SCT_EXTENSION = Buffer.from("060a2b06010401d679020402", "hex"); // OID 1.3.6.1.4.1.11129.2.4.2, as DER
+let ctLogs = null; // log id (base64) -> { key, operator, retiredAt }
+
+/** Chrome's CT logs, from its log list's JSON. */
+export function readLogList(list) {
+	const logs = new Map();
+	for (const operator of list.operators || [])
+		for (const log of [...(operator.logs || []), ...(operator.tiled_logs || [])]) {
+			const state = log.state || {};
+			if (!state.usable && !state.qualified && !state.readonly && !state.retired) continue;
+			logs.set(log.log_id, {
+				key: Buffer.from(log.key, "base64"),
+				operator: operator.name,
+				description: log.description,
+				retiredAt: state.retired ? Date.parse(state.retired.timestamp) : Infinity,
+			});
+		}
+	return logs;
+}
+
+export function setCtLogs(logs) {
+	ctLogs = logs;
+}
+
+// fetched as the server starts (index.js), then daily
+export async function refreshLogList() {
+	try {
+		setCtLogs(readLogList(JSON.parse((await fetchText(LOG_LIST_URL)).text)));
+		setTimeout(refreshLogList, 24 * 3_600_000).unref();
+	} catch (err) {
+		console.warn("certs: CT log list unavailable:", err.message);
+		setTimeout(refreshLogList, 10 * 60_000).unref();
+	}
+}
+
+const derLength = (n) => {
+	if (n < 128) return Buffer.from([n]);
+	const bytes = [];
+	for (; n; n = Math.floor(n / 256)) bytes.unshift(n & 255);
+	return Buffer.from([0x80 | bytes.length, ...bytes]);
+};
+const wrap = (tag, body) => Buffer.concat([Buffer.from([tag]), derLength(body.length), body]);
+
+// The leaf's SCT list, and its TBSCertificate without it: what the logs
+// signed (the "precertificate"), or null when it carries none.
+function splitLeaf(der) {
+	const tbs = tlv(der, tlv(der, 0).value);
+	let extensions = null;
+	for (let pos = tbs.value; pos < tbs.end; ) {
+		const field = tlv(der, pos);
+		if (field.tag === 0xa3) extensions = field;
+		pos = field.end;
+	}
+	if (!extensions) return null;
+	const list = tlv(der, extensions.value);
+	const kept = [];
+	let scts = null;
+	for (let pos = list.value; pos < list.end; ) {
+		const extension = tlv(der, pos);
+		const oid = tlv(der, extension.value);
+		if (der.subarray(oid.start, oid.end).equals(SCT_EXTENSION)) {
+			let value = tlv(der, oid.end);
+			if (value.tag === 0x01) value = tlv(der, value.end); // "critical"
+			const inner = tlv(der, value.value);
+			scts = der.subarray(inner.value, inner.end);
+		} else kept.push(der.subarray(extension.start, extension.end));
+		pos = extension.end;
+	}
+	if (!scts) return null;
+	const rest = kept.length ? wrap(0xa3, wrap(0x30, Buffer.concat(kept))) : Buffer.alloc(0);
+	const precert = wrap(0x30, Buffer.concat([der.subarray(tbs.value, extensions.start), rest, der.subarray(extensions.end, tbs.end)]));
+	return { scts, precert };
+}
+
+// The SCTs in a SignedCertificateTimestampList (RFC 6962, version 1 only).
+function parseScts(list) {
+	const out = [];
+	const end = Math.min(list.length, 2 + list.readUInt16BE(0));
+	for (let pos = 2; pos + 2 <= end; ) {
+		const sct = list.subarray(pos + 2, pos + 2 + list.readUInt16BE(pos));
+		pos += 2 + sct.length;
+		if (sct.length < 47 || sct[0] !== 0) continue;
+		const extensions = sct.subarray(43, 43 + sct.readUInt16BE(41));
+		const at = 43 + extensions.length;
+		if (at + 4 > sct.length) continue;
+		out.push({
+			logId: sct.subarray(1, 33).toString("base64"),
+			timestamp: sct.subarray(33, 41),
+			extensions,
+			hash: sct[at],
+			signature: sct.subarray(at + 4, at + 4 + sct.readUInt16BE(at + 2)),
+		});
+	}
+	return out;
+}
+
+/**
+ * Whether the chain's leaf was logged as Chrome requires: { logged, scts },
+ * `logged` null while the log list hasn't come down.
+ * @param {Buffer[]} chain DER, leaf first
+ */
+export function transparency(chain) {
+	if (!ctLogs || !chain[1]) return { logged: null, scts: [] };
+	let split;
+	try {
+		split = splitLeaf(chain[0]);
+	} catch {
+		// DER this reader doesn't follow: unknown, not a reason to refuse the site
+		return { logged: null, scts: [] };
+	}
+	if (!split) return { logged: false, scts: [] };
+	const issuerKey = createHash("sha256").update(new NodeCertificate(chain[1]).publicKey.export({ type: "spki", format: "der" })).digest();
+	const length3 = Buffer.from([split.precert.length >> 16, (split.precert.length >> 8) & 255, split.precert.length & 255]);
+	const scts = parseScts(split.scts).map((sct) => {
+		const log = ctLogs.get(sct.logId);
+		const at = Number(sct.timestamp.readBigUInt64BE(0));
+		const signed = Buffer.concat([
+			Buffer.from([0, 0]), // v1, certificate_timestamp
+			sct.timestamp,
+			Buffer.from([0, 1]), // precert_entry
+			issuerKey,
+			length3,
+			split.precert,
+			Buffer.from([sct.extensions.length >> 8, sct.extensions.length & 255]),
+			sct.extensions,
+		]);
+		let valid = false;
+		try {
+			valid = !!log && sct.hash === 4 && at < log.retiredAt && cryptoVerify("sha256", signed, { key: log.key, format: "der", type: "spki" }, sct.signature);
+		} catch {
+			// a key or signature this can't read
+		}
+		return { log: log?.description || sct.logId, operator: log?.operator || null, at: new Date(at).toISOString(), valid };
+	});
+	const good = scts.filter((sct) => sct.valid);
+	return { logged: new Set(good.map((sct) => sct.log)).size >= 2 && new Set(good.map((sct) => sct.operator)).size >= 2, scts };
+}
+
 const names = (cert) =>
 	(cert.getExtension(SubjectAlternativeNameExtension)?.names.items || [])
 		.filter((name) => name.type === "dns" || name.type === "ip")
@@ -283,6 +432,7 @@ async function check(host, port) {
 		problem: why,
 		revoked: null, // true, false, or null: not checked
 		revocationChecked: null, // the CRL it was checked against
+		// (and `logged`, whether it's in public CT logs: see certificateOf)
 	};
 	const points = leaf.getExtension(CRLDistributionPointsExtension)?.distributionPoints || [];
 	const urls = points
@@ -300,7 +450,7 @@ async function check(host, port) {
 			}
 		}
 	}
-	return result;
+	return { result, chain };
 }
 
 /**
@@ -314,11 +464,14 @@ export function certificateOf(host, port = 443) {
 	if (!WEB_PORTS.includes(port) || port === 80) return Promise.reject(new Error("not a TLS port"));
 	const key = `${host}:${port}`;
 	const now = Date.now();
-	const hit = certCache.get(key);
-	if (hit && now - hit.at < CERT_TTL_MS) return hit.result;
-	if (certCache.size >= MAX_ENTRIES) certCache.clear();
-	const result = check(host, port);
-	certCache.set(key, { at: now, result });
-	result.catch(() => certCache.delete(key));
-	return result;
+	let hit = certCache.get(key);
+	if (!hit || now - hit.at >= CERT_TTL_MS) {
+		if (certCache.size >= MAX_ENTRIES) certCache.clear();
+		hit = { at: now, checked: check(host, port) };
+		certCache.set(key, hit);
+		hit.checked.catch(() => certCache.delete(key));
+	}
+	// worked out each time (it's quick): a check kept from before the CT log
+	// list came down would otherwise say "not checked" for half an hour
+	return hit.checked.then(({ result, chain }) => ({ ...result, ...transparency(chain) }));
 }

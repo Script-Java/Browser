@@ -135,3 +135,17 @@ test("rules that hide ads by their link's address work on proxied pages", async 
 	await expect(frame.locator("#ad")).toBeHidden({ timeout: 15_000 });
 	await expect(frame.locator("#ok")).toBeVisible();
 });
+
+test("your own rules block a server and hide part of a page", async ({ app }) => {
+	await setSettings(app, { rules: "||httpbingo.org/status/218\nhttpbin.org###hide-me" });
+	const frame = await open(
+		app,
+		testPage(`<!doctype html><title>mine</title><p id="hide-me">hide me</p><p id="shown">shown</p><p id="t"></p>
+<script>fetch("${ECHO}/status/218").then((r) => (t.textContent = "LOADED " + r.status), () => (t.textContent = "BLOCKED"));</script>`)
+	);
+	await expect.poll(() => frame.locator("#t").textContent()).toBe("BLOCKED");
+	await expect(frame.locator("#hide-me")).toBeHidden();
+	await expect(frame.locator("#shown")).toBeVisible();
+	// kept with the settings, cleaned up
+	expect(await app.evaluate(async () => (await loadSettings()).rules)).toBe("||httpbingo.org/status/218\nhttpbin.org###hide-me");
+});

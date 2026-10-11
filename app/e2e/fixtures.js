@@ -1,28 +1,32 @@
 import { test as base, expect } from "@playwright/test";
-import { CATCHER, SHARED_URL } from "./env.js";
+import { CATCHER, ISOLATED_URL, SHARED_URL } from "./env.js";
 
 const seenUrl = `http://127.0.0.1:${CATCHER}/__seen`;
 
 /** Requests that went around Badger's proxy since the last reset. */
 export const leaks = async () => (await fetch(seenUrl)).json();
 
+const watched = (url) => async ({ page }, use) => {
+	await fetch(seenUrl, { method: "DELETE" });
+	const dialogs = [];
+	page.on("dialog", (dialog) => {
+		dialogs.push(`${dialog.type()}: ${dialog.message()}`);
+		dialog.dismiss();
+	});
+	await openShell(page, url);
+	await use(page);
+	expect(dialogs, "pages showed dialogs").toEqual([]);
+	expect(await leaks(), "requests went around the proxy").toEqual([]);
+};
+
 /**
- * `app`: the shell, open and ready, in shared mode. Every test also fails
- * if anything leaked past the proxy or a page put up a dialog.
+ * `app`: the shell, open and ready, in shared mode; `isolatedApp`: the same
+ * with site isolation. Every test also fails if anything leaked past the
+ * proxy or a page put up a dialog.
  */
 export const test = base.extend({
-	app: async ({ page }, use) => {
-		await fetch(seenUrl, { method: "DELETE" });
-		const dialogs = [];
-		page.on("dialog", (dialog) => {
-			dialogs.push(`${dialog.type()}: ${dialog.message()}`);
-			dialog.dismiss();
-		});
-		await openShell(page, SHARED_URL);
-		await use(page);
-		expect(dialogs, "pages showed dialogs").toEqual([]);
-		expect(await leaks(), "requests went around the proxy").toEqual([]);
-	},
+	app: watched(SHARED_URL),
+	isolatedApp: watched(ISOLATED_URL),
 });
 export { expect };
 

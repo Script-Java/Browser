@@ -182,3 +182,23 @@ test("a tab a page opened arrives as that page's request (isolated)", async ({ p
 	// the opening page's site, not its address
 	expect(headers.referer).toBe("https://httpbin.org/");
 });
+
+test("a site's cookies outlive its service worker being stopped", async ({ app, browserName }) => {
+	test.skip(browserName !== "chromium", "stops the worker through Chromium's DevTools protocol");
+	const cdp = await app.context().newCDPSession(app);
+	await cdp.send("ServiceWorker.enable");
+	const cookies = async (site) => JSON.parse(await bodyText(await open(app, site + "/cookies"))).cookies;
+	await open(app, `${ECHO}/response-headers?Set-Cookie=${encodeURIComponent("kept=1; Max-Age=3600")}&Set-Cookie=gone%3D1`);
+	await cdp.send("ServiceWorker.stopAllWorkers");
+	expect(await cookies(ECHO)).toEqual({ kept: "1", gone: "1" });
+	// signed out (Max-Age=0): gone, for good
+	await open(app, `${ECHO}/response-headers?Set-Cookie=${encodeURIComponent("gone=; Max-Age=0")}`);
+	await cdp.send("ServiceWorker.stopAllWorkers");
+	expect(await cookies(ECHO)).toEqual({ kept: "1" });
+	// a page's script setting one wakes the worker, and doesn't write over the others
+	const frame = await open(app, testPage("<!doctype html><title>sets</title>"));
+	await cdp.send("ServiceWorker.stopAllWorkers");
+	await frame.evaluate(() => (document.cookie = "script=1; path=/"));
+	await expect.poll(() => cookies("https://httpbin.org")).toEqual({ script: "1" });
+	expect(await cookies(ECHO)).toEqual({ kept: "1" });
+});

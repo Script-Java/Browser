@@ -1,6 +1,7 @@
 import { resolve } from "node:path";
 import { tmpdir, hostname } from "node:os";
 import { createServer } from "node:http";
+import { get as httpsGet } from "node:https";
 import { readFile, readdir } from "node:fs/promises";
 import { createHash, createHmac } from "node:crypto";
 import { gzipSync } from "node:zlib";
@@ -16,12 +17,13 @@ import { CHALLENGE_BITS, createAuth, parseCookies, seal, unseal } from "./auth.j
 import { Filters } from "./filters.js";
 import { serveMedia } from "./media.js";
 import { canonicalNames, lookupable } from "./cname.js";
-import { certificateOf } from "./certs.js";
+import { certificateOf, refreshLogList } from "./certs.js";
 import * as sync from "./sync.js";
 import { startTor, torAgent, torSocket, torStatus } from "./tor.js";
 import { WebRisk } from "./webrisk.js";
 import { clientKey, createLimits } from "./limits.js";
-import { DEFAULT_SETTINGS, cleanSettings } from "./settings.js";
+import { UPDATE_FILES, releaseFile } from "./updates.js";
+import { DEFAULT_SETTINGS, cleanRules, cleanSettings } from "./settings.js";
 
 const publicPath = resolve(import.meta.dirname, "..", "public");
 
@@ -76,7 +78,7 @@ const webRisk = process.env.WEB_RISK_API_KEY ? new WebRisk({ key: process.env.WE
 const filters = new Filters({
 	cacheDir: process.env.FILTER_CACHE_DIR || resolve(tmpdir(), "browser-ios-filters"),
 	refreshHours: Number(process.env.FILTER_REFRESH_HOURS) || 24,
-	threatMinutes: Number(process.env.THREAT_REFRESH_MINUTES) || 30,
+	threatMinutes: Number(process.env.THREAT_REFRESH_MINUTES) || 15,
 });
 
 // ----------------------------------------------------------------- helpers
@@ -90,7 +92,7 @@ function hostOf(req) {
 // A site origin's label: "s<key>" for a site, "t<key>" for a site in a Tor
 // tab, "f<key>" for a frame from another site inside a page, "g<key>" for one
 // in a Tor tab (src/client/sitekey.js).
-const SITE_LABEL = /^[stfg][a-z2-7]{25}$/;
+const SITE_LABEL = /^[stfg][a-z2-7]{25}(-[a-z0-9]{1,8})?$/;
 const viaTor = (label) => /^[tg]/.test(label);
 
 // "shell": the app itself. "site": an isolated site origin. "stray": any other
@@ -133,20 +135,27 @@ function storedSettings(req, name = settingsCookie(req)) {
 	return stored && typeof stored === "object" && !Array.isArray(stored) ? stored : null;
 }
 
-function readSettings(req) {
-	return { ...DEFAULT_SETTINGS, ...storedSettings(req) };
+// The person's own block rules (settings.js cleanRules): a cookie of their
+// own, the same way, since the settings cookie has no room for them.
+const rulesCookie = (req) => (req.secure ? "__Host-" : "") + "bios_rules";
+function storedRules(req) {
+	const raw = parseCookies(req.headers.cookie)[rulesCookie(req)];
+	const rules = raw ? unseal(settingsKey, raw) : null;
+	return typeof rules === "string" ? rules : "";
 }
 
-function writeSettings(req, res, settings) {
-	const parts = [
-		`${settingsCookie(req)}=${seal(settingsKey, settings)}`,
-		"Path=/",
-		"HttpOnly",
-		"SameSite=Lax",
-		`Max-Age=${5 * 365 * 86_400}`,
-	];
-	if (req.secure) parts.push("Secure");
-	res.append("Set-Cookie", parts.join("; "));
+function readSettings(req) {
+	return { ...DEFAULT_SETTINGS, ...storedSettings(req), rules: storedRules(req) };
+}
+
+function writeSettings(req, res, { rules, ...settings }) {
+	const cookie = (name, value) => {
+		const parts = [`${name}=${seal(settingsKey, value)}`, "Path=/", "HttpOnly", "SameSite=Lax", `Max-Age=${5 * 365 * 86_400}`];
+		if (req.secure) parts.push("Secure");
+		res.append("Set-Cookie", parts.join("; "));
+	};
+	cookie(settingsCookie(req), settings);
+	if (typeof rules === "string") cookie(rulesCookie(req), rules);
 }
 
 // Only the shell may change settings: requests must come from the shell's
@@ -375,6 +384,32 @@ function siteCors(req, res, next) {
 }
 app.use(["/filters/engine.bin", "/filters/notices.bin", "/filters/privacy.json", "/api/nav", "/api/settings", "/api/cname", "/api/cert"], siteCors);
 
+// The desktop app's updates (updates.js), and the installer the new tab page
+// offers: from here, so GitHub never sees the computer. Before the gate (the
+// updater has no sign-in), within the address's daily traffic allowance.
+app.get("/updates/:file", async (req, res) => {
+	res.setHeader("Cache-Control", "no-store");
+	if (!UPDATE_FILES.has(req.params.file)) return res.status(404).end();
+	const key = clientKey(req);
+	if (limits.overQuota(key)) return res.status(429).type("text/plain").send("Daily traffic limit reached.");
+	let up;
+	try {
+		up = await releaseFile(req.params.file);
+	} catch (err) {
+		console.warn("updates:", err.message);
+		return res.status(502).type("text/plain").send("Couldn't get the update from GitHub.");
+	}
+	res.type(req.params.file.endsWith(".yml") ? "text/yaml" : "application/octet-stream");
+	if (up.headers["content-length"]) res.setHeader("Content-Length", up.headers["content-length"]);
+	if (req.params.file.endsWith(".exe")) res.attachment(req.params.file);
+	up.on("data", (chunk) => {
+		limits.addBytes(key, chunk.length);
+		if (limits.overQuota(key)) res.destroy();
+	});
+	res.on("close", () => up.destroy());
+	up.pipe(res);
+});
+
 app.use(auth.gate);
 
 // Server settings for the shell, the service worker and every proxied page.
@@ -433,7 +468,7 @@ app.get("/api/settings", (req, res) => {
 
 app.post("/api/settings", express.json({ limit: "16kb" }), (req, res) => {
 	if (!fromShell(req)) return res.status(403).json({ error: "forbidden" });
-	const settings = cleanSettings(req.body);
+	const settings = { ...cleanSettings(req.body), rules: cleanRules(req.body?.rules) };
 	writeSettings(req, res, settings);
 	res.setHeader("Cache-Control", "no-store");
 	res.json(settings);
@@ -479,11 +514,37 @@ app.get("/api/cert", async (req, res) => {
 	}
 });
 
+// Have I Been Pwned's range API, for the app's breached-password check
+// (public/index.js timesBreached): the first five characters of a password's
+// SHA-1 in, every breached password's hash that starts with them out, padded
+// so its size says nothing. Through here, so the service never sees the device.
+app.get("/api/pwned/:prefix", (req, res) => {
+	res.setHeader("Cache-Control", "no-store");
+	if (!fromShell(req)) return res.status(403).json({ error: "forbidden" });
+	if (!/^[0-9A-F]{5}$/.test(req.params.prefix)) return res.status(400).end();
+	const up = httpsGet(
+		`https://api.pwnedpasswords.com/range/${req.params.prefix}`,
+		{ timeout: 10_000, headers: { "add-padding": "true", "user-agent": "badger-browser" } },
+		(answer) => {
+			if (answer.statusCode !== 200) {
+				answer.resume();
+				return res.status(502).end();
+			}
+			res.type("text/plain");
+			answer.pipe(res);
+		}
+	);
+	up.on("timeout", () => up.destroy(new Error("timed out")));
+	up.on("error", () => res.headersSent || res.status(502).end());
+});
+
 // Sync between two of the person's devices (sync.js): a relay in memory for
 // two sealed boxes, under names only the two devices can work out. Only the
-// app itself may use it.
+// app itself may use it, and only with isolation: without it every site's
+// pages run on the app's own address and could sync its secrets away.
 app.put("/api/sync/:channel", express.text({ limit: "5mb", type: "*/*" }), (req, res) => {
 	res.setHeader("Cache-Control", "no-store");
+	if (!ISOLATION) return res.status(404).end();
 	if (!fromShell(req)) return res.status(403).json({ error: "forbidden" });
 	const error = sync.put(req.params.channel, req.body, clientKey(req));
 	if (error) return res.status(error === "bad box" || error === "bad channel" ? 400 : 429).json({ error });
@@ -491,6 +552,7 @@ app.put("/api/sync/:channel", express.text({ limit: "5mb", type: "*/*" }), (req,
 });
 app.get("/api/sync/:channel", (req, res) => {
 	res.setHeader("Cache-Control", "no-store");
+	if (!ISOLATION) return res.status(404).end();
 	if (!fromShell(req)) return res.status(403).json({ error: "forbidden" });
 	const box = sync.take(req.params.channel);
 	if (!box) return res.status(404).end();
@@ -612,6 +674,8 @@ function shutdown(signal) {
 }
 
 filters.start();
+// Chrome's list of Certificate Transparency logs (certs.js)
+refreshLogList();
 webRisk?.start();
 if (ISOLATION) startTor().catch((err) => console.warn("tor:", err.message));
 server.listen({

@@ -213,7 +213,8 @@ test("Windows browsers are offered the desktop app; phones aren't", async ({ app
 	// Playwright's Chromium is Windows here, Linux in CI
 	test.skip(!/Windows/.test(await app.evaluate(() => navigator.userAgent)), "Windows only");
 	await expect(link).toBeVisible();
-	expect(await link.getAttribute("href")).toMatch(/releases\/latest\/download\/Badger-Setup\.exe$/);
+	// from the server, which fetches it from GitHub (so GitHub never sees the computer)
+	expect(await link.getAttribute("href")).toBe("/updates/Badger-Setup.exe");
 });
 
 test("HTTPS-Only opens the secure version of a site", async ({ app }) => {
@@ -414,13 +415,24 @@ test("a site whose certificate was revoked gets a warning with no way past it", 
 	await expect(frame.locator("#go")).toHaveCount(0);
 });
 
-test("the certificate viewer shows who a site's certificate belongs to", async ({ app }) => {
+test("an address made to pass for a well-known site's gets a warning that offers the real one", async ({ app }) => {
+	const frame = await open(app, "https://paypa1.com/");
+	await expect(frame.locator("h1")).toHaveText("Is this the site you meant?");
+	await expect(frame.locator("body")).toContainText("looks like paypal.com");
+	await expect(frame.locator("#real")).toHaveText("Go to paypal.com");
+	await expect(frame.locator("#go")).toHaveText("Continue anyway");
+});
+
+// (No live site has a trusted certificate without SCTs, the point of CT; the
+// refusal of one is checked in certs.test.js.)
+test("the certificate viewer shows who a site's certificate belongs to, and which CT logs have it", async ({ app }) => {
 	await open(app, "https://example.com/");
 	await app.evaluate(() => openSheet());
 	await app.click("#cert-open");
 	await expect(app.locator("#cert-status")).toContainText(/Valid/, { timeout: 60_000 });
 	await expect(app.locator("#cert-details")).toContainText("example.com");
 	await expect(app.locator("#cert-details")).toContainText("SHA-256 fingerprint");
+	await expect(app.locator("#cert-details")).toContainText(/Public logs.*'.+'.*'.+'/s);
 });
 
 test("a site that can't be reached says so, and offers to try again", async ({ app }) => {
@@ -508,4 +520,22 @@ test("the shield menu lists what was blocked on the page", async ({ app }) => {
 	await app.evaluate(() => openSheet());
 	await expect(app.locator("#blocked-here summary")).toHaveText("3 requests blocked on this page");
 	await expect(app.locator("#blocked-hosts")).toHaveText("ad.doubleclick.net (2), www.google-analytics.com");
+});
+
+// The page script goes into HTML pages only, and the browser runs the scripts
+// in an SVG or XML document too: with WebRTC, and before anything can reach in.
+test("a document that isn't HTML (SVG, XHTML) runs none of its own scripts", async ({ app }) => {
+	const svg = `<svg xmlns="http://www.w3.org/2000/svg"><script>parent.document.title = "RAN " + typeof RTCPeerConnection</script></svg>`;
+	const xhtml = `<html xmlns="http://www.w3.org/1999/xhtml"><body><script>parent.document.title = "RAN " + typeof RTCPeerConnection</script></body></html>`;
+	for (const src of [
+		`data:image/svg+xml,${encodeURIComponent(svg)}`,
+		`data:application/xhtml+xml,${encodeURIComponent(xhtml)}`,
+		`https://httpbingo.org/base64/${Buffer.from(svg).toString("base64url")}?content-type=image/svg%2Bxml`,
+	]) {
+		const frame = await open(app, testPage(`<!doctype html><title>holder</title><iframe src="${src}"></iframe><p id="t">test</p>`));
+		await expect.poll(() => frame.locator("#t").textContent()).toBe("test");
+		await expect.poll(() => frame.evaluate(() => document.querySelector("iframe").contentDocument?.readyState)).toBe("complete");
+		await app.waitForTimeout(1000);
+		expect(await frame.title(), src.slice(0, 30)).toBe("holder");
+	}
 });

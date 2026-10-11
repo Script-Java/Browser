@@ -92,18 +92,30 @@ const pack = (raw) => ({
 // Scriptlets (+js(...) rules) in the format the Ghostery engine expects.
 const RESOURCES = [`${MIRROR}/ublock-origin/resources.json`];
 
+// Each list with its mirrors; a list is known by its first address.
 const THREAT_LISTS = [
 	[
 		"phishing",
 		"https://malware-filter.gitlab.io/malware-filter/phishing-filter-hosts.txt",
 		"https://curbengh.github.io/phishing-filter/phishing-filter-hosts.txt",
 	],
+	// CC BY-NC 4.0: a commercial deploy sets PHISHING_ARMY=off (THIRD-PARTY.md)
+	...(process.env.PHISHING_ARMY === "off" ? [] : [["phishing", "https://phishing.army/download/phishing_army_blocklist.txt"]]),
 	[
 		"malware",
 		"https://malware-filter.gitlab.io/malware-filter/urlhaus-filter-hosts-online.txt",
 		"https://curbengh.github.io/urlhaus-filter/urlhaus-filter-hosts-online.txt",
 	],
+	// URLhaus itself: rebuilt every five minutes
+	["malware", "https://urlhaus.abuse.ch/downloads/hostfile/"],
 ];
+
+// The operator's own, as phishing (PHISHING_HOSTS, comma-separated): a scam
+// going round today, before the lists have it.
+const OWN_THREATS = String(process.env.PHISHING_HOSTS || "")
+	.split(",")
+	.map((host) => host.trim().toLowerCase())
+	.filter(Boolean);
 
 const MAX_LIST_BYTES = 64 * 1024 ** 2;
 
@@ -186,12 +198,14 @@ function parseHosts(text) {
 
 export class Filters {
 	/**
-	 * @param {{ cacheDir: string, refreshHours: number, threatMinutes?: number }} options
+	 * @param {{ cacheDir: string, refreshHours: number, threatMinutes?: number, ownThreats?: string[], fetchList?: typeof fetchFirst }} options
 	 */
-	constructor({ cacheDir, refreshHours, threatMinutes = 30 }) {
+	constructor({ cacheDir, refreshHours, threatMinutes = 15, ownThreats = OWN_THREATS, fetchList = fetchFirst }) {
 		this.cacheDir = cacheDir;
 		this.refreshMs = refreshHours * 3_600_000;
 		this.threatMs = threatMinutes * 60_000;
+		this.ownThreats = ownThreats;
+		this.fetchList = fetchList;
 		this.engine = null; // { raw, gzip, etag }
 		this.notices = null; // the cookie-notice engine, the same way
 		this.privacy = null; // Brave's navigation-tracking rules, as JSON the same way
@@ -203,6 +217,7 @@ export class Filters {
 		this.stats = {};
 		this.building = null;
 		this.checkingThreats = null;
+		this.setThreats();
 	}
 
 	async start() {
@@ -315,12 +330,12 @@ export class Filters {
 	async buildThreats() {
 		let changed = false;
 		await Promise.all(
-			THREAT_LISTS.map(async ([kind, ...urls]) => {
-				const before = this.threatSources[kind];
+			THREAT_LISTS.map(async ([, ...urls]) => {
+				const before = this.threatSources[urls[0]];
 				try {
-					const got = await fetchFirst(urls, before?.hosts ? before : null);
+					const got = await this.fetchList(urls, before?.hosts ? before : null);
 					if (!got) return;
-					this.threatSources[kind] = { etag: got.etag, modified: got.modified, hosts: parseHosts(got.text) };
+					this.threatSources[urls[0]] = { etag: got.etag, modified: got.modified, hosts: parseHosts(got.text) };
 					changed = true;
 				} catch (err) {
 					// keep the previous copy of a list that failed to download
@@ -330,20 +345,24 @@ export class Filters {
 		);
 		this.threatsAt = Date.now();
 		if (!changed) return;
-		const threats = new Map();
-		const counts = {};
-		for (const [kind] of THREAT_LISTS) {
-			// (a list never downloaded since the old cache format: that cache's copy)
-			const hosts =
-				this.threatSources[kind]?.hosts || [...this.threats].filter(([, k]) => k === kind).map(([h]) => h);
-			for (const host of hosts) threats.set(host, kind);
-			counts[kind] = hosts.length;
-		}
-		this.threats = threats;
-		this.stats = { ...this.stats, ...counts };
+		this.setThreats();
 		await this.saveCache().catch((err) =>
 			console.warn("filters: could not write cache:", err.message)
 		);
+	}
+
+	// Every list's hosts in one map (phishing wins over malware), and the operator's own.
+	setThreats() {
+		const threats = new Map();
+		const counts = { phishing: 0, malware: 0 };
+		for (const [kind, first] of [...THREAT_LISTS].sort(([a], [b]) => (a === b ? 0 : a === "malware" ? -1 : 1))) {
+			const hosts = this.threatSources[first]?.hosts || [];
+			for (const host of hosts) threats.set(host, kind);
+			counts[kind] += hosts.length;
+		}
+		for (const host of this.ownThreats) threats.set(host, "phishing");
+		this.threats = threats;
+		this.stats = { ...this.stats, ...counts, own: this.ownThreats.length };
 	}
 
 	setEngine(raw) {
@@ -391,13 +410,10 @@ export class Filters {
 		} catch {
 			// none cached yet: build() fetches the rules
 		}
-		// (a cache from before the threat lists had their own refresh kept a plain list)
+		// (an older cache kept them by kind: start() fetches them again at once)
 		this.threatSources = meta.threatSources || {};
-		const threats = new Map(meta.threats || []);
-		for (const [kind] of THREAT_LISTS)
-			for (const host of this.threatSources[kind]?.hosts || []) threats.set(host, kind);
-		this.threats = threats;
 		this.stats = meta.stats;
+		this.setThreats();
 		this.updatedAt = meta.updatedAt;
 		this.threatsAt = meta.threatsAt || 0;
 		console.log("filters: loaded cached lists from", new Date(this.updatedAt));

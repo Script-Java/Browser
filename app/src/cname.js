@@ -5,10 +5,9 @@
 // answers the service worker's question "what does this name point to?",
 // and the worker checks those names against the block lists (shield.js).
 
-import { Resolver } from "node:dns/promises";
+import { resolveCname } from "./dns.js";
 import net from "node:net";
 
-const resolver = new Resolver({ timeout: 2000, tries: 2 });
 const TTL_MS = 10 * 60_000;
 const MAX_HOPS = 5;
 const MAX_ENTRIES = 5000;
@@ -25,7 +24,7 @@ async function chase(host) {
 	for (let hop = 0; hop < MAX_HOPS; hop++) {
 		let next;
 		try {
-			[next] = await resolver.resolveCname(name);
+			[next] = await resolveCname(name);
 		} catch {
 			// no CNAME here (ENODATA), or the name doesn't exist
 			break;

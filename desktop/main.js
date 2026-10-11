@@ -101,11 +101,15 @@ function openWindow() {
 	win.loadURL(SERVER_URL);
 }
 
-// Chromium's security fixes reach people only through updates: check GitHub
-// Releases at launch and every 6 hours; a downloaded update installs on quit.
-// electron-updater uses its own session, so the network lock doesn't block it.
+// Chromium's security fixes reach people only through updates: check for a
+// new release at launch and every 6 hours; a downloaded update installs on
+// quit. Through the server (app/src/updates.js), which fetches it from GitHub
+// Releases, so GitHub never sees this computer's address.
 function keepUpdated() {
 	if (!app.isPackaged) return;
+	autoUpdater.setFeedURL({ provider: "generic", url: new URL("/updates", SERVER_URL).href });
+	// the server relays the whole installer, not the pieces of one
+	autoUpdater.disableDifferentialDownload = true;
 	const check = () =>
 		autoUpdater.checkForUpdatesAndNotify().catch((err) => console.warn("update:", err.message));
 	check();

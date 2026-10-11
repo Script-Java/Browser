@@ -155,7 +155,7 @@
 			<ul id="tiles" aria-label="Shortcuts"></ul>
 			<p id="stats"><span><b id="stat-blocked">0</b> trackers blocked this week</span></p>
 			<p id="get-app" hidden>
-				<a href="https://github.com/Script-Java/Browser/releases/latest/download/Badger-Setup.exe" rel="noopener">Download Badger for Windows</a>
+				<a href="/updates/Badger-Setup.exe">Download Badger for Windows</a>
 				<small>The desktop app. Windows warns that it isn't signed yet: choose More info, then Run anyway.</small>
 			</p>
 		</main>
@@ -266,6 +266,14 @@
 					<span>Warn about malware and phishing sites</span>
 					<input type="checkbox" data-setting="threats" role="switch" />
 				</label>
+				<details id="rules" class="rules">
+					<summary>Your own rules</summary>
+					<form id="rules-form">
+						<textarea id="rules-input" rows="5" spellcheck="false" autocapitalize="off" aria-label="Your own block and hiding rules" placeholder="||tracker.example^&#10;example.com##.newsletter-popup"></textarea>
+						<small class="note">One a line, as in uBlock Origin: <code>||host^</code> blocks a server, <code>site##.selector</code> hides part of a page.</small>
+						<button type="submit">Save rules</button>
+					</form>
+				</details>
 
 				<h3>Security</h3>
 				<label class="row">
@@ -311,6 +319,7 @@
 				</label>
 				<button id="vault-set" class="wide" type="button">Lock history and bookmarks with a passphrase</button>
 				<button id="vault-off" class="wide" type="button" hidden>Turn off the passphrase lock</button>
+				<button id="private-tab" class="wide" type="button" hidden>New private tab</button>
 				<button id="tor-tab" class="wide" type="button" hidden>New Tor tab</button>
 				<button id="sync-open" class="wide" type="button">Sync with another device</button>
 				<button id="new-identity" class="wide" type="button">New identity</button>

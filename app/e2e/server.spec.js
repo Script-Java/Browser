@@ -1,6 +1,6 @@
 // The server's own defences, checked over plain HTTP.
 
-import { createHmac } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import { request as httpRequest } from "node:http";
 import { expect, test } from "@playwright/test";
 import { ISOLATED, SECRET, SHARED_URL } from "./env.js";
@@ -130,11 +130,18 @@ test("the server says what a site's subdomain is an alias of, for the CNAME chec
 	expect(none.names).toEqual([]);
 });
 
-test("the sync relay is for the app alone, and gives each box out once", async ({ request }) => {
+test("the sync relay is for the app alone, with isolation, and gives each box out once", async ({ request }) => {
 	const channel = "ab".repeat(16);
-	expect((await request.put(`${SHARED_URL}/api/sync/${channel}`, { data: "sealed", headers: { origin: "https://evil.example" } })).status()).toBe(403);
-	expect((await request.put(`${SHARED_URL}/api/sync/${channel}`, { data: "sealed" })).status()).toBe(204);
-	expect(await (await request.get(`${SHARED_URL}/api/sync/${channel}`)).text()).toBe("sealed");
-	expect((await request.get(`${SHARED_URL}/api/sync/${channel}`)).status()).toBe(404);
-	expect((await request.put(`${SHARED_URL}/api/sync/not-a-channel`, { data: "x" })).status()).toBe(400);
+	// without isolation every site runs on the app's address: no sync at all
+	expect((await request.put(`${SHARED_URL}/api/sync/${channel}`, { data: "sealed" })).status()).toBe(404);
+	// the isolated server, signed in (a pass as auth.js signs one)
+	const expires = Date.now() + 3_600_000;
+	const key = createHash("sha256").update(`bios-auth:${SECRET}:`).digest();
+	const cookie = `bios_auth=${expires}.${createHmac("sha256", key).update(String(expires)).digest("base64url")}`;
+	const at = (path) => `${ISOLATED_LOCAL}/api/sync/${path}`;
+	expect((await request.put(at(channel), { data: "sealed", headers: { cookie, origin: "https://evil.example" } })).status()).toBe(403);
+	expect((await request.put(at(channel), { data: "sealed", headers: { cookie } })).status()).toBe(204);
+	expect(await (await request.get(at(channel), { headers: { cookie } })).text()).toBe("sealed");
+	expect((await request.get(at(channel), { headers: { cookie } })).status()).toBe(404);
+	expect((await request.put(at("not-a-channel"), { data: "x", headers: { cookie } })).status()).toBe(400);
 });

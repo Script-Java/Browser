@@ -1761,6 +1761,15 @@ function reportToShell(client, win, setRepeat, whenReady) {
 	Object.defineProperty(win, "__biosReport", { value: tell, configurable: true });
 	// sign-in forms, for the app's password filling (logins.js)
 	watchLogins(win, tell);
+	// whether the page is playing something, so the shell leaves the tab loaded
+	// ponytail: the page's own media only; a player in a frame of another site isn't seen
+	const playing = new Set();
+	const media = (event) => {
+		if (event.type === "playing") playing.add(event.target);
+		else playing.delete(event.target);
+		tell({ bios: "media", playing: playing.size > 0 });
+	};
+	for (const type of ["playing", "pause", "ended", "emptied"]) win.document.addEventListener(type, media, true);
 
 	const nativeFetch = client.natives?.store?.fetch;
 	win.addEventListener("message", (event) => {

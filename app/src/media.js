@@ -13,19 +13,20 @@
 
 import http from "node:http";
 import https from "node:https";
-import dns from "node:dns";
 import net from "node:net";
+import { createCipheriv, createDecipheriv, createHmac, randomBytes } from "node:crypto";
 import { pipeline } from "node:stream";
-import { decodeUrl, encodeUrl } from "./codec.js";
+import { PREFIX, decodeUrl, encodeUrl } from "./codec.js";
+import { lookupAll } from "./dns.js";
 import { WEB_PORTS, isBlockedAddress } from "./wisp.js";
 
 const MAX_REDIRECTS = 5;
 const MAX_PLAYLIST_BYTES = 4 * 1024 * 1024;
 
-// Same rules as the wisp server: never connect to the server's own network.
+// Same rules as the wisp server: never connect to the server's own network,
+// and look names up over DoH (dns.js).
 function safeLookup(hostname, options, callback) {
-	dns.lookup(hostname, { ...options, all: true }, (err, addresses) => {
-		if (err) return callback(err);
+	lookupAll(hostname).then((addresses) => {
 		const allowed = addresses.filter((a) => !isBlockedAddress(a.address));
 		if (!allowed.length) {
 			const error = new Error(`Blocked connection to a private address (${hostname})`);
@@ -34,7 +35,7 @@ function safeLookup(hostname, options, callback) {
 		}
 		if (options && options.all) return callback(null, allowed);
 		callback(null, allowed[0].address, allowed[0].family);
-	});
+	}, callback);
 }
 
 // ---------------------------------------------------------- HLS rewriting
@@ -47,16 +48,48 @@ function isPlaylist(url, contentType) {
 	return /\.m3u8?(\?|$)/i.test(url.pathname) && !/^(video|audio|image)\//i.test(contentType || "");
 }
 
-function proxied(base, ref) {
+// The addresses in a playlist the server rewrote (every segment of a video)
+// are sealed, AES-GCM with a key only this server has: the player asks for
+// each one by its address, and the host's request logs record them. Sealed,
+// the logs show nothing of what's played but the playlist's own address.
+// ponytail: that first address is the page's (Scramjet makes it); hiding it
+// too needs a codec of our own in Scramjet
+const SEALED = PREFIX + "__m/";
+const MEDIA_KEY = createHmac("sha256", process.env.AUTH_SECRET || randomBytes(32)).update("bios-media-url").digest();
+
+/** "/scramjet/__m/…": a site URL only this server can read back. */
+export function sealUrl(url) {
+	const iv = randomBytes(12);
+	const cipher = createCipheriv("aes-256-gcm", MEDIA_KEY, iv);
+	const box = Buffer.concat([cipher.update(String(url), "utf8"), cipher.final()]);
+	return SEALED + Buffer.concat([iv, box, cipher.getAuthTag()]).toString("base64url");
+}
+
+/** The http(s) URL a sealed address (absolute, or a path) holds, or null. */
+export function unsealUrl(proxied) {
 	try {
-		return encodeUrl(new URL(ref, base));
+		const { pathname } = new URL(proxied, "http://x");
+		if (!pathname.startsWith(SEALED)) return null;
+		const raw = Buffer.from(pathname.slice(SEALED.length), "base64url");
+		const decipher = createDecipheriv("aes-256-gcm", MEDIA_KEY, raw.subarray(0, 12));
+		decipher.setAuthTag(raw.subarray(raw.length - 16));
+		const url = new URL(Buffer.concat([decipher.update(raw.subarray(12, raw.length - 16)), decipher.final()]).toString("utf8"));
+		return url.protocol === "http:" || url.protocol === "https:" ? url : null;
+	} catch {
+		return null;
+	}
+}
+
+function proxied(base, ref, encode) {
+	try {
+		return encode(new URL(ref, base));
 	} catch {
 		return ref;
 	}
 }
 
 /** Rewrites every URL in an HLS playlist to a proxied one (relative to this server). */
-export function rewritePlaylist(text, baseUrl) {
+export function rewritePlaylist(text, baseUrl, encode = encodeUrl) {
 	return text
 		.split(/\r?\n/)
 		.map((line) => {
@@ -64,9 +97,9 @@ export function rewritePlaylist(text, baseUrl) {
 			if (!trimmed) return line;
 			if (trimmed.startsWith("#")) {
 				if (!URI_TAGS.test(trimmed)) return line;
-				return line.replace(/URI="([^"]*)"/g, (m, ref) => `URI="${proxied(baseUrl, ref)}"`);
+				return line.replace(/URI="([^"]*)"/g, (m, ref) => `URI="${proxied(baseUrl, ref, encode)}"`);
 			}
-			return proxied(baseUrl, trimmed);
+			return proxied(baseUrl, trimmed, encode);
 		})
 		.join("\n");
 }
@@ -152,7 +185,7 @@ export async function serveMedia(req, res, countBytes = () => {}, agent = undefi
 	// absent before iOS 16.4, and from the system's HLS player
 	const dest = req.headers["sec-fetch-dest"];
 	if (dest && !MEDIA_DESTS.has(dest)) return false;
-	const target = decodeUrl(req.originalUrl);
+	const target = unsealUrl(req.originalUrl) || decodeUrl(req.originalUrl);
 	if (!target) return false;
 
 	const headers = {
@@ -211,7 +244,7 @@ export async function serveMedia(req, res, countBytes = () => {}, agent = undefi
 			res.type(contentType || "application/octet-stream").send(body);
 			return true;
 		}
-		const rewritten = rewritePlaylist(text, finalUrl);
+		const rewritten = rewritePlaylist(text, finalUrl, sealUrl);
 		res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
 		res.setHeader("Content-Length", Buffer.byteLength(rewritten));
 		res.end(rewritten);

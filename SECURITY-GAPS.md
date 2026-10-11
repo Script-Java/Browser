@@ -2,6 +2,40 @@
 
 What Badger lacks next to mainstream browsers (Safari, Chrome) and the privacy-first ones (Tor Browser, Brave, DuckDuckGo). Ticked items are fixed, each with a test in `app/e2e/` (or a unit test in `app/src/`). What's left at the bottom can't be fixed while Badger is a proxy, or isn't worth it.
 
+## Closed on 2026-10-10
+
+Measured against Chrome, Safari, Firefox and Brave, for one goal: nothing about a person leaves except through the proxy, and the browser stays fast.
+
+### Leaks
+
+- [x] **Without site isolation, any page could read the saved passwords and passkeys.** Every site's pages run on the app's own address then, and can reach into it. Passwords, passkeys and sync are now off without isolation, and the server refuses sync. (`logins.spec.js`)
+- [x] **The server looked up every site in plain text, through the host's resolver.** Now over DNS-over-HTTPS (Cloudflare's by default, `DOH_URL`), cached for each answer's lifetime, so the hosting provider and the networks in between no longer see which sites are opened. (`dns.js`)
+- [x] **A Tor tab's sites were looked up on the server first.** wisp-js checks every name against private addresses before connecting, Tor's connections too. That lookup is now refused for Tor's streams, so only the Tor exit resolves them. (`wisp.js`, `tor.js`)
+- [x] **The desktop app asked GitHub for updates directly**, from the computer's own address, every six hours. It asks the server now, which fetches them from GitHub, and so does the new tab page's download link. (`updates.js`, `security.spec.js`)
+- [x] **Every video segment's address went into the host's request logs.** iOS's player asks the server for each one itself. The server seals the addresses it writes into a playlist (AES-GCM, with a key only it has), so the logs show only the playlist's own. (`media.test.js`)
+- [x] **Translation sent the page's address to Google without saying so.** It asks first now, every time, saying what Google learns.
+- [x] **An SVG or XML page ran its own scripts without the page script around them**, WebRTC included. Such documents run none now. (`security.spec.js`)
+
+### Security
+
+- [x] **No Certificate Transparency.** The server checks the signed timestamps (SCTs) in a site's certificate against the logs Chrome trusts (its list, daily): valid ones from two logs of two operators, as Chrome asks. A certificate an authority vouches for without them gets a warning with no way past it. Checked against 40 of the biggest sites: all pass. (`certs.test.js`)
+- [x] **No warning for addresses made to look like a well-known site's.** Look-alike letters (`g00gle.com`, a Cyrillic `а`), a one-letter slip (`paypall.com`) or the real name inside another address (`paypal.com.account-check.net`) get "Is this the site you meant?", with a button to the real one. (`lookalike.test.js`, `security.spec.js`)
+- [x] **Saved passwords weren't checked against breaches.** A password that turns up in Have I Been Pwned's list is flagged when it's saved and in the list of passwords. Only five characters of its SHA-1 leave the device, through the server. (`logins.spec.js`)
+- [x] **Threat lists:** URLhaus's own list (rebuilt every five minutes) and Phishing Army besides malware-filter's, the operator's own (`PHISHING_HOSTS`), asked every 15 minutes. (`filters.test.js`)
+
+### Privacy
+
+- [x] **No private tab without Tor.** A private tab keeps its sites' cookies and storage apart from everything else's (a namespace in their origins' names, new each launch), keeps no history, isn't brought back, and its data goes with the last one. (`isolation.spec.js`)
+- [x] **Workspaces shared one set of sign-ins.** A workspace can keep its own (like Firefox's containers): its sites get origins of their own. (`isolation.spec.js`)
+- [x] **No rules of one's own.** uBlock Origin's syntax, in settings: block a server, hide part of a page. (`privacy.spec.js`)
+- [x] **A stopped service worker signed everyone out.** Scramjet never read the cookies it saved back in; the worker does now, saves them after every change, and honours Max-Age. (`sites.spec.js`)
+
+### Speed
+
+- [x] **Every page waited for a round trip to the server first.** A site's threat verdict is kept five minutes, and with settings from the last half minute a page goes ahead without asking; the shell tells the workers when settings change, so a switch still applies to the next page.
+- [x] **Tabs out of sight kept their pages in memory.** After 30 minutes away (and not while playing) a tab lets its page go and loads it again when shown.
+- Measured: each site's worker holds the block lists, 7.9 MB, loaded in 16 ms, downloaded once for all sites. They're uBlock Origin's defaults; none is worth dropping.
+
 ## Closed on 2026-10-09
 
 Measured against Brave, DuckDuckGo, Safari and Tor Browser; built from their open-source parts where they had one (`THIRD-PARTY.md`).
@@ -66,4 +100,10 @@ Measured against Brave, DuckDuckGo, Safari and Tor Browser; built from their ope
 - **Robot checks.** Every user shares the server's address, so sites challenge more, Google search most of all; Tor tabs more still. A fix would mean many exit addresses.
 - **DRM video** (Netflix and similar): frames may use it (`encrypted-media`), but it's untested, and the desktop app's Electron has no Widevine.
 - **Video calls** don't work: they need WebRTC, which pages don't get.
-- **Translation sends the page's address to Google**, whose translator fetches the page itself (without the person's cookies). On-device translation (Firefox's Bergamot) would keep it private, at tens of megabytes per language pair.
+- **Translation sends the page's address to Google** (after the app asks), whose translator fetches the page itself (without the person's cookies). On-device translation (Firefox's Bergamot) would keep it private, at tens of megabytes per language pair.
+- **No post-quantum key exchange.** The app's TLS on the device (epoxy, rustls compiled for the web) negotiates X25519 (checked on 2026-10-10 with Cloudflare's trace page); Chrome, Firefox and Safari use X25519MLKEM768, so traffic recorded today could be decrypted by a future quantum computer. epoxy 3.0.1 doesn't change it; it needs an epoxy built with ML-KEM.
+- **Site names travel in the clear in TLS handshakes** (no Encrypted Client Hello), from the server to each site: the hosting provider's network can read them there, though no longer in DNS. ECH needs epoxy's support, too.
+- **The first address of a video iOS plays itself is in the host's request logs.** Its segments are sealed (above), but that first address is the one the page's player was given, written by Scramjet; hiding it needs a URL codec of Badger's own in Scramjet.
+- **Passwords saved before 2026-10-10 on a server without isolation stay where they were**, readable by any page there, until deleted in the passwords list. New ones aren't saved there.
+- **The desktop installer and its updates aren't code-signed yet.** Whoever holds the GitHub release token can ship an update; signing (see the README's "Code signing") makes the updater refuse any update not signed by the same publisher. It needs a certificate, which costs money.
+- **Certificate Transparency is checked by the server**, from its own connection to the site: the same path the device's connection takes, but a certificate shown only to some connections could go unseen. Chrome checks the certificate its own connection got.

@@ -68,6 +68,27 @@ Each item has its test in `app/e2e/` or `app/src/*.test.js`; `SECURITY-GAPS.md` 
 | 4.8 | Only the app's navigations count as the person's; opened tabs as the opener's; forms to new sites keep their fields | `shield.js`, `anchor.html`, shell | M |
 | 4.9 | Downloads, reader view, zoom, print, translate, find with counts, location/camera/microphone after the app's prompt, sync with a code, more web ports | shell, `page.js`, `shield.js`, `sync.js`, `wisp.js` | L |
 
+## Phase 5: no leaks, and fast (done 2026-10-10)
+
+Aimed at one thing: nothing about a person leaves the device or the server except through the proxy, and the browser stays quick. Each item has its test; `SECURITY-GAPS.md` says what each closed.
+
+| # | Item | Where | Size |
+|---|---|---|---|
+| 5.1 | Passwords, passkeys and sync only with site isolation (the server refuses sync without it) | shell, `index.js` | S |
+| 5.2 | The server's DNS over HTTPS, cached; Tor tabs' sites never looked up on the server | `dns.js`, `wisp.js`, `tor.js`, `certs.js`, `media.js`, `cname.js` | M |
+| 5.3 | The desktop app's updates and the installer through the server, not GitHub | `updates.js`, `desktop/main.js`, `index.js` | S |
+| 5.4 | Video segments' addresses sealed, out of the host's request logs | `media.js`, `shield.js` | S |
+| 5.5 | Translation asks first, naming what Google learns | shell | S |
+| 5.6 | Certificate Transparency: SCTs checked against Chrome's logs, two operators | `certs.js`, `shield.js`, shell | M |
+| 5.7 | Lookalike addresses warned about; breached passwords flagged (k-anonymity, through the server) | `lookalike.js`, `shield.js`, shell, `index.js` | M |
+| 5.8 | Private tabs; workspaces that keep their sign-ins separate (namespaces in site labels) | `sitekey.js`, `shield.js`, shell, `index.js` | M |
+| 5.9 | The person's own block and hiding rules | `settings.js`, `index.js`, `shield.js`, shell | S |
+| 5.10 | Pages load without a server round trip when a site's verdict is fresh; the shell tells workers when settings change | `shield.js`, `anchor.html`, shell | S |
+| 5.11 | Idle tabs let their pages go | shell, `page.js` | S |
+| 5.12 | From the scramjet branch: sign-ins survive the worker being stopped; non-HTML documents run no scripts; more threat lists (URLhaus live, Phishing Army, `PHISHING_HOSTS`) every 15 minutes; Docker image from AWS's mirror | `cookies.js`, `shield.js`, `filters.js`, `Dockerfile` | M |
+
+Measured, not changed: each site's worker holds the block lists (7.9 MB, 16 ms to load); they're uBlock Origin's defaults, with no list worth dropping (Brave's CNAME list overlaps the live check, but Tor tabs, which skip it, need it).
+
 ## Not planned
 
 | Item | Why |
@@ -88,3 +109,10 @@ Phase 4 picked these defaults; each is one line to change.
 4. **Tor tabs**: on wherever the server can run Tor (the Docker image installs it); `TOR=off` to opt out.
 5. **Passkeys need the passphrase lock**: so their keys are always encrypted with something only the person knows.
 6. **Google Web Risk**: off unless a key is bought and set (`WEB_RISK_API_KEY`).
+
+Phase 5's:
+
+7. **DNS resolver**: Cloudflare's (`https://1.1.1.1/dns-query`, which keeps no logs); `DOH_URL` names another, `off` uses the host's.
+8. **Phishing Army**: on; its license is non-commercial, so a commercial deploy sets `PHISHING_ARMY=off`.
+9. **Certificate Transparency**: no way past, as in Chrome, for certificates a public authority vouches for.
+10. **Idle tabs**: their pages go after 30 minutes out of sight (not while playing).

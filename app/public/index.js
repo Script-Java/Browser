@@ -16,6 +16,12 @@ const config = self.__biosConfig || {};
 // Isolation mode: the shell runs on ISOLATION_DOMAIN and every site on its
 // own <key>.ISOLATION_DOMAIN origin, walled off from the shell and each other.
 const isolated = !!config.isolation && location.hostname === config.isolation;
+// Without isolation every site's pages run on the app's own address and can
+// reach into it, so passwords, passkeys and sync are off: they'd be the
+// sites' to read. (Saved ones from before stay until deleted.)
+const SECRETS_OFF = isolated
+	? ""
+	: "Passwords, passkeys and sync need site isolation. Without it, sites run on the app's own address and could read them.";
 const port = location.port ? ":" + location.port : "";
 const originFor = (key) =>
 	`${location.protocol}//${key}.${config.isolation}${port}`;
@@ -24,7 +30,8 @@ const siteOrigin = (labels) =>
 		? new RegExp(
 				"^" +
 					location.protocol.replace(":", "") +
-					`://(${labels}[a-z2-7]{25})\\.` +
+					// (and a namespace's, see sitekey.js: "-p…" or "-w…")
+					`://(${labels}[a-z2-7]{25}(?:-[a-z0-9]{1,8})?)\\.` +
 					config.isolation.replace(/\./g, "\\.") +
 					port.replace(/\W/g, "\\$&") +
 					"$"
@@ -34,6 +41,16 @@ const siteOrigin = (labels) =>
 const SITE_ORIGIN = siteOrigin("[st]");
 // ...or a frame's of another site inside a page (f…, g…; see shield.js inFrame).
 const ANY_SITE_ORIGIN = siteOrigin("[stfg]");
+// The labels the app keeps a list of, to clear their origins' data.
+const ORIGIN_KEY = /^[stfg][a-z2-7]{25}(-[a-z0-9]{1,8})?$/;
+
+// Private tabs keep their sites in a namespace of their own (sitekey.js),
+// a new one each time the app opens, so nothing of one session's private
+// tabs is reachable from the next; their data goes when the last one closes.
+const PRIVATE_NS =
+	"p" + [...crypto.getRandomValues(new Uint8Array(5))].map((b) => "abcdefghijklmnopqrstuvwxyz234567"[b & 31]).join("");
+// A tab's namespace: a private tab's, or its workspace's if that keeps its sign-ins separate.
+const nsOf = (tab) => (tab.tor ? "" : tab.private ? PRIVATE_NS : wsById(tab.ws)?.separate ? "w" + tab.ws : "");
 
 const $ = (id) => document.getElementById(id);
 // not `chrome`: Chromium browsers have a global of that name
@@ -222,7 +239,8 @@ async function frameUrlFor(url, tab) {
 	const path = proxyPath(url);
 	if (!isolated) return path;
 	// a Tor tab's sites have origins of their own, connected through Tor
-	const key = tab.tor ? await BiosSiteKey.torKey(new URL(url).hostname) : await BiosSiteKey.siteKey(new URL(url).hostname);
+	// (and a private tab's, or a separate workspace's, theirs: nsOf)
+	const key = tab.tor ? await BiosSiteKey.torKey(new URL(url).hostname) : await BiosSiteKey.siteKey(new URL(url).hostname, nsOf(tab));
 	rememberOrigin(key);
 	const origin = originFor(key);
 	tab.siteOrigin = origin;
@@ -324,9 +342,10 @@ const wsTabs = (id = currentWs) => tabs.filter((t) => t.ws === id);
 
 function createTab(
 	url = "",
-	{ after = null, lazy = false, title = "", select = true, openedBy = null, tor = false, ws = null } = {}
+	{ after = null, lazy = false, title = "", select = true, openedBy = null, tor = false, ws = null, private: priv = false } = {}
 ) {
 	if (tor && !torAvailable) return null;
+	if (priv && !isolated) return null;
 	if (tabs.length >= MAX_TABS) return null;
 	const id = nextTabId++;
 	const frame = document.createElement("iframe");
@@ -369,10 +388,15 @@ function createTab(
 		// a Tor tab: its sites' connections go through Tor (src/tor.js), and
 		// it keeps no history and isn't kept when the app closes
 		tor,
+		// a private tab: no history either, nor kept, and its sites in a
+		// namespace of their own (nsOf), forgotten with the last one
+		private: priv,
 		// its workspace: the opener's, or the one showing
 		ws: ws ?? (after && tabs.includes(after) ? after.ws : currentWs),
 	};
 	frame.addEventListener("load", () => {
+		// a new page: nothing of it is playing yet
+		tab.playing = false;
 		if (!tab.url || tab.pending) return;
 		setLoading(tab, false);
 		// a page without page.js (an image, a PDF) never reports itself
@@ -434,6 +458,7 @@ function closeTab(tab) {
 	tab.frame.remove();
 	// the last Tor tab took its sites' cookies and storage with it
 	if (tab.tor && !tabs.some((t) => t.tor)) setTimeout(forgetTor, 50);
+	if (tab.private && !tabs.some((t) => t.private)) setTimeout(forgetPrivate, 50);
 	if (lastActive === tab) lastActive = null;
 	if (tab !== active) {
 		layout();
@@ -456,6 +481,20 @@ function neighbour(tab, i) {
 	return tabs.slice(i).find(same) || tabs.slice(0, i).findLast(same) || null;
 }
 
+// A tab out of sight for half an hour lets its page go, to keep the app's
+// memory down (a phone closes an app that uses too much); it loads again
+// when shown, as a tab brought back at launch does. Not while it plays
+// something, or is still loading.
+const IDLE_TAB_MS = 30 * 60_000;
+setInterval(() => {
+	const shown = split || [active];
+	for (const t of tabs)
+		if (!shown.includes(t) && t.url && !t.pending && !t.loading && !t.playing && Date.now() - (t.hiddenAt || Date.now()) > IDLE_TAB_MS) {
+			t.pending = true;
+			t.frame.src = "about:blank";
+		}
+}, 60_000);
+
 function setLoading(tab, loading) {
 	tab.loading = loading;
 	if (tab === active) document.body.classList.toggle("loading", loading);
@@ -466,6 +505,7 @@ function layout() {
 	if (!active) return;
 	const shown = split || [active];
 	for (const t of tabs) {
+		if (!t.frame.hidden && !shown.includes(t)) t.hiddenAt = Date.now();
 		t.frame.hidden = !shown.includes(t) || !t.url;
 		t.frame.classList.toggle("focused", !!split && t === active);
 		t.frame.style.order = split ? String(split.indexOf(t)) : "";
@@ -473,6 +513,7 @@ function layout() {
 	framesEl.classList.toggle("split", !!split);
 	document.body.classList.toggle("browsing", !!active.url);
 	document.body.classList.toggle("tor", !!active.tor);
+	document.body.classList.toggle("private", !!active.private);
 	document.body.classList.toggle("loading", active.loading);
 }
 
@@ -486,7 +527,7 @@ function renderTabs() {
 		...shown.map((tab) => {
 			const el = document.createElement("div");
 			el.dataset.tab = String(tab.id);
-			el.className = tab.tor ? "tab tor" : "tab";
+			el.className = tab.tor ? "tab tor" : tab.private ? "tab private" : "tab";
 			el.classList.toggle("paired", !!split && split.includes(tab) && tab !== active);
 			el.setAttribute("role", "tab");
 			el.setAttribute("aria-selected", String(tab === active));
@@ -655,8 +696,11 @@ function moveTab(tab, id) {
 	const next = tab === active ? neighbour(tab, i) : null;
 	tabs.splice(i, 1);
 	tabs.push(tab);
+	const before = nsOf(tab);
 	tab.ws = id;
 	ws.last = tab;
+	// into a workspace with sign-ins of its own, or out of one: the page comes back there
+	if (nsOf(tab) !== before && tab.url && !tab.pending) go(tab.url, tab, false);
 	if (next) selectTab(next);
 	else if (tab === active) selectTab(tab);
 	else {
@@ -665,6 +709,16 @@ function moveTab(tab, id) {
 	}
 	renderWorkspaces();
 	if (currentWs !== id) toast(`Moved to ${ws.name}`, "Show", () => switchWorkspace(id));
+}
+
+// Its tabs' pages come back on their new origins; switched off, what it kept
+// of its own goes (it would only be found again by a workspace of its number).
+async function setSeparate(ws, separate) {
+	if (!!ws.separate === separate) return;
+	ws.separate = separate;
+	if (!separate) await forgetWorkspace(ws.id);
+	saveTabs();
+	await Promise.all(wsTabs(ws.id).filter((tab) => tab.url && !tab.pending && !tab.tor && !tab.private).map((tab) => go(tab.url, tab, false)));
 }
 
 async function deleteWorkspace(ws) {
@@ -684,6 +738,8 @@ async function deleteWorkspace(ws) {
 	// the tab on show last, so the others' places are free for its replacement
 	const doomed = wsTabs(ws.id).sort((a, b) => (a === active) - (b === active));
 	for (const tab of doomed) closeTab(tab);
+	// its own sign-ins, if it kept them (a later workspace may get its number)
+	setTimeout(() => forgetWorkspace(ws.id), 50);
 	if (currentWs === ws.id) switchWorkspace(workspaces[0].id);
 	renderTabs();
 	renderWorkspaces();
@@ -854,6 +910,15 @@ function editRow(ws) {
 		});
 		colors.append(swatch);
 	}
+	// Its own sign-ins (isolation): its tabs' sites in a namespace of their
+	// own (nsOf), so a site signed in here isn't signed in elsewhere.
+	const own = document.createElement("label");
+	own.className = "ws-separate";
+	const ownBox = document.createElement("input");
+	ownBox.type = "checkbox";
+	ownBox.checked = !!ws.separate;
+	ownBox.addEventListener("change", () => setSeparate(ws, ownBox.checked));
+	own.append(ownBox, " Keep its sign-ins separate");
 	const tools = document.createElement("div");
 	tools.className = "tools";
 	const remove = smallButton("Delete", () => deleteWorkspace(ws));
@@ -875,7 +940,7 @@ function editRow(ws) {
 		commitEdit();
 		renderWorkspaces();
 	});
-	form.append(name, colors, tools);
+	form.append(name, colors, ...(isolated ? [own] : []), tools);
 	li.append(form);
 	requestAnimationFrame(() => {
 		name.focus({ preventScroll: true });
@@ -921,11 +986,11 @@ placeControls();
 const TABS = "bios:tabs";
 
 function saveTabs() {
-	const open = tabs.filter((t) => t.url && !t.tor);
+	const open = tabs.filter((t) => t.url && !t.tor && !t.private);
 	saveEntries(TABS, {
 		tabs: open.map(({ url, title, ws }) => ({ url, title, ws })),
 		active: open.indexOf(active),
-		workspaces: workspaces.map(({ id, name, color, last }) => ({ id, name, color, last: open.indexOf(last) })),
+		workspaces: workspaces.map(({ id, name, color, last, separate }) => ({ id, name, color, last: open.indexOf(last), separate: !!separate })),
 		current: currentWs,
 	});
 }
@@ -946,6 +1011,7 @@ function restoreTabs() {
 			name: w.name.trim().slice(0, 40) || "Workspace",
 			color: Object.hasOwn(WS_COLORS, w.color) ? w.color : "gray",
 			last: null,
+			separate: w.separate === true,
 		}));
 		currentWs = wsById(saved.current) ? saved.current : workspaces[0].id;
 	}
@@ -1352,6 +1418,10 @@ async function onFrameMessage(event) {
 		return;
 	}
 	if (data?.bios === "login-seen") return offerToKeep(tab, data);
+	if (data?.bios === "media") {
+		tab.playing = !!data.playing;
+		return;
+	}
 
 	// the page answered a cookie notice (client/consent.js)
 	if (data?.bios === "consent") {
@@ -1570,15 +1640,24 @@ $("print-page").addEventListener("click", () => {
 
 // Translation by Google's page translator, which fetches the page itself (as
 // a visitor without cookies) and shows it translated, through the proxy like
-// any site. Google learns the address; the page's own visit stays private.
+// any site. Google learns the address, so the person is asked first, every
+// time: an address can carry a secret (a shared document's link, a sign-in link).
 function translateUrl(url) {
 	const to = (navigator.language || "en").split("-")[0].toLowerCase() || "en";
 	return `https://translate.google.com/translate?sl=auto&tl=${encodeURIComponent(to)}&u=${encodeURIComponent(url)}`;
 }
-$("translate-page").addEventListener("click", () => {
+async function translatePage() {
 	sheet.hidden = true;
-	if (active?.url) go(translateUrl(active.url));
-});
+	const tab = active;
+	if (!tab?.url) return;
+	const ok = await choose({
+		title: "Translate with Google?",
+		note: "Google gets this page's address and opens the page itself, without your cookies. Don't translate a page whose address is private, like a shared document's link.",
+		ok: "Translate",
+	});
+	if (ok && tab === active) go(translateUrl(tab.url));
+}
+$("translate-page").addEventListener("click", translatePage);
 
 // Reader view: the page sends its markup, the shell finds the article in it
 // (Readability) and cleans it (DOMPurify, client/reader.js), and the page
@@ -1726,6 +1805,7 @@ document.addEventListener("keydown", (event) => {
 const COMMANDS = [
 	{ name: "New tab", run: () => createTab() },
 	{ name: "New Tor tab", when: () => torAvailable, run: () => newTorTab() },
+	{ name: "New private tab", when: () => isolated, run: () => newPrivateTab() },
 	{ name: "Close tab", run: () => closeTab(active) },
 	{ name: "Workspaces", run: () => openWorkspaces() },
 	{ name: "New workspace", run: () => newWorkspace() },
@@ -1743,7 +1823,7 @@ const COMMANDS = [
 	{ name: "Find in page", when: () => !!active?.url, run: () => openFind() },
 	{ name: "Reader view", when: () => !!active?.url, run: () => openReader() },
 	{ name: "Print", when: () => !!active?.url, run: () => toTab(active, { cmd: "print" }) },
-	{ name: "Translate page", when: () => !!active?.url, run: () => go(translateUrl(active.url)) },
+	{ name: "Translate page", when: () => !!active?.url, run: translatePage },
 	{ name: "Zoom in", when: () => !!active?.url, run: () => zoomBy(1) },
 	{ name: "Zoom out", when: () => !!active?.url, run: () => zoomBy(-1) },
 	{ name: "New identity", run: () => newIdentity() },
@@ -1899,6 +1979,20 @@ async function saveSettings(next) {
 	if (!res.ok) throw new Error(`Couldn't save settings (${res.status})`);
 	settings = await res.json();
 	renderSheet();
+	await settingsChanged();
+}
+
+// The proxy's workers keep the settings and a site's threat verdict for a
+// little while instead of asking at every page (shield.js checkNavigation):
+// tell them the settings changed, so the next page has them. In isolation
+// mode each site's anchor frame passes it on to its worker.
+async function settingsChanged() {
+	try {
+		if (isolated) for (const [origin, anchor] of anchors) anchor.frame.contentWindow?.postMessage({ bios: "settings" }, origin);
+		else (await navigator.serviceWorker.getRegistration("/scramjet/"))?.active?.postMessage({ bios: "settings" });
+	} catch {
+		// no worker yet: it asks when it starts
+	}
 }
 
 function currentSite() {
@@ -1951,6 +2045,8 @@ function renderSheet() {
 	$("search-engine").value = settings.search;
 	$("security-level").value = settings.level;
 	$("level-note").textContent = LEVEL_NOTES[settings.level] || "";
+	// (not while being typed in)
+	if (document.activeElement !== $("rules-input")) $("rules-input").value = settings.rules || "";
 
 	$("lock-form").hidden = !config.auth;
 
@@ -2013,6 +2109,20 @@ for (const input of sheet.querySelectorAll("[data-setting]")) {
 		}
 	});
 }
+
+// The person's own block and hiding rules (the server cleans them, settings.js
+// cleanRules; every site's worker applies them, shield.js applyRules).
+$("rules-form").addEventListener("submit", async (event) => {
+	event.preventDefault();
+	try {
+		await saveSettings({ ...settings, rules: $("rules-input").value });
+		$("rules-input").value = settings.rules || "";
+		toast("Rules saved");
+		reload();
+	} catch (err) {
+		$("filter-status").textContent = err.message;
+	}
+});
 
 const LEVEL_NOTES = {
 	standard: "Every site works as usual",
@@ -2124,9 +2234,13 @@ async function clearAllSiteData(everything = false) {
 	await new Promise((resolve) => setTimeout(resolve, 50));
 	await clearStorageHere();
 	if (config.isolation) {
-		const keys = readList("bios:origins").filter((key) => /^[stfg][a-z2-7]{25}$/.test(key));
+		const keys = readList("bios:origins").filter((key) => ORIGIN_KEY.test(key));
+		// a site kept signed in stays so in every workspace that keeps its own sign-ins
+		const spaces = ["", ...workspaces.filter((w) => w.separate).map((w) => "w" + w.id)];
 		const kept = new Set(
-			everything ? [] : await Promise.all((settings?.keep || []).map((site) => BiosSiteKey.siteKey(site)))
+			everything
+				? []
+				: await Promise.all((settings?.keep || []).flatMap((site) => spaces.map((ns) => BiosSiteKey.siteKey(site, ns))))
 		);
 		await Promise.all(keys.filter((key) => !kept.has(key)).map((key) => clearOrigin(originFor(key))));
 		localStorage.setItem("bios:origins", JSON.stringify(keys.filter((key) => kept.has(key))));
@@ -2367,23 +2481,39 @@ function newTorTab(url = "") {
 	if (!url) torReady(tab).catch((err) => (error.textContent = err.message));
 }
 
-// Every Tor origin's cookies and storage: when the last Tor tab closes, and
-// when the app opens (a Tor tab never outlives the app).
-async function forgetTor() {
+// The cookies and storage of every site origin whose label `matches`.
+async function forgetOrigins(matches) {
 	if (!config.isolation) return;
-	const keys = readList("bios:origins").filter((key) => /^[stfg][a-z2-7]{25}$/.test(key));
-	const tor = keys.filter((key) => /^[tg]/.test(key));
-	if (!tor.length) return;
-	await Promise.all(tor.map((key) => clearOrigin(originFor(key))));
-	localStorage.setItem("bios:origins", JSON.stringify(keys.filter((key) => !/^[tg]/.test(key))));
-	for (const key of tor) {
+	const keys = readList("bios:origins").filter((key) => ORIGIN_KEY.test(key));
+	const gone = keys.filter(matches);
+	if (!gone.length) return;
+	await Promise.all(gone.map((key) => clearOrigin(originFor(key))));
+	localStorage.setItem("bios:origins", JSON.stringify(keys.filter((key) => !matches(key))));
+	for (const key of gone) {
 		const anchor = anchors.get(originFor(key));
 		anchor?.frame.remove();
 		anchors.delete(originFor(key));
 	}
 }
 
+// Every Tor origin's: when the last Tor tab closes, and when the app opens
+// (a Tor tab never outlives the app).
+const forgetTor = () => forgetOrigins((key) => /^[tg]/.test(key));
+// Every private tab's, the same way (and any earlier session's left behind).
+const forgetPrivate = () => forgetOrigins((key) => /-p[a-z0-9]+$/.test(key));
+// A workspace's own, once it no longer keeps its sign-ins separate (or is gone).
+const forgetWorkspace = (id) => forgetOrigins((key) => key.endsWith("-w" + id));
+
 $("tor-tab").addEventListener("click", () => newTorTab());
+
+// A private tab: no history, not brought back, and its sites' cookies and
+// storage, apart from everything else's, go when the last one closes.
+function newPrivateTab(url = "") {
+	sheet.hidden = true;
+	if (!isolated) return toast("Private tabs need site isolation (see the README).");
+	createTab(url, { private: true });
+}
+$("private-tab").addEventListener("click", () => newPrivateTab());
 
 // ---------------------------------------------------------------- secrets
 // Passwords and passkeys. With the passphrase lock they live in its vault;
@@ -2532,7 +2662,7 @@ function showKeyButton() {
 	const btn = $("key-btn");
 	const site = currentSite();
 	const form = active?.url?.startsWith("https:") ? active.loginForm : "";
-	btn.hidden = !site || !form || (form === "login" && !loginsFor(site).length);
+	btn.hidden = !!SECRETS_OFF || !site || !form || (form === "login" && !loginsFor(site).length);
 	btn.setAttribute("aria-label", form === "new" && !loginsFor(site).length ? "Suggest a strong password" : "Sign in with a saved password");
 }
 
@@ -2547,7 +2677,7 @@ function strongPassword() {
 async function fillFromKey() {
 	const tab = active;
 	const site = currentSite();
-	if (!tab?.url?.startsWith("https:") || !site) return;
+	if (SECRETS_OFF || !tab?.url?.startsWith("https:") || !site) return;
 	const options = loginsFor(site).map((login) => ({
 		label: login.username || "(no username)",
 		detail: `${login.site} · saved ${timeAgo(login.created || Date.now())}`,
@@ -2566,10 +2696,35 @@ async function fillFromKey() {
 
 $("key-btn").addEventListener("click", fillFromKey);
 
+// How many times a password turns up in known data breaches (Have I Been
+// Pwned's list), or null when that couldn't be checked. Only the first five
+// characters of its SHA-1 leave the device, through the server; the list of
+// every breached password starting with those comes back and is searched here.
+const breachChecks = new Map(); // SHA-1 -> Promise<number | null>
+async function timesBreached(password) {
+	// SHA-1 because that's how the list is indexed: a lookup key, never how
+	// a password is stored (the vault encrypts them, see "secrets")
+	const digest = new Uint8Array(await crypto.subtle.digest("SHA-1", encoder.encode(password)));
+	const hash = [...digest].map((b) => b.toString(16).padStart(2, "0")).join("").toUpperCase();
+	if (!breachChecks.has(hash))
+		breachChecks.set(
+			hash,
+			fetch("/api/pwned/" + hash.slice(0, 5), { cache: "no-store" })
+				.then((res) => (res.ok ? res.text() : Promise.reject()))
+				.then((text) => {
+					const line = text.split("\n").find((l) => l.startsWith(hash.slice(5) + ":"));
+					// (the answer is padded with made-up entries counted 0)
+					return line ? Number(line.split(":")[1]) || 0 : 0;
+				})
+				.catch(() => (breachChecks.delete(hash), null))
+		);
+	return breachChecks.get(hash);
+}
+
 // A password the person just used on the tab's site: keep it?
-function offerToKeep(tab, data) {
+async function offerToKeep(tab, data) {
 	const site = siteFor(tab.url);
-	if (!site || typeof data.password !== "string" || !data.password) return;
+	if (SECRETS_OFF || !site || typeof data.password !== "string" || !data.password) return;
 	if (!tab.url.startsWith("https:")) return;
 	const never = readList(NEVER);
 	if (Array.isArray(never) && never.includes(site)) return;
@@ -2586,7 +2741,10 @@ function offerToKeep(tab, data) {
 		showKeyButton();
 		toast(same ? "Password updated" : "Password saved", "Show", openPasswords);
 	};
-	offer(same ? `Update the saved password for ${username || site}?` : `Save the password${username ? ` for ${username}` : ""} on ${site}?`, [
+	// a password in known breaches is the first one attackers try: say so (at most a few seconds' wait)
+	const times = await Promise.race([timesBreached(password), new Promise((resolve) => setTimeout(resolve, 3000, null))]);
+	const breached = times ? ` This password has turned up in data breaches ${times.toLocaleString()} times: change it on ${site}.` : "";
+	offer((same ? `Update the saved password for ${username || site}?` : `Save the password${username ? ` for ${username}` : ""} on ${site}?`) + breached, [
 		{
 			label: "Never for this site",
 			run: () => saveEntries(NEVER, [...(Array.isArray(never) ? never : []), site].slice(-500)),
@@ -2689,6 +2847,7 @@ async function passkeyAsked(event) {
 	const tab = tabFor(event.source);
 	const answer = (result) => answerPage(event, data.id, result);
 	const refuse = (error, name = "NotAllowedError") => answer({ ok: false, error, name });
+	if (SECRETS_OFF) return refuse(SECRETS_OFF);
 	// only the tab's own page, on its verified address, over https
 	if (!tab?.url?.startsWith("https:")) return refuse("Passkeys need a secure page.", "SecurityError");
 	if (isolated ? !SITE_ORIGIN.test(event.origin) : event.origin !== location.origin) return refuse();
@@ -2819,7 +2978,9 @@ function openPasswords() {
 }
 
 function renderPasswords() {
-	$("passwords-note").textContent = vault
+	$("passwords-note").textContent = SECRETS_OFF
+		? SECRETS_OFF
+		: vault
 		? "Kept on this device, encrypted with your passphrase."
 		: "Kept on this device, encrypted with a key this browser keeps. Set a passphrase to lock them with one of your own; passkeys need it.";
 	const logins = readLogins();
@@ -2835,6 +2996,14 @@ function renderPasswords() {
 			small.className = "secret";
 			small.textContent = "••••••••";
 			text.append(title, small);
+			if (!SECRETS_OFF)
+				timesBreached(login.password).then((times) => {
+					if (!times) return;
+					const warning = document.createElement("small");
+					warning.className = "breached";
+					warning.textContent = `Found in data breaches ${times.toLocaleString()} times: change it on ${login.site}`;
+					text.append(warning);
+				});
 			const actions = document.createElement("span");
 			actions.className = "row-actions";
 			const show = document.createElement("button");
@@ -3103,11 +3272,11 @@ async function syncTyped(code) {
 function openSyncPanel() {
 	syncRun++;
 	sheet.hidden = true;
-	$("sync-start").hidden = false;
+	$("sync-start").hidden = !!SECRETS_OFF;
 	$("sync-code").hidden = true;
 	$("sync-form").hidden = true;
 	$("sync-form").reset();
-	$("sync-status").textContent = "";
+	$("sync-status").textContent = SECRETS_OFF;
 	$("sync").hidden = false;
 }
 
@@ -3158,6 +3327,8 @@ async function openCert() {
 			? "Revoked: the authority that issued it says it must not be trusted."
 			: !cert.trusted
 				? `Not trusted: ${cert.problem || "it doesn't check out"}.`
+			: cert.logged === false
+				? "Not in the public logs browsers require, so it may have been issued in secret."
 				: cert.revoked === false
 					? "Valid, and not on its authority's list of revoked certificates."
 					: "Valid. Whether it was revoked couldn't be checked.";
@@ -3167,6 +3338,12 @@ async function openCert() {
 		["Issued by", [cert.issuerName, cert.issuerOrganization].filter((v, i, all) => v && all.indexOf(v) === i).join(", ") || cert.issuer],
 		["Valid", `${when(cert.validFrom)} to ${when(cert.validTo)}`],
 		["Chain", (cert.chain || []).map((c) => c.commonName || c.subject).join(" → ")],
+		[
+			"Public logs",
+			cert.logged === null || cert.logged === undefined
+				? ""
+				: (cert.scts || []).filter((s) => s.valid).map((s) => s.log).join(", ") || "None",
+		],
 		["SHA-256 fingerprint", cert.fingerprint, true],
 		["Serial number", cert.serial, true],
 	];
@@ -3591,8 +3768,8 @@ $("vault-off").addEventListener("click", async () => {
 	showVaultButtons();
 });
 
-function recordVisit({ url, title, tor }) {
-	if (tor || !/^https?:/.test(url)) return;
+function recordVisit({ url, title, tor, private: priv }) {
+	if (tor || priv || !/^https?:/.test(url)) return;
 	const list = readEntries(HISTORY);
 	title = String(title || "").slice(0, 200);
 	// a page reporting its title after its address: update, don't duplicate
@@ -3815,7 +3992,8 @@ startup = (async () => {
 	if (isolated) {
 		torAvailable = !!(await torState()).available;
 		$("tor-tab").hidden = !torAvailable;
-		if (firstLaunch) await forgetTor();
+		$("private-tab").hidden = false;
+		if (firstLaunch) await Promise.all([forgetTor(), forgetPrivate()]);
 	}
 })().catch((err) => console.warn("startup:", err));
 

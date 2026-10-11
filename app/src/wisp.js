@@ -2,8 +2,8 @@
 // a proxied page. Web ports only, nothing on the server's own network.
 
 import net from "node:net";
-import { lookup } from "node:dns/promises";
 import { server as wisp, logging } from "@mercuryworkshop/wisp-js/server";
+import { lookupAll } from "./dns.js";
 
 // Private, loopback, link-local and other non-public ranges. wisp-js has its
 // own check, but it lets through IPv6 private (fc00::/7, which Railway's
@@ -27,10 +27,34 @@ export function isBlockedAddress(address) {
 	return mapped ? blocked.check(mapped[1], "ipv4") : blocked.check(address, "ipv6");
 }
 
-// Every name wisp connects to resolves through here, so a site can't point
-// its DNS at a private address. wisp-js caches the answer and connects to it.
+// A Tor tab's connection (tor.js) hands the name to Tor, which resolves it
+// at the exit. wisp-js still looks every name up first, for its own check
+// against private addresses, right after making the stream's socket: that
+// socket says so here, and the lookup is refused without asking anyone, so
+// the server's DNS never learns a Tor tab's sites (and wisp-js lets a name
+// it couldn't look up through; Tor exits refuse private addresses).
+// ponytail: wisp-js keeps the refusal ~120 ms, so a plain tab opening the
+// same site in that moment fails once; per-connection DNS needs a wisp-js change
+const torNames = new Map(); // hostname -> { count, at }: streams about to be checked
+export function skipLookup(hostname) {
+	if (net.isIP(hostname)) return;
+	if (torNames.size > 1000) torNames.clear();
+	const mark = torNames.get(hostname);
+	torNames.set(hostname, { count: (mark && Date.now() - mark.at < 2000 ? mark.count : 0) + 1, at: Date.now() });
+}
+
+// Every name wisp connects to resolves through here (over DoH, dns.js), so a
+// site can't point its DNS at a private address. wisp-js connects to the answer.
 async function publicLookup(hostname) {
-	const allowed = (await lookup(hostname, { all: true })).filter((a) => !isBlockedAddress(a.address));
+	const tor = torNames.get(hostname);
+	// (a mark older than that: a stream refused before its lookup)
+	if (tor && Date.now() - tor.at < 2000) {
+		if (tor.count > 1) tor.count--;
+		else torNames.delete(hostname);
+		throw Object.assign(new Error("resolved by Tor"), { code: "EACCES" });
+	}
+	if (tor) torNames.delete(hostname);
+	const allowed = (await lookupAll(hostname)).filter((a) => !isBlockedAddress(a.address));
 	if (!allowed.length) throw Object.assign(new Error("private address"), { code: "EACCES" });
 	return allowed[0].address;
 }

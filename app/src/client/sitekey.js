@@ -18,13 +18,27 @@ export function siteOf(hostname) {
 
 const BASE32 = "abcdefghijklmnopqrstuvwxyz234567";
 
+// A namespace keeps a site's cookies and storage apart from its ordinary
+// ones: a private tab's ("p" and a code new each launch), or a workspace's
+// that keeps its sign-ins separate ("w" and its number). It goes into the
+// label's digest and after it ("-w3"), so a site origin's worker knows which
+// one it's in from its own name.
+const NAMESPACE = /^[a-z0-9]{1,8}$/;
+const spaced = (ns, name) => (ns && NAMESPACE.test(ns) ? `${ns} ${name}` : name);
+const suffix = (ns) => (ns && NAMESPACE.test(ns) ? "-" + ns : "");
+
+/** The namespace a label is in ("" for none). */
+export const namespaceOf = (key) => /-([a-z0-9]{1,8})$/.exec(String(key))?.[1] || "";
+
 /**
- * A stable DNS label for a site: "s" + 25 base32 chars of SHA-256(site).
+ * A stable DNS label for a site: "s" + 25 base32 chars of SHA-256(site),
+ * in a namespace: of SHA-256("<ns> <site>"), then "-<ns>".
  * @param {string} hostname
+ * @param {string} [ns]
  * @returns {Promise<string>}
  */
-export function siteKey(hostname) {
-	return label("s", siteOf(hostname));
+export async function siteKey(hostname, ns = "") {
+	return (await label("s", spaced(ns, siteOf(hostname)))) + suffix(ns);
 }
 
 /**
@@ -48,20 +62,21 @@ export function torKey(hostname) {
  * @param {string} topSite the site of the tab's page
  * @param {string} frameHost
  * @param {boolean} tor
+ * @param {string} [ns] the tab's namespace (see siteKey)
  * @returns {Promise<string>}
  */
-export function frameKey(topSite, frameHost, tor = false) {
-	return label(tor ? "g" : "f", `frame ${siteOf(topSite)} ${siteOf(frameHost)}`);
+export async function frameKey(topSite, frameHost, tor = false, ns = "") {
+	return (await label(tor ? "g" : "f", spaced(ns, `frame ${siteOf(topSite)} ${siteOf(frameHost)}`))) + suffix(ns);
 }
 
 /** The label `key` belongs to a site in a Tor tab (or a frame in one). */
 export const isTorKey = (key) => /^[tg][a-z2-7]{25}$/.test(String(key));
 
 /** The label `key` belongs to a frame inside a page (see frameKey). */
-export const isFrameKey = (key) => /^[fg][a-z2-7]{25}$/.test(String(key));
+export const isFrameKey = (key) => /^[fg][a-z2-7]{25}(-[a-z0-9]{1,8})?$/.test(String(key));
 
-/** The label of `hostname`'s site as a tab, of the kind `key` is (a Tor tab's, or not). */
-export const keyLike = (key, hostname) => (isTorKey(key) ? torKey(hostname) : siteKey(hostname));
+/** The label of `hostname`'s site as a tab, of the kind `key` is (a Tor tab's, a namespace's, or plain). */
+export const keyLike = (key, hostname) => (isTorKey(key) ? torKey(hostname) : siteKey(hostname, namespaceOf(key)));
 
 async function label(prefix, name) {
 	const bytes = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(name)));

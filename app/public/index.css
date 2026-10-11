@@ -1760,6 +1760,10 @@ body.away > * {
 	font-size: 12.5px;
 }
 
+.links .breached {
+	color: var(--danger);
+}
+
 /* ------------------------------------------------------------ sync */
 
 .sync-code {
@@ -1810,4 +1814,61 @@ body.tor #bar-form {
 
 body.tor #site-btn {
 	color: #7d4698;
+}
+
+/* -------------------------------------------------------- private tabs */
+
+.tab.private {
+	box-shadow: inset 0 -2px 0 #3d4a5c;
+}
+
+.tab.private .tab-title::before {
+	content: "Private · ";
+	color: #3d4a5c;
+	font-weight: 600;
+}
+
+body.private #bar-form {
+	box-shadow: inset 0 0 0 1.5px #3d4a5c;
+}
+
+/* the person's own block and hiding rules (settings) */
+.rules {
+	margin: 8px 0 4px;
+}
+
+.rules summary {
+	cursor: pointer;
+	padding: 6px 0;
+	color: var(--text);
+}
+
+.rules form {
+	display: grid;
+	gap: 8px;
+}
+
+.rules textarea {
+	width: 100%;
+	box-sizing: border-box;
+	padding: 8px 10px;
+	border: 1px solid var(--line);
+	border-radius: 10px;
+	background: var(--field);
+	color: var(--ink);
+	font: 13px/1.4 var(--mono);
+	resize: vertical;
+}
+
+.rules button {
+	justify-self: start;
+}
+
+/* a workspace's "keep its sign-ins separate" switch */
+.ws-separate {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	margin: 10px 0 2px;
+	font-size: 14px;
 }

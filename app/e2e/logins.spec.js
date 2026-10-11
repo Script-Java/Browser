@@ -3,7 +3,7 @@
 
 import { generateAuthenticationOptions, generateRegistrationOptions, verifyAuthenticationResponse, verifyRegistrationResponse } from "@simplewebauthn/server";
 import { expect, open, openShell, test, testPage } from "./fixtures.js";
-import { SHARED_URL } from "./env.js";
+import { ISOLATED_URL } from "./env.js";
 
 const LOGIN = (note) =>
 	testPage(`<!doctype html><title>sign in</title>
@@ -11,7 +11,7 @@ const LOGIN = (note) =>
 <input id="user" name="user" autocomplete="username"><input id="pass" name="pass" type="password">
 <button id="go">Sign in</button></form><!-- ${note} -->`);
 
-test("a password used to sign in is offered to keep, and filled in when picked", async ({ app }) => {
+test("a password used to sign in is offered to keep, and filled in when picked", async ({ isolatedApp: app }) => {
 	let frame = await open(app, LOGIN("first"));
 	await frame.fill("#user", "alice");
 	await frame.fill("#pass", "s3cret-pw");
@@ -48,7 +48,7 @@ window.use = async (o) => (await navigator.credentials.get({ publicKey: {
 window.useElsewhere = (o) => window.use({ ...o, rpId: "httpbin.org" }).then(() => "USED", (e) => e.name);
 </script>`);
 
-test("a site can make a passkey here and sign in with it, and no other site can", async ({ app }) => {
+test("a site can make a passkey here and sign in with it, and no other site can", async ({ isolatedApp: app }) => {
 	await app.evaluate(() => setPassphrase("correct horse"));
 	const rpID = "httpbin.org";
 	const expectedOrigin = "https://httpbin.org";
@@ -131,7 +131,7 @@ document.getElementById("ask").onclick = () => navigator.geolocation.getCurrentP
 	});
 });
 
-test("two devices swap bookmarks, history and passwords with a one-time code", async ({ app, browser }) => {
+test("two devices swap bookmarks, history and passwords with a one-time code", async ({ isolatedApp: app, browser }) => {
 	// this device: a bookmark and a password
 	await open(app, "https://example.com/");
 	await app.evaluate(() => toggleBookmark());
@@ -141,7 +141,7 @@ test("two devices swap bookmarks, history and passwords with a one-time code", a
 	// the other device: a bookmark of its own
 	const other = await browser.newContext();
 	const device = await other.newPage();
-	await openShell(device, SHARED_URL);
+	await openShell(device, ISOLATED_URL);
 	await device.evaluate(() => saveEntries(BOOKMARKS, [{ url: "https://example.net/", title: "Net" }]));
 
 	await app.evaluate(() => openSyncPanel());
@@ -161,4 +161,36 @@ test("two devices swap bookmarks, history and passwords with a one-time code", a
 	// what was relayed is gone from the server
 	await expect(device.evaluate(() => fetch("/api/sync/" + "0".repeat(32)).then((r) => r.status))).resolves.toBe(404);
 	await other.close();
+});
+
+// Without isolation every site runs on the app's own address and could read
+// what the app keeps: no passwords, passkeys or sync there.
+test("without site isolation, passwords, passkeys and sync are off", async ({ app }) => {
+	const frame = await open(app, LOGIN("shared"));
+	await frame.fill("#user", "alice");
+	await frame.fill("#pass", "s3cret-pw");
+	await frame.click("#go");
+	await app.waitForFunction(() => active.url === "https://httpbin.org/post" && !active.loading);
+	await expect(app.locator("#offer")).toBeHidden();
+	expect(await app.evaluate(() => readLogins())).toEqual([]);
+
+	const page = await open(app, PASSKEY_PAGE);
+	expect(await page.evaluate(() => navigator.credentials.create({ publicKey: { challenge: new Uint8Array(32), rp: { name: "x" }, user: { id: new Uint8Array(8), name: "a", displayName: "a" }, pubKeyCredParams: [{ type: "public-key", alg: -7 }] } }).then(() => "MADE", (e) => e.name))).toBe("NotAllowedError");
+	await expect(app.locator("#choice")).toBeHidden();
+
+	await app.evaluate(() => openSyncPanel());
+	await expect(app.locator("#sync-start")).toBeHidden();
+	await expect(app.locator("#sync-status")).toContainText("site isolation");
+	expect(await app.evaluate(() => fetch("/api/sync/" + "0".repeat(32)).then((r) => r.status))).toBe(404);
+});
+
+test("a password found in data breaches is flagged when it's saved, and in the list", async ({ isolatedApp: app }) => {
+	const frame = await open(app, LOGIN("breached"));
+	await frame.fill("#user", "bob");
+	await frame.fill("#pass", "password123");
+	await frame.click("#go");
+	await expect(app.locator("#offer-text")).toContainText("data breaches", { timeout: 20_000 });
+	await app.locator("#offer").getByRole("button", { name: "Save" }).click();
+	await app.evaluate(() => openPasswords());
+	await expect(app.locator("#logins-list .breached")).toContainText("Found in data breaches", { timeout: 20_000 });
 });
