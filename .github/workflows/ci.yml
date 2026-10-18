@@ -43,7 +43,7 @@ jobs:
       # Tor, for the Tor tab test (it's skipped where the server can't run Tor)
       - run: sudo apt-get update && sudo apt-get install -y tor
       - run: pnpm -C app e2e
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         if: failure()
         with:
           name: e2e-report
