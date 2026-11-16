@@ -89,7 +89,7 @@ A public deploy requires site isolation (below). Without it, every site shares o
 
 ## Search
 
-The address bar searches with Brave Search by default. Each person can switch to DuckDuckGo, Bing or Google in the shield menu. Google shows a "prove you're not a robot" page for searches made through the proxy, even from a home connection, so it isn't the default.
+The address bar searches with Google by default. Each person can switch to Brave Search, DuckDuckGo or Bing in the shield menu. Google shows a "prove you're not a robot" page for searches made through the proxy more often than the others, because everyone shares the server's address; Brave Search is the one to switch to when it does.
 
 ## Site isolation (needs your own domain; required when public)
 

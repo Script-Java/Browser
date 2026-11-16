@@ -9,6 +9,8 @@ test("words typed into the new tab's bar open a search", async ({ app }) => {
 	await app.click("#home-input");
 	await app.keyboard.type("honey badger");
 	await app.keyboard.press("Enter");
-	// ponytail: only where the tab lands; Brave sometimes shows test browsers a robot check instead of results
-	await app.waitForFunction(() => active.url === "https://search.brave.com/search?q=honey%20badger" && !active.loading);
+	// shortcut: only where the tab lands; Google often sends proxied searches to its robot check (/sorry/) instead of results
+	await app.waitForFunction(
+		() => /^https:\/\/www\.google\.com\/(search\?q=honey%20badger|sorry\/.*honey)/.test(active.url) && !active.loading,
+	);
 });

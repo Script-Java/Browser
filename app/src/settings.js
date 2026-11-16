@@ -16,8 +16,8 @@ export const DEFAULT_SETTINGS = {
 	level: "standard",
 	// On so a lost or shared device doesn't keep the last session's logins.
 	wipe: true,
-	// Google shows proxied searches a captcha, even from home connections.
-	search: "brave",
+	// Google shows proxied searches a robot check more often than the others.
+	search: "google",
 	// Sites with blocking switched off.
 	allow: [],
 	// Sites whose own scripts are switched off.

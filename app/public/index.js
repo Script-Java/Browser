@@ -129,7 +129,7 @@ function toUrl(input) {
 }
 
 function searchUrl(query) {
-	const engine = SEARCH[settings?.search] || SEARCH.brave;
+	const engine = SEARCH[settings?.search] || SEARCH.google;
 	return engine.replace("%s", encodeURIComponent(query.trim()));
 }
 
