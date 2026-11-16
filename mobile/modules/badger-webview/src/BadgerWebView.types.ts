@@ -62,6 +62,8 @@ export type BadgerWebViewProps = {
 	style?: StyleProp<ViewStyle>;
 	/** First address. Later navigations go through the ref's load(). */
 	url: string;
+	/** WebKit's saved state of the tab (onSessionState): when the view is created, restores its pages and back and forward instead of loading `url` */
+	sessionState?: string;
 	store: Store;
 	level: Level;
 	/** WKWebpagePreferences.isLockdownModeEnabled for this tab's pages */
@@ -86,6 +88,8 @@ export type BadgerWebViewProps = {
 	/** window.webkit.messageHandlers.badger.postMessage(data) from the isolated world only */
 	onMessage?: Event<{ data: string }>;
 	onLoadError?: Event<LoadError>;
+	/** after each page finishes loading: the tab's state to restore it from, base64 */
+	onSessionState?: Event<{ state: string }>;
 };
 
 /** The tab's methods, through a ref. */

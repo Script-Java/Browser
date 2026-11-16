@@ -74,8 +74,10 @@ final class BadgerWebView: ExpoView, WKNavigationDelegate, WKUIDelegate, WKDownl
   let onPermissionRequest = EventDispatcher()
   let onMessage = EventDispatcher()
   let onLoadError = EventDispatcher()
+  let onSessionState = EventDispatcher()
 
   var url = ""
+  var sessionState: String?
   var store: StoreRecord?
   var level = "standard"
   var lockdown = false
@@ -112,6 +114,8 @@ final class BadgerWebView: ExpoView, WKNavigationDelegate, WKUIDelegate, WKDownl
       return
     }
     let start = webView?.url?.absoluteString ?? url
+    // a tab brought back: its pages and their back and forward, not just its address
+    let restore = webView == nil ? sessionState.flatMap { Data(base64Encoded: $0) } : nil
     webView?.removeFromSuperview()
     storeId = store.id
 
@@ -147,7 +151,11 @@ final class BadgerWebView: ExpoView, WKNavigationDelegate, WKUIDelegate, WKDownl
     Task {
       // Rules first, so the first page is blocked too.
       await applyRules()
-      load(start)
+      if let restore {
+        webView.interactionState = restore
+      } else {
+        load(start)
+      }
     }
   }
 
@@ -262,6 +270,12 @@ final class BadgerWebView: ExpoView, WKNavigationDelegate, WKUIDelegate, WKDownl
 
   func webView(_ webView: WKWebView, navigationResponse: WKNavigationResponse, didBecome download: WKDownload) {
     download.delegate = self
+  }
+
+  func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+    if let state = webView.interactionState as? Data {
+      onSessionState(["state": state.base64EncodedString()])
+    }
   }
 
   func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: any Error) {

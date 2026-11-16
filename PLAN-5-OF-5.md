@@ -27,7 +27,7 @@ Two open-source iOS browsers already do most of this, so copy their approach bef
 
 The native app is `mobile/`: Expo (React Native) for the screens, with two Swift modules: `badger-webview` (one `WKWebView` per tab) and `badger-relay` (SOCKS5 on the phone to the server's wisp). Linux can't compile it; CI's `ios` job builds it on macOS. **None of it has run on a phone or simulator yet.**
 
-Written, not yet run: 6.1–6.4, 6.7, 7.2, 7.4, 7.5, 8.1, 8.3, 9.1. Also the server's content rules (`/filters/content-rules.json`, Brave's adblock-rs) and native sign-in, all tested against the real server. Changed from the plan:
+Written, not yet run: 6.1–6.4, 6.7, 7.2, 7.4, 7.5, 8.1, 8.3, 9.1. Also the server's content rules (`/filters/content-rules.json`, Brave's adblock-rs) and native sign-in, all tested against the real server. Also bookmarks, history, address-bar suggestions and new-tab shortcuts (only on the phone; private tabs add nothing), and each tab's back and forward kept across launches (WebKit's `interactionState`). Changed from the plan:
 - **6.5:** passwords and passkeys are iOS's own (Passwords app, AutoFill, iCloud Keychain), which `WKWebView` offers once Apple grants the browser entitlements. The app keeps no vault of its own.
 - **8.3:** passkeys are off on relay sites unless allowed per site.
 

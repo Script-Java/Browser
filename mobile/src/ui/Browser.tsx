@@ -2,11 +2,12 @@
 import { randomUUID } from "expo-crypto";
 import * as SecureStore from "expo-secure-store";
 import { type ComponentRef, type RefObject, useCallback, useEffect, useRef, useState } from "react";
-import { ActionSheetIOS, Share, StyleSheet, Text, TextInput, View } from "react-native";
+import { ActionSheetIOS, Pressable, Share, StyleSheet, Text, TextInput, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import BadgerWebViewModule, { type BadgerWebViewRef, type Download, type NavigationState } from "../../modules/badger-webview";
 import { addressFor, hostOf } from "../address";
+import { type Entry, isBookmarked, nameOf, type Page, recordVisit, shortcuts, suggestions, toggleBookmark } from "../library";
 import type { Relay } from "../relay/types";
 import { useContentRules } from "../rules";
 import type { Session } from "../server/types";
@@ -15,6 +16,7 @@ import { readJson, usePersisted, writeJson } from "../storage";
 import { DownloadsSheet } from "./DownloadsSheet";
 import { SERVER_KEY } from "./FirstRun";
 import { colors, IconButton, useAfterRender } from "./kit";
+import { LibrarySheet } from "./LibrarySheet";
 import { SettingsSheet } from "./SettingsSheet";
 import { ShieldSheet } from "./ShieldSheet";
 import { Tab, type TabInfo } from "./Tab";
@@ -31,6 +33,8 @@ export function Browser({ session, relay, onSignOut }: { session: Session; relay
 	const insets = useSafeAreaInsets();
 	const [settings, setSettings] = usePersisted<Settings>("settings.json", () => DEFAULT_SETTINGS);
 	const [sites, setSites] = usePersisted<Sites>("sites.json", () => ({}));
+	const [history, setHistory] = usePersisted<Entry[]>("history.json", () => []);
+	const [bookmarks, setBookmarks] = usePersisted<Page[]>("bookmarks.json", () => []);
 	const [workspaces, setWorkspaces] = usePersisted<Workspace[]>("workspaces.json", () => [{ id: randomUUID(), name: "Personal" }]);
 	const [saved] = useState(() => readJson<SavedTabs>("tabs.json", { tabs: [], active: null, workspace: "" }));
 	const [tabs, setTabs] = useState(() => saved.tabs.filter((t) => workspaces.some((w) => w.id === t.workspace)));
@@ -41,7 +45,7 @@ export function Browser({ session, relay, onSignOut }: { session: Session; relay
 	const [recent, setRecent] = useState<string[]>(() => (active ? [active] : []));
 	const [navs, setNavs] = useState<Record<string, NavigationState>>({});
 	const [downloads, setDownloads] = useState<Download[]>([]);
-	const [sheet, setSheet] = useState<"tabs" | "shield" | "settings" | "downloads" | null>(null);
+	const [sheet, setSheet] = useState<"tabs" | "shield" | "settings" | "downloads" | "library" | null>(null);
 	const [typed, setTyped] = useState<string | null>(null);
 	const [views] = useState(() => new Map<string, RefObject<BadgerWebViewRef | null>>());
 	const later = useAfterRender();
@@ -110,6 +114,7 @@ export function Browser({ session, relay, onSignOut }: { session: Session; relay
 
 	const go = (input: string) => {
 		setTyped(null);
+		addressBar.current?.blur();
 		if (!input.trim()) return;
 		const url = addressFor(input, settings.search);
 		const open = view();
@@ -118,14 +123,18 @@ export function Browser({ session, relay, onSignOut }: { session: Session; relay
 		else newTab(false, url);
 	};
 
-	const onState = useCallback((id: string, state: NavigationState) => {
+	const onState = useCallback((id: string, state: NavigationState, isPrivate: boolean) => {
 		setNavs((all) => ({ ...all, [id]: state }));
 		setTabs((all) => {
 			const tab = all.find((t) => t.id === id);
 			if (!tab || !state.url || (tab.url === state.url && tab.title === state.title)) return all;
 			return all.map((t) => (t === tab ? { ...t, url: state.url, title: state.title } : t));
 		});
-	}, []);
+		// a page counts once it has loaded; private tabs add nothing
+		if (!state.loading && state.url && !isPrivate) setHistory((h) => recordVisit(h, { url: state.url, title: state.title }));
+	}, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+	const onSession = useCallback((id: string, session: string) => setTabs((all) => all.map((t) => (t.id === id ? { ...t, session } : t))), []);
 
 	const changeSite = useCallback(
 		(site: string, change: SiteSettings) => {
@@ -154,6 +163,10 @@ export function Browser({ session, relay, onSignOut }: { session: Session; relay
 			["New tab", () => newTab(false)],
 			["New private tab", () => newTab(true)],
 			["Find in page", () => view()?.find()],
+			...(nav?.url.startsWith("http")
+				? [[isBookmarked(bookmarks, nav.url) ? "Remove bookmark" : "Bookmark this page", () => setBookmarks((b) => toggleBookmark(b, nav))] as [string, () => void]]
+				: []),
+			["Bookmarks and history", () => setSheet("library")],
 			["Downloads", () => setSheet("downloads")],
 			["Settings", () => setSheet("settings")],
 			...(current ? [["Close tab", () => closeTab(current.id)] as [string, () => void]] : []),
@@ -164,6 +177,7 @@ export function Browser({ session, relay, onSignOut }: { session: Session; relay
 	const site = siteOf(nav?.url || current?.url || "");
 	const shield = effective(site ? sites[site] : undefined, settings.level);
 	const workspaceTabs = tabs.filter((t) => t.workspace === workspace).length;
+	const suggested = typed && typed !== (nav?.url || current?.url) ? suggestions(typed, bookmarks, history) : [];
 
 	return (
 		<View style={[styles.page, { paddingTop: insets.top }]}>
@@ -215,6 +229,7 @@ export function Browser({ session, relay, onSignOut }: { session: Session; relay
 						privateStore={PRIVATE_STORE}
 						views={views}
 						onState={onState}
+						onSession={onSession}
 						onOpenWindow={onOpenWindow}
 						onDownload={onDownload}
 						onSiteChange={changeSite}
@@ -223,8 +238,29 @@ export function Browser({ session, relay, onSignOut }: { session: Session; relay
 				{current?.url ? null : (
 					<View style={styles.blank}>
 						<Text style={styles.blankText}>{current?.private ? "Private tab: nothing from it is kept." : "Search or type a URL above."}</Text>
+						{shortcuts(bookmarks, history).map((page) => (
+							<Pressable key={page.url} accessibilityRole="link" style={({ pressed }) => [styles.shortcut, pressed && { opacity: 0.5 }]} onPress={() => go(page.url)}>
+								<Text style={styles.shortcutText} numberOfLines={1}>
+									{nameOf(page)}
+								</Text>
+							</Pressable>
+						))}
 					</View>
 				)}
+				{suggested.length ? (
+					<View style={styles.suggest} accessibilityRole="list">
+						{suggested.map((page) => (
+							<Pressable key={page.url} accessibilityRole="link" style={({ pressed }) => [styles.suggestion, pressed && { opacity: 0.5 }]} onPress={() => go(page.url)}>
+								<Text style={styles.suggestTitle} numberOfLines={1}>
+									{nameOf(page)}
+								</Text>
+								<Text style={styles.suggestDetail} numberOfLines={1}>
+									{(page.bookmark ? "Bookmark · " : "") + hostOf(page.url)}
+								</Text>
+							</Pressable>
+						))}
+					</View>
+				) : null}
 			</View>
 
 			<View style={[styles.toolbar, { paddingBottom: Math.max(insets.bottom, 6) }]}>
@@ -279,6 +315,15 @@ export function Browser({ session, relay, onSignOut }: { session: Session; relay
 					onSignOut={signOut}
 					onClose={() => setSheet(null)}
 				/>
+			) : sheet === "library" ? (
+				<LibrarySheet
+					bookmarks={bookmarks}
+					history={history}
+					onOpen={(url) => (setSheet(null), go(url))}
+					onRemoveBookmark={(url) => setBookmarks((b) => b.filter((x) => x.url !== url))}
+					onClearHistory={() => setHistory([])}
+					onClose={() => setSheet(null)}
+				/>
 			) : sheet === "downloads" ? (
 				<DownloadsSheet downloads={downloads} onClose={() => setSheet(null)} />
 			) : null}
@@ -294,6 +339,12 @@ const styles = StyleSheet.create({
 	progress: { height: 2, backgroundColor: colors.ink },
 	content: { flex: 1, backgroundColor: colors.bg },
 	blank: { flex: 1, alignItems: "center", justifyContent: "center", padding: 24 },
-	blankText: { fontSize: 15, color: colors.muted, textAlign: "center" },
+	blankText: { fontSize: 15, color: colors.muted, textAlign: "center", marginBottom: 12 },
+	shortcut: { alignSelf: "stretch", paddingVertical: 10, paddingHorizontal: 14, marginTop: 6, borderRadius: 10, backgroundColor: colors.surface },
+	shortcutText: { fontSize: 15, color: colors.text },
+	suggest: { position: "absolute", top: 0, left: 0, right: 0, backgroundColor: colors.surface, borderBottomWidth: StyleSheet.hairlineWidth, borderColor: colors.line },
+	suggestion: { paddingVertical: 10, paddingHorizontal: 14, borderTopWidth: StyleSheet.hairlineWidth, borderColor: colors.line },
+	suggestTitle: { fontSize: 15, color: colors.text },
+	suggestDetail: { marginTop: 2, fontSize: 13, color: colors.muted },
 	toolbar: { flexDirection: "row", justifyContent: "space-around", paddingTop: 6, backgroundColor: colors.toolbar, borderTopWidth: StyleSheet.hairlineWidth, borderColor: colors.line },
 });

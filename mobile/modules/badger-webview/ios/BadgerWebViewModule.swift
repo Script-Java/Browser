@@ -68,9 +68,10 @@ public class BadgerWebViewModule: Module {
     }.runOnQueue(.main)
 
     View(BadgerWebView.self) {
-      Events("onNavigationState", "onShouldStart", "onOpenWindow", "onDownload", "onPermissionRequest", "onMessage", "onLoadError")
+      Events("onNavigationState", "onShouldStart", "onOpenWindow", "onDownload", "onPermissionRequest", "onMessage", "onLoadError", "onSessionState")
 
       Prop("url") { (view: BadgerWebView, url: String) in view.url = url }
+      Prop("sessionState") { (view: BadgerWebView, state: String?) in view.sessionState = state }
       Prop("store") { (view: BadgerWebView, store: StoreRecord) in view.store = store }
       Prop("level") { (view: BadgerWebView, level: String) in view.level = level }
       Prop("lockdown") { (view: BadgerWebView, lockdown: Bool) in view.lockdown = lockdown }

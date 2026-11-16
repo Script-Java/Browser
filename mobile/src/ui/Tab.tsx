@@ -19,7 +19,8 @@ import type { Session } from "../server/types";
 import { effective, type Settings, type SiteSettings, type Sites, siteOf } from "../sites";
 import { colors, useAfterRender } from "./kit";
 
-export type TabInfo = { id: string; url: string; title: string; workspace: string; private?: boolean };
+/** `session`: WebKit's saved state of the tab, so it comes back with its back and forward */
+export type TabInfo = { id: string; url: string; title: string; workspace: string; private?: boolean; session?: string };
 
 type Handler<K extends keyof BadgerWebViewProps> = NonNullable<BadgerWebViewProps[K]>;
 
@@ -39,16 +40,18 @@ type Props = {
 	/** the private tabs' store, new each launch */
 	privateStore: string;
 	views: Map<string, RefObject<BadgerWebViewRef | null>>;
-	onState: (id: string, state: NavigationState) => void;
+	onState: (id: string, state: NavigationState, isPrivate: boolean) => void;
+	onSession: (id: string, state: string) => void;
 	onOpenWindow: (url: string, opener: TabInfo) => void;
 	onDownload: (download: Download) => void;
 	onSiteChange: (site: string, change: SiteSettings) => void;
 };
 
-export const Tab = memo(function Tab({ tab, visible, session, relay, settings, sites, rules, privateStore, views, onState, onOpenWindow, onDownload, onSiteChange }: Props) {
+export const Tab = memo(function Tab({ tab, visible, session, relay, settings, sites, rules, privateStore, views, onState, onSession, onOpenWindow, onDownload, onSiteChange }: Props) {
 	const view = useRef<BadgerWebViewRef>(null);
 	// the first address only: later ones go through view.load()
 	const [first] = useState(tab.url);
+	const [restore] = useState(tab.session);
 	// the site whose settings and scripts the tab has: the one it's opening or showing
 	const [site, setSite] = useState(() => siteOf(tab.url));
 	const [warning, setWarning] = useState<Warning | null>(null);
@@ -109,7 +112,7 @@ export const Tab = memo(function Tab({ tab, visible, session, relay, settings, s
 	};
 
 	const onNavigationState: Handler<"onNavigationState"> = ({ nativeEvent: state }) => {
-		onState(tab.id, state);
+		onState(tab.id, state, !!tab.private);
 		const showing = siteOf(state.url);
 		if (!showing || offered.current.has(showing) || of(showing).route !== "relay" || !isRobotCheck(state)) return;
 		offered.current.add(showing);
@@ -159,6 +162,8 @@ export const Tab = memo(function Tab({ tab, visible, session, relay, settings, s
 				ref={view}
 				style={StyleSheet.absoluteFill}
 				url={first}
+				sessionState={restore}
+				onSessionState={({ nativeEvent }) => onSession(tab.id, nativeEvent.state)}
 				store={store}
 				level={here.level}
 				lockdown={here.lockdown}
