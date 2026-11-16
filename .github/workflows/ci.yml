@@ -24,6 +24,13 @@ jobs:
       - run: pnpm -C app test
       - run: pnpm -C app audit --audit-level high
       - run: docker build -t browser-ios .
+      # The desktop app ships its own Chromium: fail once it's two majors behind
+      - name: Electron is current
+        run: |
+          latest=$(npm view electron dist-tags.latest)
+          ours=$(node -p "require('./desktop/package.json').devDependencies.electron")
+          echo "electron $ours, latest $latest"
+          [ $(( ${latest%%.*} - ${ours%%.*} )) -le 1 ]
 
   # Security behaviour in a real browser through the real proxy (app/e2e).
   # The proxy reaches real sites, so this needs the internet.
