@@ -9,8 +9,7 @@ test("every threat list counts, each refetched only when it changed, with the op
 	const lists = {
 		"https://malware-filter.gitlab.io/malware-filter/phishing-filter-hosts.txt": "0.0.0.0 fish.example\n# note\n",
 		"https://phishing.army/download/phishing_army_blocklist.txt": "army.example\nboth.example\n",
-		"https://malware-filter.gitlab.io/malware-filter/urlhaus-filter-hosts-online.txt": "0.0.0.0 bad.example\n",
-		"https://urlhaus.abuse.ch/downloads/hostfile/": "127.0.0.1\tlive.example\n127.0.0.1\tboth.example\n",
+		"https://malware-filter.gitlab.io/malware-filter/urlhaus-filter-hosts-online.txt": "0.0.0.0 bad.example\n0.0.0.0 both.example\n",
 	};
 	const asked = [];
 	const fetchList = async ([url], since) => {
@@ -29,14 +28,14 @@ test("every threat list counts, each refetched only when it changed, with the op
 	assert.equal(filters.threat("fish.example"), "phishing");
 	assert.equal(filters.threat("army.example"), "phishing");
 	assert.equal(filters.threat("bad.example"), "malware");
-	assert.equal(filters.threat("www.live.example"), "malware");
+	assert.equal(filters.threat("www.bad.example"), "malware");
 	// on a phishing list and a malware list: the phishing warning
 	assert.equal(filters.threat("both.example"), "phishing");
 	assert.equal(filters.threat("fine.example"), null);
 	// the next round asks with what each list said last time
 	asked.length = 0;
 	await filters.buildThreats();
-	assert.equal(asked.length, 4);
+	assert.equal(asked.length, 3);
 	assert.ok(asked.every(([, since]) => since));
-	assert.equal(filters.threat("live.example"), "malware");
+	assert.equal(filters.threat("bad.example"), "malware");
 });

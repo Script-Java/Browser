@@ -38,7 +38,6 @@ None of these are in the repository; the server fetches them (`filters.js`).
 | [Brave's lists](https://github.com/brave/adblock-lists): first-party CNAME trackers, debounce rules, query filter | Cloaked trackers, bounce tracking, tracking parameters | MPL-2.0 |
 | [AdGuard's CNAME trackers](https://github.com/AdguardTeam/cname-trackers) | What cloaked trackers point to | MIT |
 | [malware-filter](https://gitlab.com/malware-filter) (phishing, URLhaus) | Phishing and malware warnings | CC0 / MIT |
-| [URLhaus](https://urlhaus.abuse.ch/)'s host file | Malware warnings, rebuilt every five minutes | [abuse.ch's terms](https://urlhaus.abuse.ch/api/) (CC0) |
 | [Phishing Army](https://phishing.army/) | Phishing warnings | CC BY-NC 4.0: non-commercial use only; a commercial deploy sets `PHISHING_ARMY=off` |
 | [Chrome's list of Certificate Transparency logs](https://www.gstatic.com/ct/log_list/v3/log_list.json) | Which logs a certificate's timestamps may come from (`certs.js`) | Published by Google for anyone checking CT |
 | [Google Web Risk](https://cloud.google.com/web-risk) (optional, `WEB_RISK_API_KEY`) | Fresher threat checks | Google's terms (paid) |

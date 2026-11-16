@@ -106,8 +106,6 @@ const THREAT_LISTS = [
 		"https://malware-filter.gitlab.io/malware-filter/urlhaus-filter-hosts-online.txt",
 		"https://curbengh.github.io/urlhaus-filter/urlhaus-filter-hosts-online.txt",
 	],
-	// URLhaus itself: rebuilt every five minutes
-	["malware", "https://urlhaus.abuse.ch/downloads/hostfile/"],
 ];
 
 // The operator's own, as phishing (PHISHING_HOSTS, comma-separated): a scam

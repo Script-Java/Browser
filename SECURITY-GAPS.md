@@ -21,7 +21,7 @@ Measured against Chrome, Safari, Firefox and Brave, for one goal: nothing about 
 - [x] **No Certificate Transparency.** The server checks the signed timestamps (SCTs) in a site's certificate against the logs Chrome trusts (its list, daily): valid ones from two logs of two operators, as Chrome asks. A certificate an authority vouches for without them gets a warning with no way past it. Checked against 40 of the biggest sites: all pass. (`certs.test.js`)
 - [x] **No warning for addresses made to look like a well-known site's.** Look-alike letters (`g00gle.com`, a Cyrillic `а`), a one-letter slip (`paypall.com`) or the real name inside another address (`paypal.com.account-check.net`) get "Is this the site you meant?", with a button to the real one. (`lookalike.test.js`, `security.spec.js`)
 - [x] **Saved passwords weren't checked against breaches.** A password that turns up in Have I Been Pwned's list is flagged when it's saved and in the list of passwords. Only five characters of its SHA-1 leave the device, through the server. (`logins.spec.js`)
-- [x] **Threat lists:** URLhaus's own list (rebuilt every five minutes) and Phishing Army besides malware-filter's, the operator's own (`PHISHING_HOSTS`), asked every 15 minutes. (`filters.test.js`)
+- [x] **Threat lists:** Phishing Army besides malware-filter's, the operator's own (`PHISHING_HOSTS`), asked every 15 minutes. (`filters.test.js`)
 
 ### Privacy
 
