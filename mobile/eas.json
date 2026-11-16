@@ -1,0 +1,15 @@
+{
+	"build": {
+		"simulator": {
+			"developmentClient": true,
+			"ios": { "simulator": true }
+		},
+		"development": {
+			"developmentClient": true,
+			"distribution": "internal"
+		},
+		"production": {
+			"env": { "BADGER_BROWSER_ENTITLEMENTS": "1" }
+		}
+	}
+}
