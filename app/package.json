@@ -35,6 +35,7 @@
 		"@mercuryworkshop/wisp-js": "0.5.0",
 		"@mozilla/readability": "^0.6.0",
 		"@peculiar/x509": "^2.1.0",
+		"adblock-rs": "0.13.5",
 		"dompurify": "^3.4.16",
 		"esbuild": "^0.28.2",
 		"express": "^5.2.1",
@@ -46,6 +47,7 @@
 	},
 	"pnpm": {
 		"onlyBuiltDependencies": [
+			"adblock-rs",
 			"esbuild"
 		]
 	}

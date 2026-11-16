@@ -340,6 +340,11 @@ app.get("/api/challenge", (req, res) => {
 	res.setHeader("Cache-Control", "no-store");
 	res.json({ challenge: auth.newChallenge(), bits: CHALLENGE_BITS });
 });
+// How to sign in, for the iOS app (mobile/src/server), which has no login page to read it from.
+app.get("/api/access", (req, res) => {
+	res.setHeader("Cache-Control", "no-store");
+	res.json({ mode: auth.mode });
+});
 
 const escapeHtml = (text) =>
 	text.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
@@ -444,6 +449,15 @@ app.get("/filters/engine.bin", serveEngine(() => filters.engine));
 app.get("/filters/notices.bin", serveEngine(() => filters.notices));
 // Brave's navigation-tracking rules (privacyrules.js)
 app.get("/filters/privacy.json", serveEngine(() => filters.privacy, "application/json"));
+// The ad lists as Safari content-blocker rules, for the iOS app: the index,
+// then each list by the id the index names.
+app.get("/filters/content-rules.json", serveEngine(() => filters.contentRules?.index, "application/json"));
+app.get("/filters/content-rules/:id.json", (req, res, next) => {
+	const list = filters.contentRules?.lists.get(req.params.id);
+	// an id from before a rebuild: the app asks for the index again
+	if (filters.contentRules && !list) return res.status(404).end();
+	serveEngine(() => list, "application/json")(req, res, next);
+});
 
 app.get("/filters/status", (req, res) => {
 	res.setHeader("Cache-Control", "no-store");

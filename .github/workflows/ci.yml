@@ -49,6 +49,8 @@ jobs:
           node-version: 24
       - run: pnpm -C mobile install --frozen-lockfile
       - run: pnpm -C mobile typecheck
+      # the relay's SOCKS5 and wisp byte layouts
+      - run: cd mobile/modules/badger-relay && swiftc ios/RelayProtocol.swift test/main.swift -o "$RUNNER_TEMP/relay-test" && "$RUNNER_TEMP/relay-test"
       - run: cd mobile && npx expo prebuild --platform ios
       - run: >-
           xcodebuild -quiet -workspace mobile/ios/Badger.xcworkspace -scheme Badger

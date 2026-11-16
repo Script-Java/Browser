@@ -2,5 +2,7 @@
   "extends": "expo/tsconfig.base",
   "compilerOptions": {
     "strict": true
-  }
+  },
+  // tests run in Node: their Node types mustn't make Node-only code look fine in the app
+  "exclude": ["node_modules", "**/*.test.ts"]
 }

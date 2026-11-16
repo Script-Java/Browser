@@ -76,7 +76,8 @@ export type BadgerWebViewProps = {
 	fraudWarnings: boolean;
 	userAgent?: string;
 	onNavigationState?: Event<NavigationState>;
-	/** without a handler, every navigation goes ahead */
+	/** main-frame navigations wait for onShouldStart's answer; off, every navigation goes ahead */
+	askBeforeNavigating?: boolean;
 	onShouldStart?: Event<ShouldStart>;
 	/** window.open and target=_blank: the app opens a tab */
 	onOpenWindow?: Event<{ url: string }>;

@@ -23,6 +23,16 @@ Two open-source iOS browsers already do most of this, so copy their approach bef
 
 **The honest limit:** on iOS, every browser runs Apple's WebKit (outside the EU). So 5 in security means "everything Safari has, plus what Safari doesn't do by default", not a stronger engine. And no browser gets 5 in privacy and 5 in functionality in one mode at the same time. Tor Browser scores 5 for privacy and 2 for functionality. The plan gets there with modes per tab and per site (Decision 1).
 
+## Status (2026-11-16)
+
+The native app is `mobile/`: Expo (React Native) for the screens, with two Swift modules: `badger-webview` (one `WKWebView` per tab) and `badger-relay` (SOCKS5 on the phone to the server's wisp). Linux can't compile it; CI's `ios` job builds it on macOS. **None of it has run on a phone or simulator yet.**
+
+Written, not yet run: 6.1–6.4, 6.7, 7.2, 7.4, 7.5, 8.1, 8.3, 9.1. Also the server's content rules (`/filters/content-rules.json`, Brave's adblock-rs) and native sign-in, all tested against the real server. Changed from the plan:
+- **6.5:** passwords and passkeys are iOS's own (Passwords app, AutoFill, iCloud Keychain), which `WKWebView` offers once Apple grants the browser entitlements. The app keeps no vault of its own.
+- **8.3:** passkeys are off on relay sites unless allowed per site.
+
+Not started: 6.6 and 9.3 (checks on a device), 6.8 (Apple account), 7.1, 7.3, 7.6, 7.7, 8.2, 8.4, 8.5's letterboxing, 8.6, 9.4, 9.5, and sync.
+
 ## Phase 0: housekeeping (done 2026-11-16)
 
 | # | Item | Where | Size |

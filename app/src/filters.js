@@ -1,4 +1,5 @@
-// Filter lists: the ad/tracker engine (shipped to the service worker), Brave's
+// Filter lists: the ad/tracker engine (shipped to the service worker), the
+// same lists as Safari content-blocker rules (for the iOS app), Brave's
 // navigation-tracking rules (privacyrules.js, shipped to the worker too) and
 // the malware/phishing host lists (checked by the server on every page load).
 // The ad lists are rebuilt from upstream every REFRESH_HOURS, the threat lists
@@ -11,6 +12,7 @@ import { get } from "node:https";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 import { FiltersEngine } from "@ghostery/adblocker";
+import adblockRust from "adblock-rs";
 import { compileRules } from "./privacyrules.js";
 
 // Ghostery mirrors the same lists; used when an upstream host is down.
@@ -88,6 +90,34 @@ const pack = (raw) => ({
 	gzip: gzipSync(raw),
 	etag: `"${createHash("sha256").update(raw).digest("base64url").slice(0, 24)}"`,
 });
+
+// WebKit compiles at most this many rules into one WKContentRuleList.
+export const MAX_CONTENT_RULES = 150_000;
+
+/**
+ * Filter lists as Safari content-blocker rule lists, each at most `max`
+ * rules, by Brave's converter (the one its iOS app uses). Rules it can't
+ * express (scriptlets, procedural hiding) are left out. An exception only
+ * undoes the rules before it in its own list, so every list ends with all of
+ * them.
+ * @param {string[]} texts
+ * @returns {object[][]}
+ */
+export function contentRuleLists(texts, max = MAX_CONTENT_RULES) {
+	// debug mode: the converter needs each rule's own text
+	const set = new adblockRust.FilterSet(true);
+	for (const text of texts) set.addFilters(text);
+	const rules = set.intoContentBlocking()?.contentBlockingRules || [];
+	// the converter puts the exceptions last
+	let first = rules.findIndex((rule) => rule.action.type === "ignore-previous-rules");
+	if (first === -1) first = rules.length;
+	const exceptions = rules.slice(first);
+	const room = max - exceptions.length;
+	if (room < 1) throw new Error(`${exceptions.length} exceptions leave no room in a list of ${max}`);
+	const lists = [];
+	for (let i = 0; i < first; i += room) lists.push([...rules.slice(i, Math.min(i + room, first)), ...exceptions]);
+	return lists;
+}
 
 // Scriptlets (+js(...) rules) in the format the Ghostery engine expects.
 const RESOURCES = [`${MIRROR}/ublock-origin/resources.json`];
@@ -207,6 +237,7 @@ export class Filters {
 		this.engine = null; // { raw, gzip, etag }
 		this.notices = null; // the cookie-notice engine, the same way
 		this.privacy = null; // Brave's navigation-tracking rules, as JSON the same way
+		this.contentRules = null; // { index, lists: Map(id -> list) }, each packed the same way
 		this.threats = new Map(); // host -> "phishing" | "malware"
 		// per threat list: { etag, modified, hosts } from its last download
 		this.threatSources = {};
@@ -249,8 +280,14 @@ export class Filters {
 		// (a cache from before the cookie-notice lists or the privacy rules
 		// has none: fetch them once)
 		const fresh = Date.now() - this.updatedAt < this.refreshMs;
-		if (fresh && (this.notices || this.noticesTried) && (this.privacy || this.privacyTried)) return;
-		this.noticesTried = this.privacyTried = true;
+		if (
+			fresh &&
+			(this.notices || this.noticesTried) &&
+			(this.privacy || this.privacyTried) &&
+			(this.contentRules || this.contentRulesTried)
+		)
+			return;
+		this.noticesTried = this.privacyTried = this.contentRulesTried = true;
 		console.log("filters: downloading lists");
 		const started = Date.now();
 		const optional = (urls) =>
@@ -300,6 +337,16 @@ export class Filters {
 			} catch (err) {
 				console.warn("filters: skipping Brave's rules:", err.message);
 			}
+		}
+
+		// converted here, once per rebuild, so phones only compile them; a
+		// failure keeps the last copy
+		// shortcut: holds up every connection for ~2 s (after the engine's own
+		// ~3 s parse); move both to a worker thread if rebuilds get frequent
+		try {
+			this.setContentRules(contentRuleLists(loaded));
+		} catch (err) {
+			console.warn("filters: skipping content rules:", err.message);
 		}
 
 		this.setEngine(raw);
@@ -367,6 +414,23 @@ export class Filters {
 		this.engine = pack(raw);
 	}
 
+	/** @param {object[][]} lists */
+	setContentRules(lists) {
+		// a list is known by its hash: one fetched after a rebuild 404s rather than mixing versions
+		const packed = new Map(
+			lists.map((rules) => {
+				const list = pack(Buffer.from(JSON.stringify(rules)));
+				return [list.etag.slice(1, -1), list];
+			})
+		);
+		const ids = [...packed.keys()];
+		const version = createHash("sha256").update(ids.join()).digest("base64url").slice(0, 24);
+		this.contentRules = {
+			index: pack(Buffer.from(JSON.stringify({ version, lists: ids }))),
+			lists: packed,
+		};
+	}
+
 	async saveCache() {
 		await mkdir(this.cacheDir, { recursive: true });
 		const meta = {
@@ -383,6 +447,8 @@ export class Filters {
 		if (this.engine) await write("engine.bin", this.engine.raw);
 		if (this.notices) await write("notices.bin", this.notices.raw);
 		if (this.privacy) await write("privacy.json", this.privacy.raw);
+		if (this.contentRules)
+			await write("content-rules.json", `[${[...this.contentRules.lists.values()].map((list) => list.raw).join()}]`);
 		await write("meta.json", JSON.stringify(meta));
 	}
 
@@ -407,6 +473,11 @@ export class Filters {
 			this.privacy = pack(privacy);
 		} catch {
 			// none cached yet: build() fetches the rules
+		}
+		try {
+			this.setContentRules(JSON.parse(await readFile(join(this.cacheDir, "content-rules.json"), "utf8")));
+		} catch {
+			// none cached yet: build() makes them
 		}
 		// (an older cache kept them by kind: start() fetches them again at once)
 		this.threatSources = meta.threatSources || {};

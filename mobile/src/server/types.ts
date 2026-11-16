@@ -19,11 +19,14 @@ export type Session = {
 	signedIn(): Promise<boolean>;
 	/** password mode needs the password; challenge mode solves the puzzle itself */
 	signIn(password?: string): Promise<void>;
+	/** the server forgets this device's sign-in cookie */
+	signOut(): Promise<void>;
 	/** wss://…/wisp/ for the relay */
 	wispUrl: string;
 	/** the server's phishing and malware lists (/api/nav); only asked for relay sites, which the server sees anyway */
 	threat(host: string): Promise<Threat>;
-	contentRules(): Promise<ContentRules>;
+	/** with `since`, the version the app already has: no lists when it's still current */
+	contentRules(since?: string): Promise<ContentRules>;
 };
 
 export type CreateSession = (origin: string) => Session;

@@ -21,6 +21,7 @@ The fingerprinting protection (`client/fingerprint.js`) answers the battery and 
 | Part | What it does here | License |
 | --- | --- | --- |
 | [wisp-js](https://github.com/MercuryWorkshop/wisp-js) | The proxy's connections out | AGPL-3.0 |
+| [adblock-rs](https://github.com/brave/adblock-rust) (Brave's, compiled from source at install) | Turns the ad lists into Safari content-blocker rules for the iOS app (`filters.js`) | MPL-2.0 |
 | [@peculiar/x509](https://github.com/PeculiarVentures/x509), [reflect-metadata](https://github.com/rbuckton/reflect-metadata) | Reads certificates for the viewer and the revocation check (`certs.js`) | MIT, Apache-2.0 |
 | [socks](https://github.com/JoshGlazebrook/socks), [socks-proxy-agent](https://github.com/TooTallNate/proxy-agents) | Connections through Tor (`tor.js`) | MIT |
 | [Tor](https://www.torproject.org/) | Tor tabs (installed in the Docker image) | BSD-3-Clause |

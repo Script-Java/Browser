@@ -1,20 +1,18 @@
-import { StatusBar } from 'expo-status-bar';
-import { StyleSheet, Text, View } from 'react-native';
+import { StatusBar } from "expo-status-bar";
+import { useState } from "react";
+import { SafeAreaProvider } from "react-native-safe-area-context";
+
+import type { Relay } from "./src/relay/types";
+import type { Session } from "./src/server/types";
+import { Browser } from "./src/ui/Browser";
+import { FirstRun } from "./src/ui/FirstRun";
 
 export default function App() {
-  return (
-    <View style={styles.container}>
-      <Text>Open up App.tsx to start working on your app!</Text>
-      <StatusBar style="auto" />
-    </View>
-  );
+	const [ready, setReady] = useState<{ session: Session; relay: Relay } | null>(null);
+	return (
+		<SafeAreaProvider>
+			{ready ? <Browser {...ready} onSignOut={() => setReady(null)} /> : <FirstRun onReady={setReady} />}
+			<StatusBar style="dark" />
+		</SafeAreaProvider>
+	);
 }
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#fff',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-});
