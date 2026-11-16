@@ -23,6 +23,9 @@ jobs:
       - run: pnpm -C app lint
       - run: pnpm -C app test
       - run: pnpm -C app audit --audit-level high
+      # the iOS app's own logic, some of it against this server
+      - run: pnpm -C mobile install --frozen-lockfile
+      - run: pnpm -C mobile test
       - run: docker build -t browser-ios .
       # The desktop app ships its own Chromium: fail once it's two majors behind
       - name: Electron is current
@@ -31,6 +34,26 @@ jobs:
           ours=$(node -p "require('./desktop/package.json').devDependencies.electron")
           echo "electron $ours, latest $latest"
           [ $(( ${latest%%.*} - ${ours%%.*} )) -le 1 ]
+
+  # The native iOS app (mobile/): its Swift only compiles on macOS.
+  ios:
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.28.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: pnpm -C mobile install --frozen-lockfile
+      - run: pnpm -C mobile typecheck
+      - run: cd mobile && npx expo prebuild --platform ios
+      - run: >-
+          xcodebuild -quiet -workspace mobile/ios/Badger.xcworkspace -scheme Badger
+          -configuration Debug -sdk iphonesimulator -destination "generic/platform=iOS Simulator"
+          CODE_SIGNING_ALLOWED=NO build
 
   # Security behaviour in a real browser through the real proxy (app/e2e).
   # The proxy reaches real sites, so this needs the internet.
