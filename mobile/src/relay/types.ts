@@ -11,7 +11,7 @@ export type Relay = {
 	/**
 	 * How connections to a site go: `site` is a registrable domain
 	 * (example.co.uk) and covers its subdomains. Unlisted sites take the default.
-	 * Applies to new connections.
+	 * Its connections open on the other route close, so WebKit reopens them on this one.
 	 */
 	setRoute(site: string, route: Route | null): void;
 	close(): Promise<void>;

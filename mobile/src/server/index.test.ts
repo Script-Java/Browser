@@ -145,6 +145,8 @@ describe("off mode (local development)", () => {
 		assert.equal(await session.threat("www.scam.example"), "phishing");
 		assert.equal(await session.threat("fine.example"), null);
 
+		assert.deepEqual(await session.navRules(), { debounce: [], params: [] });
+
 		const rules = await session.contentRules();
 		assert.match(rules.version, /^[\w-]{24}$/);
 		assert.equal(rules.lists.length, 1);

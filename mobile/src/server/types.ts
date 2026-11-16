@@ -27,6 +27,8 @@ export type Session = {
 	threat(host: string): Promise<Threat>;
 	/** with `since`, the version the app already has: no lists when it's still current */
 	contentRules(since?: string): Promise<ContentRules>;
+	/** Brave's navigation-tracking rules, compiled by the server (app/src/privacyrules.js), for app/src/sw/navrules.js */
+	navRules(): Promise<unknown>;
 };
 
 export type CreateSession = (origin: string) => Session;

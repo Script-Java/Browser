@@ -57,6 +57,9 @@ export function createSession(
 		async signOut() {
 			await request("/logout", { method: "POST", redirect: "manual" });
 		},
+		async navRules() {
+			return (await get("/filters/privacy.json")).json();
+		},
 		async threat(host): Promise<Threat> {
 			return (await (await get("/api/nav", { "x-bios-host": host })).json()).threat;
 		},

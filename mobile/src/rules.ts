@@ -4,6 +4,7 @@
 import { useEffect, useState } from "react";
 import { AppState } from "react-native";
 
+import { compileNavRules } from "../../app/src/sw/navrules.js";
 import BadgerWebViewModule from "../modules/badger-webview";
 import type { Session } from "./server/types";
 import { readJson, writeJson } from "./storage";
@@ -49,4 +50,32 @@ export function useContentRules(session: Session): string[] {
 	}, [session]);
 
 	return ids;
+}
+
+export type NavRules = ReturnType<typeof compileNavRules>;
+
+/** Brave's navigation-tracking rules (app/src/sw/navrules.js), from the server; the last ones kept for a start without it. */
+export function useNavRules(session: Session): NavRules {
+	const [rules, setRules] = useState(() => compileNavRules(readJson("navrules.json", {})));
+
+	useEffect(() => {
+		let checked = 0;
+		const update = async () => {
+			if (Date.now() - checked < DAY) return;
+			checked = Date.now();
+			try {
+				const raw = await session.navRules();
+				writeJson("navrules.json", raw);
+				setRules(compileNavRules(raw));
+			} catch (err) {
+				checked = 0; // again at the next chance
+				console.warn("navigation rules:", err);
+			}
+		};
+		update();
+		const foreground = AppState.addEventListener("change", (state) => state === "active" && update());
+		return () => foreground.remove();
+	}, [session]);
+
+	return rules;
 }

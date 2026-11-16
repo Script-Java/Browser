@@ -31,11 +31,11 @@ public class BadgerRelayModule: Module {
     }.runOnQueue(Relay.queue)
 
     AsyncFunction("setRoute") { (site: String, route: Route?) in
-      self.relay?.routes[site.lowercased()] = route
+      self.relay?.setRoute(site, route)
     }.runOnQueue(Relay.queue)
 
     AsyncFunction("setDefaultRoute") { (route: Route) in
-      self.relay?.defaultRoute = route
+      self.relay?.setDefaultRoute(route)
     }.runOnQueue(Relay.queue)
 
     AsyncFunction("stop") {

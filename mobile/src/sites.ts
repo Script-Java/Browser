@@ -6,8 +6,9 @@ import type { Engine } from "./address";
 import type { Route } from "./relay/types";
 
 /** The app's own settings; a site's own choices go over `level`. */
-export type Settings = { search: Engine; level: Level; consent: boolean };
-export const DEFAULT_SETTINGS: Settings = { search: "google", level: "standard", consent: true };
+/** `httpsOnly`: as the old app's HTTPS-Only, on by default */
+export type Settings = { search: Engine; level: Level; consent: boolean; httpsOnly: boolean };
+export const DEFAULT_SETTINGS: Settings = { search: "google", level: "standard", consent: true, httpsOnly: true };
 
 export type SiteSettings = { route?: Route; blocking?: boolean; level?: Level; lockdown?: boolean; passkeys?: boolean };
 export type Sites = Record<string, SiteSettings>;

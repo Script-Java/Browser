@@ -5,7 +5,7 @@ import type { Route } from "../../../src/relay/types";
 declare class BadgerRelayModule extends NativeModule<Record<string, never>> {
 	/** Listens on 127.0.0.1: the same port all launch, new credentials each start. A second start stops the first. */
 	start(options: { wispUrl: string; defaultRoute: Route }): Promise<{ port: number; username: string; password: string }>;
-	/** `site` covers its subdomains; null removes it. Applies to new connections. */
+	/** `site` covers its subdomains; null removes it. Its connections open on the other route close, and reopen on this one. */
 	setRoute(site: string, route: Route | null): Promise<void>;
 	setDefaultRoute(route: Route): Promise<void>;
 	stop(): Promise<void>;

@@ -28,6 +28,11 @@ export const WARNINGS = {
 		text: "Someone may be pretending to be this site, so it wasn't opened.",
 		go: undefined,
 	},
+	http: {
+		title: "This site isn't secure",
+		text: "It doesn't offer a secure (https) connection. What you see and send there travels unencrypted, so others along the way could read or change it. Don't enter passwords or personal details.",
+		go: "Continue (not secure)",
+	},
 	unreachable: {
 		title: "Couldn't open this page",
 		text: "The site didn't answer. It may be down, the address may be wrong, or the connection dropped.",

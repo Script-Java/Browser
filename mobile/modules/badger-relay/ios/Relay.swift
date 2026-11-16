@@ -15,8 +15,12 @@ final class Relay {
   /// Per launch too, for the same reason: a second start (another server) mustn't strand open tabs.
   private static let credentials = (username: secret(), password: secret())
   let username = Relay.credentials.username, password = Relay.credentials.password
-  var defaultRoute: Route
-  var routes: [String: Route] = [:]
+  /// Change these through setRoute and setDefaultRoute, which close what's open on the old route.
+  private(set) var defaultRoute: Route
+  private(set) var routes: [String: Route] = [:]
+  /// Open connections and the route each took. WebKit keeps connections for minutes, so a
+  /// site moved from Direct to Relay would go on seeing the phone's address through them.
+  private var open: [(local: NWConnection, host: String, route: Route)] = []
   private let wisp: WispConnection
   private var listener: NWListener?
   private var ready: ((Result<UInt16, Error>) -> Void)?
@@ -88,7 +92,10 @@ final class Relay {
         case .more: read()
         case .close: Relay.finish(local)
         case .connect(let host, let port):
-          if (route(for: host, in: self.routes) ?? self.defaultRoute) == .direct {
+          let chosen = self.routeNow(host)
+          self.open.removeAll { Relay.ended($0.local) }
+          self.open.append((local, host, chosen))
+          if chosen == .direct {
             Relay.direct(local, host, port, early: socks.rest)
           } else {
             self.wisp.open(local, host, port, early: socks.rest)
@@ -98,6 +105,37 @@ final class Relay {
     }
     local.start(queue: Relay.queue)
     read()
+  }
+
+  func setRoute(_ site: String, _ route: Route?) {
+    routes[site.lowercased()] = route
+    closeRerouted()
+  }
+
+  func setDefaultRoute(_ route: Route) {
+    defaultRoute = route
+    closeRerouted()
+  }
+
+  private func routeNow(_ host: String) -> Route {
+    route(for: host, in: routes) ?? defaultRoute
+  }
+
+  /// Closes the connections whose site now takes the other route; WebKit opens new ones, on it.
+  private func closeRerouted() {
+    open.removeAll { entry in
+      if Relay.ended(entry.local) { return true }
+      if routeNow(entry.host) == entry.route { return false }
+      entry.local.cancel()
+      return true
+    }
+  }
+
+  private static func ended(_ connection: NWConnection) -> Bool {
+    switch connection.state {
+    case .cancelled, .failed: return true
+    default: return false
+    }
   }
 
   private static func direct(_ local: NWConnection, _ host: String, _ port: UInt16, early: [UInt8]) {

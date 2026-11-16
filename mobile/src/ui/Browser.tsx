@@ -9,7 +9,7 @@ import BadgerWebViewModule, { type BadgerWebViewRef, type Download, type Navigat
 import { addressFor, hostOf } from "../address";
 import { type Entry, isBookmarked, nameOf, type Page, recordVisit, shortcuts, suggestions, toggleBookmark } from "../library";
 import type { Relay } from "../relay/types";
-import { useContentRules } from "../rules";
+import { useContentRules, useNavRules } from "../rules";
 import type { Session } from "../server/types";
 import { DEFAULT_SETTINGS, effective, type Settings, type SiteSettings, type Sites, siteOf } from "../sites";
 import { readJson, usePersisted, writeJson } from "../storage";
@@ -52,6 +52,7 @@ export function Browser({ session, relay, onSignOut }: { session: Session; relay
 	const addressBar = useRef<ComponentRef<typeof TextInput>>(null);
 	const shieldChanged = useRef(false);
 	const rules = useContentRules(session);
+	const navRules = useNavRules(session);
 
 	const current = tabs.find((t) => t.id === active && t.workspace === workspace) ?? null;
 	const nav = current ? navs[current.id] : undefined;
@@ -59,6 +60,19 @@ export function Browser({ session, relay, onSignOut }: { session: Session; relay
 	const shown = recent.slice(0, MOUNTED).flatMap((id) => tabs.filter((t) => t.id === id && t.url));
 
 	useEffect(() => writeJson("tabs.json", { tabs: tabs.filter((t) => !t.private), active, workspace }), [tabs, active, workspace]);
+
+	// the private tabs' cookies and storage go with the last of them, as in the old app
+	const hasPrivate = tabs.some((t) => t.private);
+	const hadPrivate = useRef(hasPrivate);
+	useEffect(() => {
+		if (hadPrivate.current && !hasPrivate)
+			later(() =>
+				BadgerWebViewModule.clearStore({ id: PRIVATE_STORE, persistent: false, proxy: relay.proxy })
+					.then(() => BadgerWebViewModule.removeStore(PRIVATE_STORE))
+					.catch((err) => console.warn("private tabs:", err))
+			);
+		hadPrivate.current = hasPrivate;
+	}, [hasPrivate]); // eslint-disable-line react-hooks/exhaustive-deps
 
 	// the relay learns the sites' own routes once; changes go through changeSite
 	useEffect(() => {
@@ -226,6 +240,7 @@ export function Browser({ session, relay, onSignOut }: { session: Session; relay
 						settings={settings}
 						sites={sites}
 						rules={rules}
+						navRules={navRules}
 						privateStore={PRIVATE_STORE}
 						views={views}
 						onState={onState}

@@ -41,6 +41,11 @@ export function SettingsSheet({ settings, server, onChange, onSignOut, onClose }
 
 			<Heading>Privacy</Heading>
 			<Row
+				label="HTTPS-Only"
+				note="Opens sites over a secure connection, and warns before one that has none"
+				right={<Switch accessibilityLabel="HTTPS-Only" value={settings.httpsOnly} onValueChange={(httpsOnly) => onChange({ httpsOnly })} />}
+			/>
+			<Row
 				label="Answer cookie notices"
 				note="Says no to tracking for you, where the notice offers that, and hides it"
 				right={<Switch accessibilityLabel="Answer cookie notices" value={settings.consent} onValueChange={(consent) => onChange({ consent })} />}

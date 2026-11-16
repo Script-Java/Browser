@@ -14,6 +14,7 @@ import { DEFAULT_SETTINGS } from "../settings.js";
 import { PREFIX, decodeUrl, encodeUrl } from "../codec.js";
 import { expiresFromMaxAge } from "./cookies.js";
 import { lookalikeOf } from "./lookalike.js";
+import { bounceTarget, compileNavRules, withoutTracking } from "./navrules.js";
 
 const FILTER_CACHE = "bios-filters";
 const ENGINE_RECHECK_MS = 6 * 3_600_000;
@@ -461,24 +462,11 @@ export function createShield(scramjet, configStored) {
 	const PRIVACY_URL = ENGINE_URL.replace("engine.bin", "privacy.json");
 	let privacyRules = { debounce: [], params: [] };
 	let privacyLoad = null;
-	const compile = (list) => (list || []).map((source) => new RegExp(source, "i"));
 	function loadPrivacyRules() {
 		privacyLoad ||= fetch(PRIVACY_URL, { credentials: "include", cache: "no-cache" })
 			.then(async (res) => {
 				if (!res.ok) throw new Error(`privacy rules HTTP ${res.status}`);
-				const rules = await res.json();
-				privacyRules = {
-					debounce: (rules.debounce || []).map((rule) => ({
-						...rule,
-						match: compile(rule.match),
-						exclude: compile(rule.exclude),
-					})),
-					params: (rules.params || []).map((rule) => ({
-						match: rule.match && compile(rule.match),
-						exclude: compile(rule.exclude),
-						params: new Set(rule.params),
-					})),
-				};
+				privacyRules = compileNavRules(await res.json());
 				setTimeout(() => (privacyLoad = null), ENGINE_RECHECK_MS);
 			})
 			.catch((err) => {
@@ -1306,86 +1294,6 @@ poll();
 		);
 	};
 
-	// Query parameters that only exist to follow a person from one site to
-	// the next: click ids and campaign tags (Brave's and DuckDuckGo's lists).
-	const TRACKING_PARAMS = new Set(
-		(
-			"fbclid gclid gclsrc dclid gbraid wbraid msclkid twclid ttclid yclid ymclid ysclid igshid " +
-			"srsltid li_fat_id irclickid rb_clickid unicorn_click_id wickedid s_cid mc_eid mkt_tok " +
-			"_hsenc _hsmi __hssc __hstc __hsfp hsctatracking _openstat __s _gl _kx _bhlid " +
-			"oly_anon_id oly_enc_id vero_id vero_conv ml_subscriber ml_subscriber_hash " +
-			"fb_action_ids fb_comment_id guce_referrer guce_referrer_sig bsft_clkid bsft_uid " +
-			"sc_customer sc_eh sc_uid ss_email_id et_rid vgo_ee mtm_cid pk_cid " +
-			"_branch_match_id _branch_referrer at_recipient_id at_recipient_list"
-		).split(" ")
-	);
-
-	// Brave's rules that apply to `target`: every address's, and its site's.
-	const appliesTo = (rule, href) =>
-		(!rule.match || rule.match.some((re) => re.test(href))) && !rule.exclude.some((re) => re.test(href));
-
-	// `target` without them, or null when it has none. The rest of the query
-	// is left exactly as written (some sites sign theirs).
-	function withoutTracking(target) {
-		if (!target.search) return null;
-		const extra = privacyRules.params.filter((rule) => appliesTo(rule, target.href));
-		const parts = target.search.slice(1).split("&");
-		const kept = parts.filter((part) => {
-			let name = part.split("=")[0];
-			try {
-				name = decodeURIComponent(name.replace(/\+/g, " "));
-			} catch {
-				// not valid percent-encoding: compare it as written
-			}
-			name = name.toLowerCase();
-			return !TRACKING_PARAMS.has(name) && !name.startsWith("utm_") && !extra.some((rule) => rule.params.has(name));
-		});
-		if (kept.length === parts.length) return null;
-		const clean = new URL(target.href);
-		clean.search = kept.join("&");
-		return clean;
-	}
-
-	// Where a bounce-tracking address leads (Brave's debounce rules), or null.
-	// Only to another site: a hop within one site may be its own sign-in.
-	function bounceTarget(target) {
-		let at = target;
-		for (let hops = 0; hops < 5; hops++) {
-			const next = privacyRules.debounce
-				.filter((rule) => appliesTo(rule, at.href))
-				.map((rule) => leadsTo(rule, at))
-				.find((url) => url && siteOf(url.hostname) !== siteOf(at.hostname));
-			if (!next) break;
-			at = next;
-		}
-		return at === target ? null : at;
-	}
-
-	function leadsTo(rule, from) {
-		let value = null;
-		try {
-			if (rule.action === "redirect" || rule.action === "base64,redirect") {
-				value = from.searchParams.get(rule.param);
-				if (value && rule.action === "base64,redirect")
-					value = atob(value.replace(/-/g, "+").replace(/_/g, "/").replace(/\s/g, ""));
-			} else {
-				const found = new RegExp(rule.param).exec(from.pathname);
-				if (!found) return null;
-				const groups = found.slice(1).map((part) => decodeURIComponent(part || ""));
-				value =
-					rule.action === "regex-path-template"
-						? rule.template.replace(/\$(\d)/g, (_, n) => groups[n - 1] || "")
-						: groups.join("");
-			}
-			if (!value) return null;
-			value = value.trim();
-			if (rule.scheme && !/^https?:\/\//i.test(value)) value = `${rule.scheme}://${value.replace(/^\/+/, "")}`;
-			const url = new URL(value);
-			return url.protocol === "http:" || url.protocol === "https:" ? url : null;
-		} catch {
-			return null;
-		}
-	}
 
 	/**
 	 * A site's rule about which pages may show it in a frame: X-Frame-Options,
@@ -1701,7 +1609,7 @@ poll();
 		// cache) goes straight to where it leads, skipping the tracker.
 		if (isPage && safe(request.method)) {
 			await waitForPrivacyRules();
-			const leads = bounceTarget(target);
+			const leads = bounceTarget(target, privacyRules, siteOf);
 			// fresh settings, so the switch applies to the very next page
 			if (leads) settingsAt = 0;
 			if (leads && (await getSettings()).ads && !isAllowed(target.hostname) && !isAllowed(leads.hostname)) {
@@ -1714,7 +1622,7 @@ poll();
 		// parameters that follow people between sites; a site's own links
 		// keep theirs. Off with the rest of the blocking, for one site too.
 		if (isPage && safe(request.method) && who?.site !== "same-origin" && who?.site !== "same-site") {
-			const clean = withoutTracking(target);
+			const clean = withoutTracking(target, privacyRules);
 			// fresh settings, so the switch applies to the very next page
 			if (clean) settingsAt = 0;
 			if (clean && (await getSettings()).ads && !isAllowed(target.hostname)) {

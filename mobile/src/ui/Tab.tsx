@@ -11,9 +11,11 @@ import BadgerWebViewModule, {
 	type NavigationState,
 	type Store,
 } from "../../modules/badger-webview";
+import { bounceTarget, withoutTracking } from "../../../app/src/sw/navrules.js";
 import { hostOf } from "../address";
 import { isRobotCheck, type Warning, WARNINGS, warningFor } from "../navigation";
 import type { Relay } from "../relay/types";
+import type { NavRules } from "../rules";
 import { scriptsFor } from "../scripts";
 import type { Session } from "../server/types";
 import { effective, type Settings, type SiteSettings, type Sites, siteOf } from "../sites";
@@ -26,6 +28,12 @@ type Handler<K extends keyof BadgerWebViewProps> = NonNullable<BadgerWebViewProp
 
 // hosts the person chose to open despite a warning, until the app closes (as the old app)
 const bypassed = new Set<string>();
+// HTTPS-Only (as the old app's): sites opened over http after its warning, until the app closes,
+// and hosts sent to https whose page hasn't opened yet: http again, or a failure, means no https there
+const plainHttp = new Set<string>();
+const upgrading = new Map<string, number>();
+const UPGRADE_MS = 60_000;
+const upgradingNow = (host: string) => Date.now() - (upgrading.get(host) ?? 0) < UPGRADE_MS;
 const NO_RULES: string[] = [];
 const PERMISSION_KINDS = { camera: "your camera", microphone: "your microphone", cameraAndMicrophone: "your camera and microphone" };
 
@@ -37,6 +45,7 @@ type Props = {
 	settings: Settings;
 	sites: Sites;
 	rules: string[];
+	navRules: NavRules;
 	/** the private tabs' store, new each launch */
 	privateStore: string;
 	views: Map<string, RefObject<BadgerWebViewRef | null>>;
@@ -47,7 +56,7 @@ type Props = {
 	onSiteChange: (site: string, change: SiteSettings) => void;
 };
 
-export const Tab = memo(function Tab({ tab, visible, session, relay, settings, sites, rules, privateStore, views, onState, onSession, onOpenWindow, onDownload, onSiteChange }: Props) {
+export const Tab = memo(function Tab({ tab, visible, session, relay, settings, sites, rules, navRules, privateStore, views, onState, onSession, onOpenWindow, onDownload, onSiteChange }: Props) {
 	const view = useRef<BadgerWebViewRef>(null);
 	// the first address only: later ones go through view.load()
 	const [first] = useState(tab.url);
@@ -94,11 +103,36 @@ export const Tab = memo(function Tab({ tab, visible, session, relay, settings, s
 
 	const onShouldStart: Handler<"onShouldStart"> = async ({ nativeEvent: { requestId, url } }) => {
 		const next = siteOf(url);
-		let host = "";
+		let target: URL | null = null;
 		try {
-			host = new URL(url).hostname;
+			target = new URL(url);
 		} catch {
 			// not an address with a host
+		}
+		const host = target?.hostname ?? "";
+		const instead = (to: string) => {
+			BadgerWebViewModule.resolveNavigation(requestId, false);
+			view.current?.load(to);
+		};
+		if (target && next) {
+			if (target.protocol === "http:" && settings.httpsOnly && !plainHttp.has(next)) {
+				// sent to https a moment ago and back to http: the site has none
+				if (upgradingNow(host)) {
+					BadgerWebViewModule.resolveNavigation(requestId, false);
+					return setWarning({ kind: "http", host, url });
+				}
+				upgrading.set(host, Date.now());
+				target.protocol = "https:";
+				return instead(target.href);
+			}
+			if (of(next).blocking) {
+				// a bounce through a tracker goes straight to where it leads
+				const leads = bounceTarget(target, navRules, siteOf);
+				if (leads && of(siteOf(leads.href)).blocking) return instead(leads.href);
+				// parameters that follow people between sites; a site's own links keep theirs
+				const clean = next !== site ? withoutTracking(target, navRules) : null;
+				if (clean) return instead(clean.href);
+			}
 		}
 		const warn = host && !bypassed.has(host) ? await warningFor(url, of(next).route, (h) => session.threat(h)) : null;
 		if (warn) {
@@ -113,6 +147,8 @@ export const Tab = memo(function Tab({ tab, visible, session, relay, settings, s
 
 	const onNavigationState: Handler<"onNavigationState"> = ({ nativeEvent: state }) => {
 		onState(tab.id, state, !!tab.private);
+		// its https page opened: the upgrade worked
+		if (!state.loading && state.url.startsWith("https:")) upgrading.delete(hostOf(state.url));
 		const showing = siteOf(state.url);
 		if (!showing || offered.current.has(showing) || of(showing).route !== "relay" || !isRobotCheck(state)) return;
 		offered.current.add(showing);
@@ -141,12 +177,21 @@ export const Tab = memo(function Tab({ tab, visible, session, relay, settings, s
 	const onLoadError: Handler<"onLoadError"> = ({ nativeEvent: { url, code, certificateError } }) => {
 		// cancelled (another page started), or a page that became a download
 		if (code === -999 || code === 102) return;
+		// sent to https and it wouldn't open there
+		if (url.startsWith("https:") && upgradingNow(hostOf(url))) {
+			const plain = new URL(url);
+			plain.protocol = "http:";
+			return setWarning({ kind: "http", host: plain.hostname, url: plain.href });
+		}
 		setWarning({ kind: certificateError ? "cert" : "unreachable", host: hostOf(url), url });
 	};
 
 	const proceed = () => {
 		if (!warning) return;
-		if (warning.kind !== "unreachable") bypassed.add(warning.host);
+		if (warning.kind === "http") {
+			plainHttp.add(siteOf(warning.url) ?? warning.host);
+			upgrading.delete(warning.host);
+		} else if (warning.kind !== "unreachable") bypassed.add(warning.host);
 		setWarning(null);
 		view.current?.load(warning.url);
 	};
