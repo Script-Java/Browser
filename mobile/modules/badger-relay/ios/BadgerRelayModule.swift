@@ -15,12 +15,17 @@ public class BadgerRelayModule: Module {
   public func definition() -> ModuleDefinition {
     Name("BadgerRelay")
 
+    // { reason }: the relay stopped and can't come back this launch (Relay.failed)
+    Events("onBroken")
+
     AsyncFunction("start") { (options: StartOptions, promise: Promise) in
       guard let url = URL(string: options.wispUrl), url.scheme == "wss" || url.scheme == "ws" else {
         throw Exception(name: "BadWispUrl", description: "wispUrl must be a ws:// or wss:// URL")
       }
       self.relay?.stop()
-      let relay = Relay(wispUrl: url, defaultRoute: options.defaultRoute)
+      let relay = Relay(wispUrl: url, defaultRoute: options.defaultRoute) { [weak self = self] reason in
+        self?.sendEvent("onBroken", ["reason": reason])
+      }
       self.relay = relay
       relay.start { result in
         switch result {

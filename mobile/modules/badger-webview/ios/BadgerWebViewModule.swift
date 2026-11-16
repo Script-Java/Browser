@@ -72,6 +72,7 @@ public class BadgerWebViewModule: Module {
 
       Prop("url") { (view: BadgerWebView, url: String) in view.url = url }
       Prop("sessionState") { (view: BadgerWebView, state: String?) in view.sessionState = state }
+      Prop("openedWindow") { (view: BadgerWebView, id: String?) in view.openedWindow = id }
       Prop("store") { (view: BadgerWebView, store: StoreRecord) in view.store = store }
       Prop("level") { (view: BadgerWebView, level: String) in view.level = level }
       Prop("lockdown") { (view: BadgerWebView, lockdown: Bool) in view.lockdown = lockdown }
@@ -86,9 +87,17 @@ public class BadgerWebViewModule: Module {
 
       // `_ =` keeps each result Void: WKNavigation can't cross to JavaScript.
       AsyncFunction("load") { (view: BadgerWebView, url: String) in view.load(url) }
-      AsyncFunction("goBack") { (view: BadgerWebView) in _ = view.webView?.goBack() }
-      AsyncFunction("goForward") { (view: BadgerWebView) in _ = view.webView?.goForward() }
-      AsyncFunction("reload") { (view: BadgerWebView) in _ = view.webView?.reload() }
+      // Marked only when there's a move: a mark left over would make the page's next navigation the app's.
+      AsyncFunction("goBack") { (view: BadgerWebView) in
+        if view.webView?.goBack() != nil { view.historyByApp = true }
+      }
+      AsyncFunction("goForward") { (view: BadgerWebView) in
+        if view.webView?.goForward() != nil { view.historyByApp = true }
+      }
+      AsyncFunction("reload") { (view: BadgerWebView) in
+        if view.webView?.reload() != nil { view.byApp = true }
+      }
+      AsyncFunction("navigateFromPage") { (view: BadgerWebView, url: String) in try view.navigateFromPage(url) }
       AsyncFunction("stop") { (view: BadgerWebView) in _ = view.webView?.stopLoading() }
       AsyncFunction("find") { (view: BadgerWebView) in
         _ = view.webView?.findInteraction?.presentFindNavigator(showingReplace: false)

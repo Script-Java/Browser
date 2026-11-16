@@ -26,14 +26,19 @@ export function siteOf(address: string): string | null {
 	return getDomain(host, { allowPrivateDomains: true }) || host;
 }
 
-/** What applies to a site: its own choices over the defaults. Relay is the default connection; Safest brings Lockdown. */
+/**
+ * What applies to a site: its own choices over the defaults. Relay is the default connection.
+ * Relay and Safest bring Lockdown: on Relay, it keeps WebRTC and WebTransport, which go around
+ * the proxy, from every frame and worker.
+ */
 export function effective(site: SiteSettings | undefined, defaultLevel: Level) {
 	const level = site?.level ?? defaultLevel;
+	const route = site?.route ?? ("relay" as Route);
 	return {
-		route: site?.route ?? ("relay" as Route),
+		route,
 		blocking: site?.blocking ?? true,
 		level,
-		lockdown: site?.lockdown ?? level === "safest",
+		lockdown: site?.lockdown ?? (route === "relay" || level === "safest"),
 		passkeys: site?.passkeys ?? false,
 	};
 }

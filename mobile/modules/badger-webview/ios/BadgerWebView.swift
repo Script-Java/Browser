@@ -21,6 +21,8 @@ enum Shared {
   static var stores: [String: WKWebsiteDataStore] = [:]
   /// onShouldStart and onPermissionRequest answers, by requestId
   static var answers: [String: (Bool) -> Void] = [:]
+  /// Windows WebKit made for pages, by onOpenWindow's windowId, until a tab adopts them.
+  static var windows: [String: OpenedWindow] = [:]
 
   static func dataStore(_ store: StoreRecord) throws -> WKWebsiteDataStore {
     if let existing = stores[store.id] {
@@ -78,6 +80,7 @@ final class BadgerWebView: ExpoView, WKNavigationDelegate, WKUIDelegate, WKDownl
 
   var url = ""
   var sessionState: String?
+  var openedWindow: String?
   var store: StoreRecord?
   var level = "standard"
   var lockdown = false
@@ -99,6 +102,15 @@ final class BadgerWebView: ExpoView, WKNavigationDelegate, WKUIDelegate, WKDownl
   }
 
   private(set) var webView: WKWebView?
+  /// The next main-frame decision is the app's: load(), a restore or reload(); historyByApp, goBack()
+  /// or goForward(), only if it's a history move, since within a page (pushState, #) they reach none.
+  var byApp = false
+  var historyByApp = false
+  /// Level and lockdown at the last main-frame allow, and of the page showing (from its commit).
+  private var answered: (level: String, lockdown: Bool)?
+  private var committed: (level: String, lockdown: Bool)?
+  /// The rule lists in use, for the windows this tab's pages open: WebKit can't list them.
+  private var ruleLists: [WKContentRuleList] = []
   private var storeId: String?
   private var observations: [NSKeyValueObservation] = []
   // shortcut: downloads belong to their tab, so closing it mid-download loses the events; move them to Shared when downloads should outlive tabs.
@@ -116,15 +128,29 @@ final class BadgerWebView: ExpoView, WKNavigationDelegate, WKUIDelegate, WKDownl
     let start = webView?.url?.absoluteString ?? url
     // a tab brought back: its pages and their back and forward, not just its address
     let restore = webView == nil ? sessionState.flatMap { Data(base64Encoded: $0) } : nil
+    // a window its page opened, which keeps the page its opener and the initiator of its first load
+    let opened = webView == nil ? openedWindow.flatMap { Shared.windows.removeValue(forKey: $0) } : nil
+    // WebKit gives a window its opener's store: in another, the tab loads `url` itself.
+    let adopted = opened?.webView.configuration.websiteDataStore === dataStore ? opened : nil
+    if adopted == nil {
+      opened?.drop()
+    }
     webView?.removeFromSuperview()
     storeId = store.id
 
-    let config = WKWebViewConfiguration()
-    config.websiteDataStore = dataStore
-    config.preferences.isFraudulentWebsiteWarningEnabled = fraudWarnings
-    config.userContentController.add(WeakMessageHandler(self), contentWorld: .world(name: "badger"), name: "badger")
-
-    let webView = WKWebView(frame: bounds, configuration: config)
+    let webView: WKWebView
+    if let adopted {
+      webView = adopted.webView
+      webView.frame = bounds
+      adopted.handler.target = self
+    } else {
+      let config = WKWebViewConfiguration()
+      config.websiteDataStore = dataStore
+      config.userContentController.add(WeakMessageHandler(self), contentWorld: .world(name: "badger"), name: "badger")
+      webView = WKWebView(frame: bounds, configuration: config)
+      webView.navigationDelegate = self
+    }
+    webView.configuration.preferences.isFraudulentWebsiteWarningEnabled = fraudWarnings
     webView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
     webView.isFindInteractionEnabled = true
     webView.allowsBackForwardNavigationGestures = true
@@ -132,7 +158,6 @@ final class BadgerWebView: ExpoView, WKNavigationDelegate, WKUIDelegate, WKDownl
     #if DEBUG
     webView.isInspectable = true
     #endif
-    webView.navigationDelegate = self
     webView.uiDelegate = self
     addSubview(webView)
     self.webView = webView
@@ -151,7 +176,10 @@ final class BadgerWebView: ExpoView, WKNavigationDelegate, WKUIDelegate, WKDownl
     Task {
       // Rules first, so the first page is blocked too.
       await applyRules()
-      if let restore {
+      if let adopted {
+        adopted.handOver(to: self)
+      } else if let restore {
+        byApp = true
         webView.interactionState = restore
       } else {
         load(start)
@@ -164,10 +192,25 @@ final class BadgerWebView: ExpoView, WKNavigationDelegate, WKUIDelegate, WKDownl
       return
     }
     if let webView {
+      byApp = true
       webView.load(URLRequest(url: target))
     } else {
       url = address
     }
+  }
+
+  /// The page goes to `address` itself, so it stays the navigation's initiator (its cookies, Referer
+  /// and Sec-Fetch-Site). From the app's world, where the page can't replace location.assign; assign, not replace, so Back still reaches the page the link was on.
+  func navigateFromPage(_ address: String) throws {
+    guard let target = URL(string: address), ["http", "https"].contains(target.scheme?.lowercased()) else {
+      throw Exception(name: "ERR_URL", description: "navigateFromPage takes an http(s) URL, got '\(address)'")
+    }
+    guard let webView, let page = webView.url, page.absoluteString != "about:blank" else {
+      return load(target.absoluteString)
+    }
+    // A JSON string is a JavaScript string literal, so the URL can't end it.
+    let literal = String(decoding: try JSONEncoder().encode(target.absoluteString), as: UTF8.self)
+    webView.evaluateJavaScript("location.assign(\(literal))", in: nil, in: .world(name: "badger"))
   }
 
   /// The page's chain, leaf first, as base64 DER.
@@ -204,6 +247,7 @@ final class BadgerWebView: ExpoView, WKNavigationDelegate, WKUIDelegate, WKDownl
     guard ids == contentRules, let controller = webView?.configuration.userContentController else {
       return
     }
+    ruleLists = lists
     controller.removeAllContentRuleLists()
     for list in lists {
       controller.add(list)
@@ -233,27 +277,47 @@ final class BadgerWebView: ExpoView, WKNavigationDelegate, WKUIDelegate, WKDownl
     preferences: WKWebpagePreferences,
     decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy, WKWebpagePreferences) -> Void
   ) {
+    let isMainFrame = navigationAction.targetFrame?.isMainFrame == true
+    let byApp = isMainFrame && (self.byApp || (historyByApp && navigationAction.navigationType == .backForward))
+    if isMainFrame {
+      self.byApp = false
+      historyByApp = false
+    }
     if navigationAction.shouldPerformDownload {
       return decisionHandler(.download, preferences)
     }
-    guard askBeforeNavigating, navigationAction.targetFrame?.isMainFrame == true else {
-      return decisionHandler(.allow, engineSettings(preferences))
+    guard isMainFrame else {
+      // The page's settings: the props may already be for a main-frame navigation that never commits.
+      return decisionHandler(.allow, engineSettings(preferences, committed ?? (level, lockdown)))
     }
     // Read at the answer: the app sets the new site's props, then answers.
-    let requestId = Shared.ask(timeout: 10) { [weak self] allow in
-      decisionHandler(allow ? .allow : .cancel, self?.engineSettings(preferences) ?? preferences)
+    let answer = { [weak self] (allow: Bool) in
+      guard allow, let self else {
+        return decisionHandler(.cancel, preferences)
+      }
+      let settings = (level: self.level, lockdown: self.lockdown)
+      self.answered = settings
+      decisionHandler(.allow, self.engineSettings(preferences, settings))
     }
-    onShouldStart(["requestId": requestId, "url": navigationAction.request.url?.absoluteString ?? "", "isMainFrame": true])
+    guard askBeforeNavigating else {
+      return answer(true)
+    }
+    let requestId = Shared.ask(timeout: 10, answer)
+    onShouldStart(["requestId": requestId, "url": navigationAction.request.url?.absoluteString ?? "", "isMainFrame": true, "byApp": byApp])
   }
 
-  /// The engine's settings for the page about to load, from the props as they are now.
-  private func engineSettings(_ preferences: WKWebpagePreferences) -> WKWebpagePreferences {
+  /// The engine's settings for a page. Lockdown is page-wide in WebKit, so frames get their page's anyway.
+  private func engineSettings(_ preferences: WKWebpagePreferences, _ settings: (level: String, lockdown: Bool)) -> WKWebpagePreferences {
     // Only ever turned on: setting false would override the device's own Lockdown Mode.
-    if lockdown {
+    if settings.lockdown {
       preferences.isLockdownModeEnabled = true
     }
-    preferences.allowsContentJavaScript = level != "safest"
+    preferences.allowsContentJavaScript = settings.level != "safest"
     return preferences
+  }
+
+  func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+    committed = answered
   }
 
   func webView(
@@ -318,10 +382,30 @@ final class BadgerWebView: ExpoView, WKNavigationDelegate, WKUIDelegate, WKDownl
     for navigationAction: WKNavigationAction,
     windowFeatures: WKWindowFeatures
   ) -> WKWebView? {
-    if let url = navigationAction.request.url {
-      onOpenWindow(["url": url.absoluteString])
+    // Made here, not by the app's new tab, so the page stays its opener and the initiator of its first
+    // load: its SameSite cookies, Referer, Sec-Fetch-Site and a POST's body. WebKit's configuration
+    // shares this tab's content controller, so the window gets its own, with this tab's scripts and rules
+    // until its tab's are in.
+    // shortcut: the window still shares this tab's WKPreferences (WebKit copies the configuration shallowly), so fraudWarnings set on one sets both; give it its own if that prop ever differs between tabs.
+    let controller = WKUserContentController()
+    for script in webView.configuration.userContentController.userScripts {
+      controller.addUserScript(script)
     }
-    return nil
+    for list in ruleLists {
+      controller.add(list)
+    }
+    let handler = WeakMessageHandler(nil)
+    controller.add(handler, contentWorld: .world(name: "badger"), name: "badger")
+    configuration.userContentController = controller
+    let window = OpenedWindow(configuration, handler)
+    let windowId = UUID().uuidString
+    Shared.windows[windowId] = window
+    Task {
+      try? await Task.sleep(for: .seconds(10))
+      Shared.windows.removeValue(forKey: windowId)?.drop()
+    }
+    onOpenWindow(["url": navigationAction.request.url?.absoluteString ?? "", "windowId": windowId])
+    return window.webView
   }
 
   func webView(
@@ -468,11 +552,55 @@ final class BadgerWebView: ExpoView, WKNavigationDelegate, WKUIDelegate, WKDownl
   }
 }
 
+/// A window WebKit made for a page (window.open, target=_blank), until a tab adopts it. Its navigations
+/// wait, so nothing loads before the tab's settings are in.
+@MainActor
+final class OpenedWindow: NSObject, WKNavigationDelegate {
+  let webView: WKWebView
+  /// its "badger" handler, pointed at the tab that adopts it
+  let handler: WeakMessageHandler
+  private var held: [(WKNavigationAction, WKWebpagePreferences, @MainActor @Sendable (WKNavigationActionPolicy, WKWebpagePreferences) -> Void)] = []
+
+  init(_ configuration: WKWebViewConfiguration, _ handler: WeakMessageHandler) {
+    // Apple: "The web view returned must be created with the specified configuration."
+    webView = WKWebView(frame: .zero, configuration: configuration)
+    self.handler = handler
+    super.init()
+    webView.navigationDelegate = self
+  }
+
+  func webView(
+    _ webView: WKWebView,
+    decidePolicyFor navigationAction: WKNavigationAction,
+    preferences: WKWebpagePreferences,
+    decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy, WKWebpagePreferences) -> Void
+  ) {
+    held.append((navigationAction, preferences, decisionHandler))
+  }
+
+  /// The tab becomes the delegate and decides what was held, as its own navigations.
+  func handOver(to tab: WKNavigationDelegate) {
+    webView.navigationDelegate = tab
+    for (action, preferences, decide) in held {
+      tab.webView(webView, decidePolicyFor: action, preferences: preferences, decisionHandler: decide)
+    }
+    held = []
+  }
+
+  /// Not adopted: what it held is refused, and the window goes once nothing holds it.
+  func drop() {
+    for (_, preferences, decide) in held {
+      decide(.cancel, preferences)
+    }
+    held = []
+  }
+}
+
 /// WKUserContentController keeps its handlers alive; this one lets a closed tab go.
-private final class WeakMessageHandler: NSObject, WKScriptMessageHandler {
+final class WeakMessageHandler: NSObject, WKScriptMessageHandler {
   weak var target: WKScriptMessageHandler?
 
-  init(_ target: WKScriptMessageHandler) {
+  init(_ target: WKScriptMessageHandler?) {
     self.target = target
     super.init()
   }

@@ -2,7 +2,12 @@ import { NativeModule, requireNativeModule } from "expo";
 
 import type { Route } from "../../../src/relay/types";
 
-declare class BadgerRelayModule extends NativeModule<Record<string, never>> {
+export type BadgerRelayEvents = {
+	/** the listener is gone and couldn't come back on its port within 5 seconds; the relay has stopped for this launch */
+	onBroken(event: { reason: string }): void;
+};
+
+declare class BadgerRelayModule extends NativeModule<BadgerRelayEvents> {
 	/** Listens on 127.0.0.1: the same port all launch, new credentials each start. A second start stops the first. */
 	start(options: { wispUrl: string; defaultRoute: Route }): Promise<{ port: number; username: string; password: string }>;
 	/** `site` covers its subdomains; null removes it. Its connections open on the other route close, and reopen on this one. */

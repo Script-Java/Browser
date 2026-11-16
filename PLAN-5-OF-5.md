@@ -31,6 +31,8 @@ Written, not yet run: 6.1–6.4, 6.7, 7.2, 7.4, 7.5, 8.1, 8.3, 9.1. Also the ser
 - **6.5:** passwords and passkeys are iOS's own (Passwords app, AutoFill, iCloud Keychain), which `WKWebView` offers once Apple grants the browser entitlements. The app keeps no vault of its own.
 - **8.3:** passkeys are off on relay sites unless allowed per site.
 
+Security review (2026-11-16) fixed: Relay sites get Lockdown by default (WebRTC and WebTransport otherwise reach the phone's address from workers and fresh frames); a built-in rule stops DNS prefetch on Relay sites (WebKit ignores x-dns-prefetch-control); new tabs adopt WebKit's window and the app's redirects run from the page, so cookies and Sec-Fetch-Site stay cross-site; frames keep the shown page's settings after a cancelled navigation; the relay stops every tab if it loses its port; the server's bounce rules can't choose a host. Known open: a cross-site frame navigating the top page counts as the page's own navigation.
+
 Not started: 6.6 and 9.3 (checks on a device), 6.8 (Apple account), 7.1, 7.3, 7.6, 7.7, 8.2, 8.4, 8.5's letterboxing, 8.6, 9.4, 9.5, and sync.
 
 ## Phase 0: housekeeping (done 2026-11-16)

@@ -1,6 +1,7 @@
 // Checks before a tab opens a page, and the robot checks that make Relay's
 // shared address a nuisance.
 import { lookalikeOf } from "../../app/src/sw/lookalike.js";
+import { compileNavRules } from "../../app/src/sw/navrules.js";
 import type { Route } from "./relay/types";
 import type { Threat } from "./server/types";
 
@@ -78,4 +79,14 @@ export function isRobotCheck({ url, title }: { url: string; title: string }): bo
 		// no address yet
 	}
 	return /^Just a moment(\.\.\.|…)$/.test(title.trim());
+}
+
+/**
+ * The server's navigation rules (/filters/privacy.json), ready to use. Bounce
+ * rules whose destination is the server's own template are dropped: those
+ * could send a person to any host. The rest take it from the address itself.
+ */
+export function navRulesOf(raw: unknown) {
+	const rules = raw as { debounce?: { action?: string }[] } | null;
+	return compileNavRules({ ...rules, debounce: rules?.debounce?.filter((rule) => rule.action !== "regex-path-template") });
 }

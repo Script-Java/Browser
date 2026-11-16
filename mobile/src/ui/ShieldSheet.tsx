@@ -66,7 +66,7 @@ export function ShieldSheet({
 			<Row label="Relay" note="Through your Badger server: the site sees the server's address, not yours." checked={settings.route === "relay"} onPress={() => onChange({ route: "relay" })} />
 			<Row
 				label="Direct"
-				note="From this phone: the site sees your address. For robot checks, calls and sites that refuse the server."
+				note="From this phone: the site sees your address, here and wherever other sites embed its content. For robot checks, calls and sites that refuse the server."
 				checked={settings.route === "direct"}
 				onPress={() => onChange({ route: "direct" })}
 			/>
@@ -79,7 +79,7 @@ export function ShieldSheet({
 			/>
 			<Row
 				label="Lockdown"
-				note="The engine's own hardening: no JIT, WebGL or some fonts and media formats. On at Safest."
+				note="The engine's own hardening: no JIT, WebGL, WebRTC or some fonts and media formats. On for Relay sites and at Safest. Off on a Relay site, WebRTC and WebTransport could show the site this phone's address."
 				right={<Switch accessibilityLabel="Lockdown" value={settings.lockdown} onValueChange={(lockdown) => onChange({ lockdown })} />}
 			/>
 			<Row

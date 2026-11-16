@@ -14,6 +14,12 @@ export type Relay = {
 	 * Its connections open on the other route close, so WebKit reopens them on this one.
 	 */
 	setRoute(site: string, route: Route | null): void;
+	/**
+	 * The relay's listener is gone and couldn't come back on its port (the
+	 * stores' proxies point there, so another app could take it). Tabs must
+	 * stop until the app restarts. Returns the unsubscribe.
+	 */
+	onBroken(listener: (reason: string) => void): () => void;
 	close(): Promise<void>;
 };
 

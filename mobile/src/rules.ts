@@ -4,8 +4,8 @@
 import { useEffect, useState } from "react";
 import { AppState } from "react-native";
 
-import { compileNavRules } from "../../app/src/sw/navrules.js";
 import BadgerWebViewModule from "../modules/badger-webview";
+import { navRulesOf } from "./navigation";
 import type { Session } from "./server/types";
 import { readJson, writeJson } from "./storage";
 
@@ -13,6 +13,15 @@ const FILE = "rules.json";
 const DAY = 24 * 60 * 60 * 1000;
 
 type Saved = { version: string; ids: string[] };
+
+/**
+ * For every Relay tab, blocking or not: WebKit resolves <link rel=dns-prefetch>
+ * names on the phone, around the proxy, and no longer reads
+ * x-dns-prefetch-control. A rule against "ping" is its one gate.
+ */
+export const NO_PREFETCH = "badger-no-prefetch";
+export const compileNoPrefetch = () =>
+	BadgerWebViewModule.compileContentRules(NO_PREFETCH, JSON.stringify([{ trigger: { "url-filter": ".*", "resource-type": ["ping"] }, action: { type: "block" } }]));
 
 /** The ids of the compiled lists, for tabs whose site has blocking on. */
 export function useContentRules(session: Session): string[] {
@@ -32,7 +41,7 @@ export function useContentRules(session: Session): string[] {
 				if (!lists.length) return setIds(saved.ids);
 				const next = lists.map((list) => list.id);
 				for (const list of lists) await BadgerWebViewModule.compileContentRules(list.id, list.json);
-				for (const id of compiled) if (!next.includes(id)) await BadgerWebViewModule.removeContentRules(id);
+				for (const id of compiled) if (!next.includes(id) && id !== NO_PREFETCH) await BadgerWebViewModule.removeContentRules(id);
 				writeJson(FILE, { version, ids: next });
 				setIds(next);
 			} catch (err) {
@@ -52,11 +61,11 @@ export function useContentRules(session: Session): string[] {
 	return ids;
 }
 
-export type NavRules = ReturnType<typeof compileNavRules>;
+export type NavRules = ReturnType<typeof navRulesOf>;
 
 /** Brave's navigation-tracking rules (app/src/sw/navrules.js), from the server; the last ones kept for a start without it. */
 export function useNavRules(session: Session): NavRules {
-	const [rules, setRules] = useState(() => compileNavRules(readJson("navrules.json", {})));
+	const [rules, setRules] = useState(() => navRulesOf(readJson("navrules.json", {})));
 
 	useEffect(() => {
 		let checked = 0;
@@ -66,7 +75,7 @@ export function useNavRules(session: Session): NavRules {
 			try {
 				const raw = await session.navRules();
 				writeJson("navrules.json", raw);
-				setRules(compileNavRules(raw));
+				setRules(navRulesOf(raw));
 			} catch (err) {
 				checked = 0; // again at the next chance
 				console.warn("navigation rules:", err);

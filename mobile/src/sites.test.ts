@@ -14,12 +14,18 @@ test("sites are registrable domains, private suffixes included", () => {
 	assert.equal(siteOf("about:blank"), null);
 });
 
-test("Relay, blocking and no passkeys unless the site says otherwise; Safest brings Lockdown", () => {
-	assert.deepEqual(effective(undefined, "standard"), { route: "relay", blocking: true, level: "standard", lockdown: false, passkeys: false });
-	assert.equal(effective({ level: "safest" }, "standard").lockdown, true);
-	assert.equal(effective(undefined, "safest").lockdown, true);
-	assert.equal(effective({ lockdown: false }, "safest").lockdown, false);
+test("Relay, blocking, Lockdown and no passkeys unless the site says otherwise", () => {
+	assert.deepEqual(effective(undefined, "standard"), { route: "relay", blocking: true, level: "standard", lockdown: true, passkeys: false });
 	assert.equal(effective({ route: "direct" }, "standard").route, "direct");
+});
+
+test("Lockdown: on for Relay sites and at Safest; the site's own choice wins", () => {
+	assert.equal(effective({ route: "direct" }, "standard").lockdown, false);
+	assert.equal(effective({ route: "direct", level: "safest" }, "standard").lockdown, true);
+	assert.equal(effective({ route: "direct" }, "safest").lockdown, true);
+	assert.equal(effective({ lockdown: false }, "standard").lockdown, false);
+	assert.equal(effective({ lockdown: false }, "safest").lockdown, false);
+	assert.equal(effective({ route: "direct", lockdown: true }, "standard").lockdown, true);
 });
 
 test("the address bar opens addresses and searches the rest", () => {

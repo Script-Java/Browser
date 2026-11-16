@@ -25,10 +25,15 @@ final class Relay {
   private var listener: NWListener?
   private var ready: ((Result<UInt16, Error>) -> Void)?
   private var stopped = false
+  /// Called once if the listener is gone and can't come back: the relay has stopped.
+  private let broken: (String) -> Void
+  /// When the listener went, until it's back.
+  private var downSince: DispatchTime?
 
-  init(wispUrl: URL, defaultRoute: Route) {
+  init(wispUrl: URL, defaultRoute: Route, broken: @escaping (String) -> Void) {
     wisp = WispConnection(url: wispUrl)
     self.defaultRoute = defaultRoute
+    self.broken = broken
   }
 
   func start(_ ready: @escaping (Result<UInt16, Error>) -> Void) {
@@ -46,6 +51,8 @@ final class Relay {
   private func listen() {
     let params = NWParameters.tcp
     params.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: Relay.port)
+    // SO_REUSEADDR: rebinding the same port after iOS drops the listener needs it while the old
+    // connections sit in TIME_WAIT; without it every suspension would end in failed()'s give-up.
     params.allowLocalEndpointReuse = true
     let listener: NWListener
     do { listener = try NWListener(using: params) } catch { return failed(error) }
@@ -55,6 +62,7 @@ final class Relay {
       guard let self, let listener, self.listener === listener else { return }
       switch state {
       case .ready:
+        self.downSince = nil
         Relay.port = listener.port ?? Relay.port
         self.ready?(.success(Relay.port.rawValue))
         self.ready = nil
@@ -69,11 +77,21 @@ final class Relay {
   }
 
   // Before the first ready, start fails. After it, iOS invalidated a suspended app's listener:
-  // come back on the same port.
+  // come back on the same port. Fail closed if that takes over 5 s: the stores' proxies point at
+  // the port for the rest of the launch, and another app on the phone could be listening there.
   private func failed(_ error: Error) {
     if let ready {
       self.ready = nil
       return ready(.failure(error))
+    }
+    if downSince == nil {
+      let since = DispatchTime.now()
+      downSince = since
+      Relay.queue.asyncAfter(deadline: since + 5) { [weak self] in
+        guard let self, !self.stopped, self.downSince == since else { return }
+        self.stop()
+        self.broken("The relay couldn't listen on port \(Relay.port.rawValue) again: \(error)")
+      }
     }
     Relay.queue.asyncAfter(deadline: .now() + 1) { [weak self] in
       guard let self, !self.stopped, self.listener == nil else { return }

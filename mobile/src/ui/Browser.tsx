@@ -9,7 +9,7 @@ import BadgerWebViewModule, { type BadgerWebViewRef, type Download, type Navigat
 import { addressFor, hostOf } from "../address";
 import { type Entry, isBookmarked, nameOf, type Page, recordVisit, shortcuts, suggestions, toggleBookmark } from "../library";
 import type { Relay } from "../relay/types";
-import { useContentRules, useNavRules } from "../rules";
+import { compileNoPrefetch, useContentRules, useNavRules } from "../rules";
 import type { Session } from "../server/types";
 import { DEFAULT_SETTINGS, effective, type Settings, type SiteSettings, type Sites, siteOf } from "../sites";
 import { readJson, usePersisted, writeJson } from "../storage";
@@ -47,6 +47,9 @@ export function Browser({ session, relay, onSignOut }: { session: Session; relay
 	const [downloads, setDownloads] = useState<Download[]>([]);
 	const [sheet, setSheet] = useState<"tabs" | "shield" | "settings" | "downloads" | "library" | null>(null);
 	const [typed, setTyped] = useState<string | null>(null);
+	// why tabs can't keep their connections on the relay: then no tabs at all
+	const [stopped, setStopped] = useState<string | null>(null);
+	const [noPrefetch, setNoPrefetch] = useState(false);
 	const [views] = useState(() => new Map<string, RefObject<BadgerWebViewRef | null>>());
 	const later = useAfterRender();
 	const addressBar = useRef<ComponentRef<typeof TextInput>>(null);
@@ -57,9 +60,22 @@ export function Browser({ session, relay, onSignOut }: { session: Session; relay
 	const current = tabs.find((t) => t.id === active && t.workspace === workspace) ?? null;
 	const nav = current ? navs[current.id] : undefined;
 	const view = () => (current ? views.get(current.id)?.current : null);
-	const shown = recent.slice(0, MOUNTED).flatMap((id) => tabs.filter((t) => t.id === id && t.url));
+	// relay tabs need NO_PREFETCH before their first page
+	const shown = noPrefetch ? recent.slice(0, MOUNTED).flatMap((id) => tabs.filter((t) => t.id === id && t.url)) : [];
 
-	useEffect(() => writeJson("tabs.json", { tabs: tabs.filter((t) => !t.private), active, workspace }), [tabs, active, workspace]);
+	useEffect(
+		() => writeJson("tabs.json", { tabs: tabs.filter((t) => !t.private).map(({ openedWindow: _, ...t }) => t), active, workspace }),
+		[tabs, active, workspace]
+	);
+
+	// fail closed: the stores' proxy port, without the relay, could be another app's
+	useEffect(() => relay.onBroken(setStopped), [relay]);
+	useEffect(() => {
+		compileNoPrefetch().then(
+			() => setNoPrefetch(true),
+			(err) => setStopped(`DNS prefetching couldn't be turned off: ${err}`)
+		);
+	}, []);
 
 	// the private tabs' cookies and storage go with the last of them, as in the old app
 	const hasPrivate = tabs.some((t) => t.private);
@@ -90,8 +106,8 @@ export function Browser({ session, relay, onSignOut }: { session: Session; relay
 		if (id) setRecent((r) => [id, ...r.filter((x) => x !== id)]);
 	};
 
-	const newTab = (isPrivate: boolean, url = "", inWorkspace = workspace) => {
-		const tab: TabInfo = { id: randomUUID(), url, title: "", workspace: inWorkspace, ...(isPrivate && { private: true }) };
+	const newTab = (isPrivate: boolean, url = "", inWorkspace = workspace, openedWindow?: string) => {
+		const tab: TabInfo = { id: randomUUID(), url, title: "", workspace: inWorkspace, ...(isPrivate && { private: true }), ...(openedWindow && { openedWindow }) };
 		setTabs((all) => [...all, tab]);
 		setWorkspace(inWorkspace);
 		select(tab.id);
@@ -159,7 +175,8 @@ export function Browser({ session, relay, onSignOut }: { session: Session; relay
 		[relay, setSites]
 	);
 
-	const onOpenWindow = useCallback((url: string, opener: TabInfo) => newTab(!!opener.private, url, opener.workspace), []); // eslint-disable-line react-hooks/exhaustive-deps
+	// the page stays the new tab's opener, and its first page's initiator
+	const onOpenWindow = useCallback((url: string, windowId: string, opener: TabInfo) => newTab(!!opener.private, url, opener.workspace, windowId), []); // eslint-disable-line react-hooks/exhaustive-deps
 	const onDownload = useCallback(
 		(d: Download) => setDownloads((all) => (all.some((x) => x.id === d.id) ? all.map((x) => (x.id === d.id ? d : x)) : [d, ...all])),
 		[]
@@ -192,6 +209,22 @@ export function Browser({ session, relay, onSignOut }: { session: Session; relay
 	const shield = effective(site ? sites[site] : undefined, settings.level);
 	const workspaceTabs = tabs.filter((t) => t.workspace === workspace).length;
 	const suggested = typed && typed !== (nav?.url || current?.url) ? suggestions(typed, bookmarks, history) : [];
+
+	if (stopped)
+		return (
+			<View style={[styles.page, styles.stopped, { paddingTop: insets.top + 24 }]} accessibilityViewIsModal>
+				<Text style={styles.stoppedTitle} accessibilityRole="header">
+					Relay stopped
+				</Text>
+				<Text style={styles.stoppedText}>
+					Badger can&apos;t keep your pages on your server&apos;s relay, so it has closed them rather than let sites see this phone&apos;s address. Close
+					Badger and open it again.
+				</Text>
+				<Text style={styles.stoppedReason} accessibilityLabel={`Reason: ${stopped}`} selectable>
+					{stopped}
+				</Text>
+			</View>
+		);
 
 	return (
 		<View style={[styles.page, { paddingTop: insets.top }]}>
@@ -361,5 +394,9 @@ const styles = StyleSheet.create({
 	suggestion: { paddingVertical: 10, paddingHorizontal: 14, borderTopWidth: StyleSheet.hairlineWidth, borderColor: colors.line },
 	suggestTitle: { fontSize: 15, color: colors.text },
 	suggestDetail: { marginTop: 2, fontSize: 13, color: colors.muted },
+	stopped: { paddingHorizontal: 24 },
+	stoppedTitle: { fontSize: 24, fontWeight: "700", color: colors.text, marginBottom: 12 },
+	stoppedText: { fontSize: 16, lineHeight: 23, color: colors.text, marginBottom: 16 },
+	stoppedReason: { fontFamily: "Menlo", fontSize: 13, color: colors.muted },
 	toolbar: { flexDirection: "row", justifyContent: "space-around", paddingTop: 6, backgroundColor: colors.toolbar, borderTopWidth: StyleSheet.hairlineWidth, borderColor: colors.line },
 });

@@ -7,7 +7,7 @@ export type ScriptChoice = { route: Route; blocking: boolean; level: Level; pass
 /** A tab's injected scripts, from its current site's settings. */
 export function scriptsFor(site: ScriptChoice): { page: string[]; isolated: string[] } {
 	const page: string[] = [];
-	// first: it puts the dns-prefetch switch in before anything else in the page
+	// first: it keeps the engine's own built-ins before any other script changes them
 	if (site.route === "relay") page.push(relay);
 	page.push(gpc);
 	// as the old app: Safer's answers on every site, the standard ones where blocking is on

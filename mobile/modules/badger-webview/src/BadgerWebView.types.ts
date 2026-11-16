@@ -35,6 +35,8 @@ export type ShouldStart = {
 	url: string;
 	/** the main frame only; frames and subresources never ask */
 	isMainFrame: true;
+	/** started by the app's own load() (typed, bookmark, restored), not by the page */
+	byApp: boolean;
 };
 
 export type Download = {
@@ -64,6 +66,8 @@ export type BadgerWebViewProps = {
 	url: string;
 	/** WebKit's saved state of the tab (onSessionState): when the view is created, restores its pages and back and forward instead of loading `url` */
 	sessionState?: string;
+	/** onOpenWindow's windowId: the view adopts the window WebKit made for the page, which keeps the page as its opener and the initiator of its first load, instead of creating one and loading `url` */
+	openedWindow?: string;
 	store: Store;
 	level: Level;
 	/** WKWebpagePreferences.isLockdownModeEnabled for this tab's pages */
@@ -81,8 +85,8 @@ export type BadgerWebViewProps = {
 	/** main-frame navigations wait for onShouldStart's answer; off, every navigation goes ahead */
 	askBeforeNavigating?: boolean;
 	onShouldStart?: Event<ShouldStart>;
-	/** window.open and target=_blank: the app opens a tab */
-	onOpenWindow?: Event<{ url: string }>;
+	/** window.open and target=_blank: the app opens a tab whose view adopts `windowId` (openedWindow); an unadopted window is dropped after 10 seconds */
+	onOpenWindow?: Event<{ url: string; windowId: string }>;
 	onDownload?: Event<Download>;
 	onPermissionRequest?: Event<PermissionRequest>;
 	/** window.webkit.messageHandlers.badger.postMessage(data) from the isolated world only */
@@ -99,6 +103,8 @@ export type BadgerWebViewRef = {
 	goForward(): Promise<void>;
 	reload(): Promise<void>;
 	stop(): Promise<void>;
+	/** the page itself goes to `url` (location.assign, from the app's own content world), so it stays the navigation's initiator, for its cookies, Referer and Sec-Fetch-Site; with no page, load(url) */
+	navigateFromPage(url: string): Promise<void>;
 	/** shows the system find bar (UIFindInteraction) */
 	find(): Promise<void>;
 	/** the page's certificate chain, leaf first, as base64 DER; null when not https */

@@ -53,6 +53,8 @@ extension WKWebsiteDataStore {
 
 // https://developer.apple.com/documentation/webkit/wkusercontentcontroller
 @preconcurrency @MainActor open class WKUserContentController: NSObject {
+  // https://developer.apple.com/documentation/webkit/wkusercontentcontroller/userscripts
+  open var userScripts: [WKUserScript] { fatalError() }
   // https://developer.apple.com/documentation/webkit/wkusercontentcontroller/adduserscript(_:)
   open func addUserScript(_ userScript: WKUserScript) { fatalError() }
   // https://developer.apple.com/documentation/webkit/wkusercontentcontroller/removealluserscripts()
@@ -158,6 +160,11 @@ public enum WKUserScriptInjectionTime: Int, Sendable {
   open func stopLoading() { fatalError() }
 }
 
+extension WKWebView {
+  // https://developer.apple.com/documentation/webkit/wkwebview/evaluatejavascript(_:in:in:completionhandler:) (iOS 14; a Swift extension)
+  @MainActor @preconcurrency public func evaluateJavaScript(_ javaScript: String, in frame: WKFrameInfo? = nil, in contentWorld: WKContentWorld, completionHandler: (@MainActor @Sendable (Result<Any, any Error>) -> Void)? = nil) { fatalError() }
+}
+
 // https://developer.apple.com/documentation/webkit/wknavigation
 @preconcurrency @MainActor open class WKNavigation: NSObject {}
 
@@ -190,6 +197,13 @@ public enum WKUserScriptInjectionTime: Int, Sendable {
   open var request: URLRequest { fatalError() }
   // https://developer.apple.com/documentation/webkit/wknavigationaction/shouldperformdownload (iOS 14.5)
   open var shouldPerformDownload: Bool { fatalError() }
+  // https://developer.apple.com/documentation/webkit/wknavigationaction/navigationtype
+  open var navigationType: WKNavigationType { fatalError() }
+}
+
+// https://developer.apple.com/documentation/webkit/wknavigationtype (raw values from WKNavigationAction.h)
+public enum WKNavigationType: Int, Sendable {
+  case linkActivated = 0, formSubmitted = 1, backForward = 2, reload = 3, formResubmitted = 4, other = -1
 }
 
 // https://developer.apple.com/documentation/webkit/wknavigationresponse
@@ -250,11 +264,19 @@ public enum WKPermissionDecision: Int, Sendable {
 
 // https://developer.apple.com/documentation/webkit/wknavigationdelegate
 // Every method here is `optional` in the SDK, where a wrong signature compiles and is never called.
-// The stub lists only the optional methods BadgerWebView implements, and makes them required, so a
-// misspelt or mistyped one fails to conform. A new delegate method needs its signature added here.
+// The stub lists only the optional methods we implement, and makes them required, so a misspelt or
+// mistyped one fails to conform: here the one every delegate of ours has (OpenedWindow has only it),
+// in LinuxCheckTabDelegate the rest, which check.sh makes BadgerWebView conform to. A new delegate
+// method needs its signature added here.
 @preconcurrency @MainActor public protocol WKNavigationDelegate: NSObjectProtocol {
   // https://developer.apple.com/documentation/webkit/wknavigationdelegate/webview(_:decidepolicyfor:preferences:decisionhandler:) (iOS 13)
   func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, preferences: WKWebpagePreferences, decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy, WKWebpagePreferences) -> Void)
+}
+
+// Not in the SDK: see WKNavigationDelegate.
+@preconcurrency @MainActor public protocol LinuxCheckTabDelegate: WKNavigationDelegate {
+  // https://developer.apple.com/documentation/webkit/wknavigationdelegate/webview(_:didcommit:)
+  func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!)
   // https://developer.apple.com/documentation/webkit/wknavigationdelegate/webview(_:decidepolicyfor:decisionhandler:)-19mn2
   func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse, decisionHandler: @escaping @MainActor @Sendable (WKNavigationResponsePolicy) -> Void)
   // https://developer.apple.com/documentation/webkit/wknavigationdelegate/webview(_:navigationaction:didbecome:) (iOS 14.5)

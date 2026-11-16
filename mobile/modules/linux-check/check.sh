@@ -31,7 +31,9 @@ typecheck() { # typecheck <module name> <files...>: one pod is one module; Apple
   "$SWIFTC" -typecheck -parse-as-library -swift-version 5 -D DEBUG -module-name "$name" -I "$out" \
     -Xfrontend -import-module -Xfrontend AppleFoundationExtras "$@" || status=1
 }
-typecheck BadgerWebView "$modules"/badger-webview/ios/*.swift
+# BadgerWebView's optional delegate methods, required (see stubs/WebKit.swift)
+printf 'import WebKit\nextension BadgerWebView: LinuxCheckTabDelegate {}\n' > "$out/conformances.swift"
+typecheck BadgerWebView "$modules"/badger-webview/ios/*.swift "$out/conformances.swift"
 typecheck BadgerRelay "$modules"/badger-relay/ios/*.swift
 
 echo "== relay self-check"

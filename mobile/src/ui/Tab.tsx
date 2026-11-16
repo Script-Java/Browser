@@ -15,14 +15,17 @@ import { bounceTarget, withoutTracking } from "../../../app/src/sw/navrules.js";
 import { hostOf } from "../address";
 import { isRobotCheck, type Warning, WARNINGS, warningFor } from "../navigation";
 import type { Relay } from "../relay/types";
-import type { NavRules } from "../rules";
+import { NO_PREFETCH, type NavRules } from "../rules";
 import { scriptsFor } from "../scripts";
 import type { Session } from "../server/types";
 import { effective, type Settings, type SiteSettings, type Sites, siteOf } from "../sites";
 import { colors, useAfterRender } from "./kit";
 
-/** `session`: WebKit's saved state of the tab, so it comes back with its back and forward */
-export type TabInfo = { id: string; url: string; title: string; workspace: string; private?: boolean; session?: string };
+/**
+ * `session`: WebKit's saved state of the tab, so it comes back with its back and forward.
+ * `openedWindow`: the window WebKit made for a page's window.open, which the tab's view adopts; kept in memory only.
+ */
+export type TabInfo = { id: string; url: string; title: string; workspace: string; private?: boolean; session?: string; openedWindow?: string };
 
 type Handler<K extends keyof BadgerWebViewProps> = NonNullable<BadgerWebViewProps[K]>;
 
@@ -34,7 +37,9 @@ const plainHttp = new Set<string>();
 const upgrading = new Map<string, number>();
 const UPGRADE_MS = 60_000;
 const upgradingNow = (host: string) => Date.now() - (upgrading.get(host) ?? 0) < UPGRADE_MS;
-const NO_RULES: string[] = [];
+// a navigation let go starts within this, or the page stopped it
+// shortcut: one slower to start opens with the page's settings; have the native side report dropped navigations if that happens
+const START_MS = 3000;
 const PERMISSION_KINDS = { camera: "your camera", microphone: "your microphone", cameraAndMicrophone: "your camera and microphone" };
 
 type Props = {
@@ -51,7 +56,7 @@ type Props = {
 	views: Map<string, RefObject<BadgerWebViewRef | null>>;
 	onState: (id: string, state: NavigationState, isPrivate: boolean) => void;
 	onSession: (id: string, state: string) => void;
-	onOpenWindow: (url: string, opener: TabInfo) => void;
+	onOpenWindow: (url: string, windowId: string, opener: TabInfo) => void;
 	onDownload: (download: Download) => void;
 	onSiteChange: (site: string, change: SiteSettings) => void;
 };
@@ -61,6 +66,7 @@ export const Tab = memo(function Tab({ tab, visible, session, relay, settings, s
 	// the first address only: later ones go through view.load()
 	const [first] = useState(tab.url);
 	const [restore] = useState(tab.session);
+	const [opened] = useState(tab.openedWindow);
 	// the site whose settings and scripts the tab has: the one it's opening or showing
 	const [site, setSite] = useState(() => siteOf(tab.url));
 	const [warning, setWarning] = useState<Warning | null>(null);
@@ -68,6 +74,14 @@ export const Tab = memo(function Tab({ tab, visible, session, relay, settings, s
 	const later = useAfterRender();
 	// sites this tab has offered Direct for at a robot check, which reports its state many times
 	const offered = useRef(new Set<string>());
+	// the site of the page on screen, and the navigation let go that hasn't started yet
+	const shown = useRef(site);
+	const starting = useRef<object | null>(null);
+	// a navigation the page cancelled (window.stop(), a 204, a download) leaves the page on screen: its settings again,
+	// unless another navigation is on its way, which needs its own
+	const resync = () => {
+		if (!starting.current) setSite(shown.current);
+	};
 
 	useEffect(() => {
 		views.set(tab.id, view);
@@ -84,11 +98,12 @@ export const Tab = memo(function Tab({ tab, visible, session, relay, settings, s
 		() => ({ id: tab.private ? privateStore : tab.workspace, persistent: !tab.private, proxy: relay.proxy }),
 		[tab.private, tab.workspace, privateStore, relay.proxy]
 	);
+	const contentRules = useMemo(() => (here.route === "relay" ? [NO_PREFETCH] : []).concat(here.blocking ? rules : []), [here.route, here.blocking, rules]);
 
 	const offerDirect = (asking: string, why: string, then: () => void) =>
 		Alert.alert(
 			`Connect to ${asking} directly?`,
-			`${why} Through the relay, ${asking} sees the server's address, which others share. Direct connects from this phone: the site sees your address instead.`,
+			`${why} Through the relay, ${asking} sees the server's address, which others share. Direct connects from this phone: ${asking} sees your address instead, here and wherever other sites embed its content.`,
 			[
 				{ text: "Not now", style: "cancel" },
 				{
@@ -101,7 +116,7 @@ export const Tab = memo(function Tab({ tab, visible, session, relay, settings, s
 			]
 		);
 
-	const onShouldStart: Handler<"onShouldStart"> = async ({ nativeEvent: { requestId, url } }) => {
+	const onShouldStart: Handler<"onShouldStart"> = async ({ nativeEvent: { requestId, url, byApp } }) => {
 		const next = siteOf(url);
 		let target: URL | null = null;
 		try {
@@ -112,7 +127,9 @@ export const Tab = memo(function Tab({ tab, visible, session, relay, settings, s
 		const host = target?.hostname ?? "";
 		const instead = (to: string) => {
 			BadgerWebViewModule.resolveNavigation(requestId, false);
-			view.current?.load(to);
+			// the page's own navigations stay the page's, for SameSite cookies; a typed address mustn't get the page as its initiator
+			if (byApp) view.current?.load(to);
+			else view.current?.navigateFromPage(to);
 		};
 		if (target && next) {
 			if (target.protocol === "http:" && settings.httpsOnly && !plainHttp.has(next)) {
@@ -141,12 +158,27 @@ export const Tab = memo(function Tab({ tab, visible, session, relay, settings, s
 		}
 		setWarning(null);
 		// the new site's scripts, level and Lockdown first, then the page
+		const going = {};
+		starting.current = going;
 		setSite(next);
-		later(() => BadgerWebViewModule.resolveNavigation(requestId, true));
+		later(() => {
+			BadgerWebViewModule.resolveNavigation(requestId, true);
+			// WebKit says nothing when the page stops a navigation before it starts
+			setTimeout(() => {
+				if (starting.current !== going) return;
+				starting.current = null;
+				resync();
+			}, START_MS);
+		});
 	};
 
 	const onNavigationState: Handler<"onNavigationState"> = ({ nativeEvent: state }) => {
 		onState(tab.id, state, !!tab.private);
+		if (state.loading) starting.current = null;
+		else {
+			shown.current = siteOf(state.url);
+			resync();
+		}
 		// its https page opened: the upgrade worked
 		if (!state.loading && state.url.startsWith("https:")) upgrading.delete(hostOf(state.url));
 		const showing = siteOf(state.url);
@@ -176,7 +208,7 @@ export const Tab = memo(function Tab({ tab, visible, session, relay, settings, s
 
 	const onLoadError: Handler<"onLoadError"> = ({ nativeEvent: { url, code, certificateError } }) => {
 		// cancelled (another page started), or a page that became a download
-		if (code === -999 || code === 102) return;
+		if (code === -999 || code === 102) return resync();
 		// sent to https and it wouldn't open there
 		if (url.startsWith("https:") && upgradingNow(hostOf(url))) {
 			const plain = new URL(url);
@@ -208,18 +240,19 @@ export const Tab = memo(function Tab({ tab, visible, session, relay, settings, s
 				style={StyleSheet.absoluteFill}
 				url={first}
 				sessionState={restore}
+				openedWindow={opened}
 				onSessionState={({ nativeEvent }) => onSession(tab.id, nativeEvent.state)}
 				store={store}
 				level={here.level}
 				lockdown={here.lockdown}
-				contentRules={here.blocking ? rules : NO_RULES}
+				contentRules={contentRules}
 				pageScripts={scripts.page}
 				isolatedScripts={scripts.isolated}
 				fraudWarnings
 				askBeforeNavigating
 				onShouldStart={onShouldStart}
 				onNavigationState={onNavigationState}
-				onOpenWindow={({ nativeEvent }) => onOpenWindow(nativeEvent.url, tab)}
+				onOpenWindow={({ nativeEvent }) => onOpenWindow(nativeEvent.url, nativeEvent.windowId, tab)}
 				onDownload={({ nativeEvent }) => onDownload(nativeEvent)}
 				onPermissionRequest={onPermissionRequest}
 				onLoadError={onLoadError}
