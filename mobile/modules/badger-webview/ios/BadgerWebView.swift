@@ -579,7 +579,9 @@ final class OpenedWindow: NSObject, WKNavigationDelegate {
   }
 
   /// The tab becomes the delegate and decides what was held, as its own navigations.
-  func handOver(to tab: WKNavigationDelegate) {
+  // the tab's own type, not WKNavigationDelegate: there this method is optional, and a held decision
+  // that's never called crashes WebKit
+  func handOver(to tab: BadgerWebView) {
     webView.navigationDelegate = tab
     for (action, preferences, decide) in held {
       tab.webView(webView, decidePolicyFor: action, preferences: preferences, decisionHandler: decide)

@@ -1,4 +1,5 @@
 {
+	"cli": { "appVersionSource": "remote" },
 	"build": {
 		"simulator": {
 			"developmentClient": true,
@@ -8,8 +9,16 @@
 			"developmentClient": true,
 			"distribution": "internal"
 		},
+		"testflight": {
+			"autoIncrement": true
+		},
 		"production": {
+			"autoIncrement": true,
 			"env": { "BADGER_BROWSER_ENTITLEMENTS": "1" }
 		}
+	},
+	"submit": {
+		"testflight": { "ios": { "ascAppId": "6835703866" } },
+		"production": { "ios": { "ascAppId": "6835703866" } }
 	}
 }

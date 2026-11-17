@@ -13,7 +13,7 @@ const config: ExpoConfig = {
 	userInterfaceStyle: "automatic",
 	platforms: ["ios"],
 	ios: {
-		bundleIdentifier: "app.badger.ios",
+		bundleIdentifier: "com.badgerbrowser.app",
 		supportsTablet: true,
 		entitlements: browserEntitlements
 			? {
@@ -27,6 +27,8 @@ const config: ExpoConfig = {
 			NSFaceIDUsageDescription: "Face ID unlocks your saved data.",
 		},
 	},
+	owner: "atrin",
+	extra: { eas: { projectId: "8865b1d7-5785-4851-a2d5-49b36b2ba23f" } },
 	plugins: [
 		["expo-build-properties", { ios: { deploymentTarget: "26.0" } }],
 		["expo-secure-store", { faceIDPermission: "Face ID unlocks your saved data." }],
