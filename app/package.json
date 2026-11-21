@@ -21,29 +21,29 @@
 	"author": "",
 	"license": "AGPL-3.0-or-later",
 	"devDependencies": {
-		"@playwright/test": "^1.63.0",
-		"@simplewebauthn/server": "^14.0.3",
-		"eslint": "^10.12.0",
-		"prettier": "^3.9.9"
+		"@playwright/test": "^1.65.1",
+		"@simplewebauthn/server": "^14.1.0",
+		"eslint": "^10.15.0",
+		"prettier": "^3.10.1"
 	},
 	"dependencies": {
 		"@duckduckgo/autoconsent": "^16.49.0",
-		"@ghostery/adblocker": "^2.18.2",
+		"@ghostery/adblocker": "^2.20.3",
 		"@mercuryworkshop/bare-mux": "^2.1.9",
-		"@mercuryworkshop/epoxy-transport": "2.1.28",
+		"@mercuryworkshop/epoxy-transport": "2.1.29",
 		"@mercuryworkshop/scramjet": "1.1.0",
-		"@mercuryworkshop/wisp-js": "0.5.0",
+		"@mercuryworkshop/wisp-js": "0.5.3",
 		"@mozilla/readability": "^0.6.0",
 		"@peculiar/x509": "^2.1.0",
-		"adblock-rs": "0.13.5",
-		"dompurify": "^3.4.16",
+		"adblock-rs": "0.13.6",
+		"dompurify": "^3.4.18",
 		"esbuild": "^0.28.2",
-		"express": "^5.2.1",
+		"express": "^5.3.0",
 		"reflect-metadata": "^0.2.2",
 		"socks": "^2.8.10",
 		"socks-proxy-agent": "^10.1.0",
-		"tldts": "^7.4.16",
-		"ws": "^8.22.0"
+		"tldts": "^7.5.4",
+		"ws": "^8.23.0"
 	},
 	"pnpm": {
 		"onlyBuiltDependencies": [
